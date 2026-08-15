@@ -1,0 +1,17 @@
+node_modules/
+dist/
+data/store.json
+data/pdfs/
+data/pdf-cache/
+data/pdf-translations/
+data/codex-bridge/
+data/qq-codex-gateway/
+logs/
+tmp/
+tools/
+*.log
+.env
+.env.*
+scripts/qq-codex-gateway.env
+CONTINUE.md
+.DS_Store
