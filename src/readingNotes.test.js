@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { collectNotePages, excerptNote, formatNoteForWriter, parseReadingNotes } from "./readingNotes.js";
+import { collectNotePages, excerptNote, formatNoteForWriter, insertPageMarker, parseReadingNotes } from "./readingNotes.js";
 
 test("无页标记的手记视为整段", () => {
   const segments = parseReadingNotes("方法核心是时间干涉。");
@@ -31,6 +31,28 @@ test("按页标记拆分手记，并保留标记前的前言", () => {
 
 test("空手记返回空列表", () => {
   assert.deepEqual(parseReadingNotes("   \n"), []);
+});
+
+test("先写后标页：文末空标记把正文归到该页", () => {
+  const text = [
+    "本篇论文是关于利用TI-TMS理论设计线圈阵列。",
+    "",
+    "—— 第 1 页 · 2026/8/16 15:49:04 ——"
+  ].join("\n");
+  const segments = parseReadingNotes(text);
+  assert.equal(segments.length, 1);
+  assert.equal(segments[0].page, 1);
+  assert.equal(segments[0].content, "本篇论文是关于利用TI-TMS理论设计线圈阵列。");
+  assert.equal(segments[0].stamp, "2026/8/16 15:49:04");
+});
+
+test("插入页标记时，无标记的旧正文放在标记后面", () => {
+  const next = insertPageMarker("本篇论文是关于 TI-TMS。", 1, "2026/8/16 15:49:04");
+  assert.equal(next.startsWith("—— 第 1 页 · 2026/8/16 15:49:04 ——"), true);
+  assert.match(next, /本篇论文是关于 TI-TMS。/);
+  const segments = parseReadingNotes(next);
+  assert.equal(segments.length, 1);
+  assert.equal(segments[0].page, 1);
 });
 
 test("写入论文时带上文献标题和页码", () => {

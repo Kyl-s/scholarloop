@@ -44,7 +44,7 @@ import {
 } from "../pdfOcr.js";
 import { createSavedInterpretation, interpretationStorageKey, normalizeSavedInterpretation } from "../pdfInterpretation.js";
 import { openPdfExternal } from "../openPdfExternal.js";
-import { collectNotePages, parseReadingNotes } from "../readingNotes.js";
+import { collectNotePages, insertPageMarker, parseReadingNotes } from "../readingNotes.js";
 import { useAgentConfig } from "../agentConfig.js";
 import { estimateTokensFromText } from "../llmUsage.js";
 import UsageMeter from "./UsageMeter.jsx";
@@ -569,10 +569,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
 
   const insertNotesPageMarker = () => {
     const stamp = new Date().toLocaleString("zh-CN", { hour12: false });
-    const marker = `\n\n—— 第 ${pageNum} 页 · ${stamp} ——\n`;
     setReadingNotes((prev) => {
-      const base = String(prev || "");
-      const next = base.trim() ? `${base.replace(/\s+$/, "")}${marker}` : marker.trimStart();
+      const next = insertPageMarker(prev, pageNum, stamp);
       scheduleNotesSave(next);
       return next;
     });
@@ -3044,7 +3042,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
                   </div>
                 </div>
                 <p className="pdf-notes-hint">
-                  想到什么写什么。插入页码后，可在「阅读手记」和论文写作中打开这段，并跳回原文对应页。
+                  想到什么写什么。可先写再标页，或先标页再写；正文都会归到这一页，并可在「阅读手记」里跳回原文。
                 </p>
                 <div className="pdf-notes-toolbar">
                   <button type="button" onClick={insertNotesPageMarker} title="在文末插入当前页标记">

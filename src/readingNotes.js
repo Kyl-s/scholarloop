@@ -1,10 +1,35 @@
-const PAGE_MARKER = /——\s*第\s*(\d+)\s*页(?:\s*·\s*([^—\n]+))?\s*——/g;
+function pageMarkerRegex() {
+  return /——\s*第\s*(\d+)\s*页(?:\s*·\s*([^—\n]+))?\s*——/g;
+}
+
+export function formatPageMarker(page, stamp) {
+  const pageNum = Number(page) || 1;
+  const when = String(stamp || "").trim();
+  return when ? `—— 第 ${pageNum} 页 · ${when} ——` : `—— 第 ${pageNum} 页 ——`;
+}
+
+export function insertPageMarker(text, page, stamp) {
+  const marker = formatPageMarker(page, stamp);
+  const source = String(text || "").replace(/\s+$/, "");
+  if (!source.trim()) return `${marker}\n`;
+
+  const matches = [...source.matchAll(pageMarkerRegex())];
+  if (!matches.length) {
+    // 先写后标页：把标记放在正文前，避免正文变成「未标页」
+    return `${marker}\n${source}\n`;
+  }
+
+  const last = matches[matches.length - 1];
+  const afterLast = source.slice(last.index + last[0].length);
+  if (!afterLast.trim()) return `${source}\n\n${marker}\n`;
+  return `${source}\n\n${marker}\n`;
+}
 
 export function parseReadingNotes(text) {
   const source = String(text || "");
   if (!source.trim()) return [];
 
-  const matches = [...source.matchAll(PAGE_MARKER)];
+  const matches = [...source.matchAll(pageMarkerRegex())];
   if (!matches.length) {
     return [{ id: "all", page: null, stamp: "", content: source.trim() }];
   }
@@ -29,6 +54,18 @@ export function parseReadingNotes(text) {
       content
     });
   });
+
+  // 先写后标页时标记在文末，第一个页标记是空的：把前言归到这一页
+  if (
+    segments.length >= 2
+    && !segments[0].page
+    && segments[0].content
+    && segments[1].page
+    && !segments[1].content
+  ) {
+    segments[1] = { ...segments[1], content: segments[0].content };
+    segments.shift();
+  }
 
   return segments;
 }
