@@ -106,6 +106,8 @@ test("builds PDFMathTranslate-next args without legacy flags or API keys", () =>
   // 默认不发送 temperature，避免兼容接口拒参
   assert.equal(args.includes("--openai-send-temprature"), false);
   assert.match(args[args.indexOf("--custom-system-prompt") + 1], /Output Format|user message/i);
+  assert.match(args[args.indexOf("--custom-system-prompt") + 1], /author names|affiliations|laboratory/i);
+  assert.match(args[args.indexOf("--custom-system-prompt") + 1], /formulae|equations/i);
   assert.doesNotMatch(args[args.indexOf("--custom-system-prompt") + 1], /JSON array/i);
   assert.doesNotMatch(args[args.indexOf("--custom-system-prompt") + 1], /Output only the translation/i);
   assert.equal(args.some((arg) => ["-o", "-li", "-lo", "-s", "-t", "--config", "--config-file"].includes(arg)), false);

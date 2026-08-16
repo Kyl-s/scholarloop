@@ -11,6 +11,7 @@ import {
 import { fetchWithFallback, getProxyUrl } from "./proxy.js";
 import { applyPdfMathLlmProxyEnv } from "./pdfMathLlmProxy.js";
 import { applyPdf2zhListMarkerPatch } from "./pdfListMarkers.js";
+import { restorePreservedPageOutputs } from "./pdfPreserveRegions.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -1041,6 +1042,12 @@ async function executePdfMathTranslationPage(job, prepared, pageState) {
     pageState.progress = "本页排版译文已生成";
     pageState.monoFile = finalMono;
     pageState.dualFile = finalDual;
+    restorePreservedPageOutputs(
+      prepared.inputPath,
+      finalMono ? destMono : "",
+      finalDual ? destDual : "",
+      page
+    );
     recountCompletedPages(job);
     const reading = Number(job.priorityPage) || page;
     touchJob(job, {

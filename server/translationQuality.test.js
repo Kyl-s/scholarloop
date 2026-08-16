@@ -23,6 +23,8 @@ test("academic system prompt asks for fluent Simplified Chinese", () => {
   assert.match(ACADEMIC_ZH_SYSTEM_PROMPT, /Output Format|user message/i);
   assert.match(ACADEMIC_ZH_SYSTEM_PROMPT, /markdown fences|围栏/i);
   assert.match(ACADEMIC_ZH_SYSTEM_PROMPT, /URL|http|doi/i);
+  assert.match(ACADEMIC_ZH_SYSTEM_PROMPT, /author names|affiliations|laboratory/i);
+  assert.match(ACADEMIC_ZH_SYSTEM_PROMPT, /formulae|equations/i);
 });
 
 test("text translate prompt preserves ScholarLoop tokens when requested", () => {

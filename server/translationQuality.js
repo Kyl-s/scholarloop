@@ -17,6 +17,9 @@ export const ACADEMIC_ZH_SYSTEM_PROMPT = [
   "Style: natural sentence structure; accurate meaning; consistent terminology",
   "(noninvasive→非侵入性, recruit→募集, stimulation→刺激); keep common acronyms (DBS, TI, c-fos, EEG).",
   "Keep placeholders, tags, pure numbers/units/math tokens unchanged when they are not prose.",
+  "Do not translate author names, author superscripts, affiliations, laboratory/institution addresses,",
+  "correspondence lines, emails, or postal lines: copy that text exactly and keep the original line breaks.",
+  "Do not translate mathematical formulae, equations, or isolated variables; copy them exactly.",
   "Never translate URLs, DOIs, or web links (http/https/www/doi.org): copy them exactly as in the input.",
   "Follow the Output Format and Structure Rules in the user message for this request.",
   "Never wrap the answer in markdown fences or extra commentary."
@@ -36,13 +39,14 @@ export function buildTextTranslateSystemPrompt({ preserveTokens = false } = {}) 
     "1) 术语准确统一：同一概念全文用同一译法（如 noninvasive 一律译「非侵入性」，不要混用「无创」；recruit 用「募集」；stimulation 用「刺激」）。",
     "2) 译文自然通顺，像中文论文，避免机翻腔与电报式断句。",
     "3) 专有名词、基因/蛋白名、常见缩写（DBS、TI、c-fos、EEG 等）按学界习惯保留英文或中英并用。",
-    "4) 保持段落与标点结构；不要增删论点或数据。",
-    "5) 纯数字、单位、公式、变量名、图注编号（Fig. 1 / (A)）尽量原样保留。",
-    "6) 网址、DOI、网页链接（http/https/www/doi.org 等）一律不翻译，原样保留。",
-    "7) 只输出译文，不要解释或补充。"
+    "4) 作者姓名、上标、单位/实验室、通讯作者、邮箱、邮寄地址一律不翻译，原样抄写并保留换行。",
+    "5) 保持段落与标点结构；不要增删论点或数据。",
+    "6) 纯数字、单位、公式、变量名、图注编号（Fig. 1 / (A)）原样保留，不要把公式译成中文。",
+    "7) 网址、DOI、网页链接（http/https/www/doi.org 等）一律不翻译，原样保留。",
+    "8) 只输出译文，不要解释或补充。"
   ];
   if (preserveTokens) {
-    parts.push("8) 原样保留所有形如 __SCHOLARLOOP_KEEP_数字__ 与 __SCHOLARLOOP_URL_数字__ 的占位符，不要翻译、删除、改写或添加空格。");
+    parts.push("9) 原样保留所有形如 __SCHOLARLOOP_KEEP_数字__ 与 __SCHOLARLOOP_URL_数字__ 的占位符，不要翻译、删除、改写或添加空格。");
   }
   return parts.join("");
 }
