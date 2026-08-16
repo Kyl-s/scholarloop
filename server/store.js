@@ -11,6 +11,7 @@ import {
   splitPathTask as splitPathTaskInPath
 } from "./path.js";
 import { clearPdfCache, deletePdfSource } from "./pdfCache.js";
+import { parseNoteAttachments, stripNoteAttachments } from "../src/noteAttachments.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, "..", "data");
@@ -446,8 +447,9 @@ export function normalizeNoteInput(value = {}, base = {}) {
 }
 
 function firstLineTitle(content) {
-  const line = String(content || "").split(/\r?\n/).find((item) => item.trim()) || "";
-  return line.trim().slice(0, 40);
+  const line = stripNoteAttachments(content).split(/\r?\n/).find((item) => item.trim()) || "";
+  if (line) return line.trim().slice(0, 40);
+  return parseNoteAttachments(content)[0]?.name || "";
 }
 
 function normalizeStoredNote(value) {

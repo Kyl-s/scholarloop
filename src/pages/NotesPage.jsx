@@ -1,7 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Plus, Save, Search, StickyNote, Trash2, X } from "lucide-react";
 import { api } from "../api.js";
+import { fileToBase64, insertAtCursor, pastedFiles } from "../noteAttachments.js";
 import { useData } from "../store.jsx";
+import NoteAttachBar from "../components/NoteAttachBar.jsx";
+import NoteAttachmentThumbs from "../components/NoteAttachmentThumbs.jsx";
 import ReadingNotesList from "../components/ReadingNotesList.jsx";
 import StandaloneNotesList from "../components/StandaloneNotesList.jsx";
 import { Badge, Button, SectionHead, Segmented } from "../components/ui.jsx";
@@ -17,6 +20,7 @@ export default function NotesPage({ onReadPdf }) {
   const [error, setError] = useState("");
   const [draft, setDraft] = useState(null);
   const [saving, setSaving] = useState(false);
+  const contentRef = useRef(null);
 
   useEffect(() => {
     let alive = true;
@@ -79,6 +83,43 @@ export default function NotesPage({ onReadPdf }) {
     }
   };
 
+  const insertAttachment = (token) => {
+    setDraft((current) => {
+      if (!current) return current;
+      const el = contentRef.current;
+      const value = current.content || "";
+      const start = el ? el.selectionStart : value.length;
+      const end = el ? el.selectionEnd : value.length;
+      const { next, caret } = insertAtCursor(value, token, start, end);
+      requestAnimationFrame(() => {
+        if (!el) return;
+        el.focus();
+        el.selectionStart = el.selectionEnd = caret;
+      });
+      return { ...current, content: next };
+    });
+  };
+
+  const handleContentPaste = async (event) => {
+    const files = pastedFiles(event);
+    if (!files.length) return;
+    event.preventDefault();
+    setError("");
+    try {
+      for (const file of files) {
+        const data = await fileToBase64(file);
+        const saved = await api.uploadNoteFile({
+          name: file.name || "粘贴图片.png",
+          mime: file.type || "image/png",
+          data
+        });
+        insertAttachment(saved.token.endsWith("\n") ? saved.token : `${saved.token}\n`);
+      }
+    } catch (err) {
+      setError(err.message || "粘贴附件失败");
+    }
+  };
+
   const removeDraftNote = async () => {
     if (!draft?.id) {
       setDraft(null);
@@ -112,8 +153,8 @@ export default function NotesPage({ onReadPdf }) {
           value={tab}
           onChange={setTab}
           options={[
-            { value: "reading", label: `阅读手记${items.length ? ` ${items.length}` : ""}` },
-            { value: "free", label: `手记${notes.length ? ` ${notes.length}` : ""}` }
+            { value: "reading", label: "阅读手记" },
+            { value: "free", label: "手记" }
           ]}
         />
         <div className="toolbar-search">
@@ -162,12 +203,16 @@ export default function NotesPage({ onReadPdf }) {
                 <label className="memory-field">
                   <span>正文</span>
                   <textarea
+                    ref={contentRef}
                     rows={12}
                     value={draft.content}
                     onChange={(event) => setDraft((current) => ({ ...current, content: event.target.value }))}
-                    placeholder="随便写。可以是想法、提纲、会议记录，不必挂在某篇论文上。"
+                    onPaste={handleContentPaste}
+                    placeholder="随便写。可以是想法、提纲、会议记录，不必挂在某篇论文上。可插入图片、文件，也可直接粘贴截图。"
                   />
                 </label>
+                <NoteAttachBar onInsert={insertAttachment} onError={setError} />
+                <NoteAttachmentThumbs text={draft.content} />
                 <div className="standalone-note-editor-actions">
                   {draft.id ? (
                     <Button type="button" variant="ghost" size="sm" icon={Trash2} onClick={removeDraftNote}>删除</Button>

@@ -40,6 +40,7 @@ import {
   updatePathTaskStatus,
   appendPathLog
 } from "./store.js";
+import { getNoteFile, saveNoteFile } from "./noteFiles.js";
 import { getProxyUrl, fetchWithFallback } from "./proxy.js";
 import { interpretPdf } from "./pdfInterpret.js";
 import { mergeUsages, parseChatUsage } from "../src/llmUsage.js";
@@ -949,6 +950,23 @@ app.put("/api/notes/:id", (req, res) => {
 app.delete("/api/notes/:id", (req, res) => {
   removeNote(req.params.id);
   res.json({ ok: true });
+});
+
+app.post("/api/note-files", (req, res) => {
+  try {
+    res.json(saveNoteFile(req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get("/api/note-files/:id", (req, res) => {
+  const file = getNoteFile(req.params.id);
+  if (!file) return res.status(404).json({ error: "附件不存在" });
+  res.setHeader("Content-Type", file.mime || "application/octet-stream");
+  const mode = file.kind === "image" ? "inline" : "attachment";
+  res.setHeader("Content-Disposition", `${mode}; filename*=UTF-8''${encodeURIComponent(file.name || "file")}`);
+  res.sendFile(file.path);
 });
 
 app.post("/api/drafts/:id/export", (req, res) => {

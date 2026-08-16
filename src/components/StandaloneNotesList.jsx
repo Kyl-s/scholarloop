@@ -1,5 +1,6 @@
 import { FileText, Pencil, StickyNote } from "lucide-react";
 import { excerptNote } from "../readingNotes.js";
+import NoteAttachmentThumbs from "./NoteAttachmentThumbs.jsx";
 import { Badge, Button, EmptyState } from "./ui.jsx";
 
 function formatStamp(value) {
@@ -45,6 +46,7 @@ export default function StandaloneNotesList({
             <Badge tone="neutral">{String(item.content || "").trim().length} 字</Badge>
           </div>
           <p>{item.content ? excerptNote(item.content, 360) : "（还没有正文）"}</p>
+          <NoteAttachmentThumbs text={item.content} />
           <div className="standalone-note-actions">
             {onOpen ? (
               <Button type="button" variant="ghost" size="sm" icon={Pencil} onClick={() => onOpen(item)}>

@@ -45,6 +45,9 @@ import {
 import { createSavedInterpretation, interpretationStorageKey, normalizeSavedInterpretation } from "../pdfInterpretation.js";
 import { openPdfExternal } from "../openPdfExternal.js";
 import { caretAfterLeadingMarker, collectNotePages, insertPageMarker, normalizeReadingNotes, parseReadingNotes } from "../readingNotes.js";
+import { fileToBase64, insertAtCursor, pastedFiles } from "../noteAttachments.js";
+import NoteAttachBar from "./NoteAttachBar.jsx";
+import NoteAttachmentThumbs from "./NoteAttachmentThumbs.jsx";
 import { useAgentConfig } from "../agentConfig.js";
 import { estimateTokensFromText } from "../llmUsage.js";
 import UsageMeter from "./UsageMeter.jsx";
@@ -569,6 +572,42 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
     setReadingNotes(next);
     setNotesSaveStatus("saving");
     scheduleNotesSave(next);
+  };
+
+  const insertNotesAttachment = (token) => {
+    const el = notesTextareaRef.current;
+    setReadingNotes((prev) => {
+      const start = el ? el.selectionStart : prev.length;
+      const end = el ? el.selectionEnd : prev.length;
+      const { next, caret } = insertAtCursor(prev, token, start, end);
+      scheduleNotesSave(next);
+      requestAnimationFrame(() => {
+        if (!el) return;
+        el.focus();
+        el.selectionStart = el.selectionEnd = caret;
+      });
+      return next;
+    });
+    setNotesSaveStatus("saving");
+  };
+
+  const handleNotesPaste = async (event) => {
+    const files = pastedFiles(event);
+    if (!files.length) return;
+    event.preventDefault();
+    try {
+      for (const file of files) {
+        const data = await fileToBase64(file);
+        const saved = await api.uploadNoteFile({
+          name: file.name || "粘贴图片.png",
+          mime: file.type || "image/png",
+          data
+        });
+        insertNotesAttachment(saved.token.endsWith("\n") ? saved.token : `${saved.token}\n`);
+      }
+    } catch (err) {
+      window.alert(err.message || "粘贴附件失败");
+    }
   };
 
   const insertNotesPageMarker = () => {
@@ -3084,6 +3123,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
                   <button type="button" onClick={insertNotesPageMarker} title="在文末插入当前页标记">
                     插入第 {pageNum} 页
                   </button>
+                  <NoteAttachBar compact onInsert={insertNotesAttachment} onError={(message) => window.alert(message)} />
                   <button type="button" onClick={clearReadingNotes} disabled={!readingNotes} title="清空本篇手记">
                     清空
                   </button>
@@ -3108,9 +3148,11 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
                   className="pdf-notes-textarea"
                   value={readingNotes}
                   onChange={handleNotesChange}
-                  placeholder={"例如：\n- 方法核心是……\n- 图 2 有点反直觉\n- 和某篇工作的差异：……"}
+                  onPaste={handleNotesPaste}
+                  placeholder={"例如：\n- 方法核心是……\n- 图 2 有点反直觉\n- 和某篇工作的差异：……\n也可插入图片、文件，或直接粘贴截图。"}
                   spellCheck={false}
                 />
+                <NoteAttachmentThumbs text={readingNotes} />
                 <div className="pdf-notes-foot">
                   <span>{readingNotes.length ? `${readingNotes.length} 字` : "空白手记"}</span>
                   <span>{paperId ? "随文献缓存同步" : "未关联文献库 · 仅浏览器本地"}</span>

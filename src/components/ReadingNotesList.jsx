@@ -1,5 +1,6 @@
 import { BookOpen, FileText, MapPin, StickyNote } from "lucide-react";
 import { excerptNote } from "../readingNotes.js";
+import NoteAttachmentThumbs from "./NoteAttachmentThumbs.jsx";
 import { Badge, Button, EmptyState } from "./ui.jsx";
 
 function formatStamp(value) {
@@ -55,6 +56,7 @@ export default function ReadingNotesList({
                   {segment.stamp ? <em>{segment.stamp}</em> : null}
                 </div>
                 <p>{segment.content ? excerptNote(segment.content, 360) : "（仅页码标记，尚无文字）"}</p>
+                <NoteAttachmentThumbs text={segment.content} />
                 <div className="reading-note-segment-actions">
                   {onOpen ? (
                     <Button

@@ -95,7 +95,10 @@ export function parseReadingNotes(text) {
 }
 
 export function excerptNote(text, max = 140) {
-  const value = String(text || "").replace(/\s+/g, " ").trim();
+  const value = String(text || "")
+    .replace(/(!?)\[([^\]]*)\]\(\/api\/note-files\/[0-9a-f-]{36}\)/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   if (!value) return "";
   return value.length > max ? `${value.slice(0, max)}…` : value;
 }
