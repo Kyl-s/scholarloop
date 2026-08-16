@@ -128,6 +128,21 @@ export function getPdfCache(paperId) {
   }
 }
 
+export function listPdfCaches() {
+  if (!fs.existsSync(CACHE_DIR)) return [];
+  return fs.readdirSync(CACHE_DIR)
+    .filter((name) => name.endsWith(".json") && !name.endsWith(".tmp.json"))
+    .map((name) => {
+      try {
+        const paperId = decodeURIComponent(name.slice(0, -".json".length));
+        return getPdfCache(paperId);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
 export function savePdfCache(paperId, patch = {}) {
   const file = cacheFile(paperId);
   if (!file) throw new Error("文献 ID 不能为空");

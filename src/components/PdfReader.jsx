@@ -44,6 +44,7 @@ import {
 } from "../pdfOcr.js";
 import { createSavedInterpretation, interpretationStorageKey, normalizeSavedInterpretation } from "../pdfInterpretation.js";
 import { openPdfExternal } from "../openPdfExternal.js";
+import { collectNotePages, parseReadingNotes } from "../readingNotes.js";
 import { useAgentConfig } from "../agentConfig.js";
 import { estimateTokensFromText } from "../llmUsage.js";
 import UsageMeter from "./UsageMeter.jsx";
@@ -326,7 +327,7 @@ function EvidenceLinks({ items, onJump }) {
   );
 }
 
-export default function PdfReader({ url, title, doi, paperId, onClose }) {
+export default function PdfReader({ url, title, doi, paperId, onClose, initialPage, initialTab }) {
   const { settings } = useData();
   const canvasRef = useRef(null);
   const canvasWrapRef = useRef(null);
@@ -401,7 +402,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
   const [layoutReloadToken, setLayoutReloadToken] = useState(0);
   const [showTextDetails, setShowTextDetails] = useState(false);
   const [showPanel, setShowPanel] = useState(true);
-  const [panelTab, setPanelTab] = useState("translate");
+  const [panelTab, setPanelTab] = useState(initialTab === "notes" || initialTab === "ai" ? initialTab : "translate");
   /** 右侧面板放大模式：在翻译与 AI 解读之间切换时保持 */
   const [aiFocus, setAiFocus] = useState(false);
   /** select=选文字复制；hand=拖拽平移 PDF 视图 */
@@ -437,6 +438,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
   const pageIsOcr = !textByPage[pageNum] && Boolean(ocrPageTexts[pageNum]);
   const hasPageSource = Boolean(doc || imageSource);
   const paragraphs = useMemo(() => splitParagraphs(pageText), [pageText]);
+  const notePages = useMemo(() => collectNotePages(parseReadingNotes(readingNotes)), [readingNotes]);
 
   // 版式翻译结果：上方「原文/译文/中英对照」直接切换，不走侧栏按钮
   const layoutDisplayVariant = layoutVariantForDisplayMode(displayMode);
@@ -584,7 +586,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
   };
 
   const clearReadingNotes = () => {
-    if (!window.confirm("清空本篇随记？此操作不可撤销。")) return;
+    if (!window.confirm("清空本篇手记？此操作不可撤销。")) return;
     setReadingNotes("");
     setNotesSaveStatus("saving");
     scheduleNotesSave("");
@@ -827,7 +829,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
       }).promise;
       setDoc(pdf);
       setNumPages(pdf.numPages);
-      setPageNum(1);
+      const startPage = Number(initialPage) > 0 ? Math.min(Number(initialPage), pdf.numPages) : 1;
+      setPageNum(startPage);
       setLoading(false);
 
       const texts = { ...cachedTextByPage };
@@ -928,6 +931,19 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
     if (url || doi) loadSource({ url, doi });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url, doi]);
+
+  useEffect(() => {
+    if (Number(initialPage) > 0 && numPages) {
+      setPageNum(Math.min(Number(initialPage), numPages));
+    }
+  }, [initialPage, numPages]);
+
+  useEffect(() => {
+    if (initialTab === "notes" || initialTab === "ai" || initialTab === "translate") {
+      setShowPanel(true);
+      setPanelTab(initialTab);
+    }
+  }, [initialTab]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2644,7 +2660,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
                 options={[
                   { value: "translate", label: "版式翻译" },
                   { value: "ai", label: "AI 解读" },
-                  { value: "notes", label: "随记" }
+                  { value: "notes", label: "手记" }
                 ]}
               />
               <button
@@ -3011,7 +3027,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
                 <div className="pdf-panel-head">
                   <div>
                     <StickyNote size={15} />
-                    <strong>阅读随记</strong>
+                    <strong>阅读手记</strong>
                     <span>
                       {notesSaveStatus === "saving"
                         ? "保存中…"
@@ -3028,16 +3044,31 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
                   </div>
                 </div>
                 <p className="pdf-notes-hint">
-                  想到什么写什么，无需成稿。可插入当前页标记，方便回头对照。
+                  想到什么写什么。插入页码后，可在「阅读手记」和论文写作中打开这段，并跳回原文对应页。
                 </p>
                 <div className="pdf-notes-toolbar">
                   <button type="button" onClick={insertNotesPageMarker} title="在文末插入当前页标记">
                     插入第 {pageNum} 页
                   </button>
-                  <button type="button" onClick={clearReadingNotes} disabled={!readingNotes} title="清空本篇随记">
+                  <button type="button" onClick={clearReadingNotes} disabled={!readingNotes} title="清空本篇手记">
                     清空
                   </button>
                 </div>
+                {notePages.length ? (
+                  <div className="pdf-notes-jumps" aria-label="手记页码">
+                    {notePages.map((page) => (
+                      <button
+                        key={page}
+                        type="button"
+                        className={page === pageNum ? "active" : ""}
+                        onClick={() => setPageNum(page)}
+                        title={`跳到第 ${page} 页`}
+                      >
+                        第 {page} 页
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
                 <textarea
                   ref={notesTextareaRef}
                   className="pdf-notes-textarea"
@@ -3047,7 +3078,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
                   spellCheck={false}
                 />
                 <div className="pdf-notes-foot">
-                  <span>{readingNotes.length ? `${readingNotes.length} 字` : "空白随记"}</span>
+                  <span>{readingNotes.length ? `${readingNotes.length} 字` : "空白手记"}</span>
                   <span>{paperId ? "随文献缓存同步" : "未关联文献库 · 仅浏览器本地"}</span>
                 </div>
               </div>
@@ -3364,10 +3395,10 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
               type="button"
               className="pdf-panel-expand-btn is-notes"
               onClick={() => expandSidePanel("notes")}
-              title="展开阅读随记"
+              title="展开阅读手记"
             >
               <StickyNote size={15} />
-              <span>随记</span>
+              <span>手记</span>
             </button>
           </div>
         )}

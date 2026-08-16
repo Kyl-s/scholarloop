@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Plus, Save, FileDown, Trash2, ChevronUp, ChevronDown, Quote, FileText, Loader2, BookOpen, PenLine } from "lucide-react";
+import { Plus, Save, FileDown, Trash2, ChevronUp, ChevronDown, Quote, FileText, Loader2, BookOpen, PenLine, StickyNote } from "lucide-react";
 import { useData } from "../store.jsx";
 import { api } from "../api.js";
+import { formatNoteForWriter } from "../readingNotes.js";
+import ReadingNotesList from "../components/ReadingNotesList.jsx";
 import { Badge, Button, EmptyState, IconButton, Modal, Segmented, TextArea } from "../components/ui.jsx";
 
 const TEMPLATES = {
@@ -37,13 +39,18 @@ const TEMPLATES = {
   }
 };
 
-export default function WriterPage() {
+export default function WriterPage({ onReadPdf }) {
   const { drafts, library, saveDraft, deleteDraft } = useData();
   const [currentId, setCurrentId] = useState(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState("");
   const [citationOpen, setCitationOpen] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [noteItems, setNoteItems] = useState([]);
+  const [noteQuery, setNoteQuery] = useState("");
+  const [notesLoading, setNotesLoading] = useState(false);
+  const [notesError, setNotesError] = useState("");
   const [activeSection, setActiveSection] = useState(0);
   const saveTimer = useRef(null);
 
@@ -88,6 +95,45 @@ export default function WriterPage() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const openNotesPicker = async () => {
+    setNotesOpen(true);
+    setNotesLoading(true);
+    setNotesError("");
+    try {
+      const data = await api.getReadingNotes();
+      setNoteItems(Array.isArray(data) ? data : []);
+    } catch (err) {
+      setNotesError(err.message || "读取手记失败");
+    } finally {
+      setNotesLoading(false);
+    }
+  };
+
+  const insertNote = (item, segment) => {
+    if (!draft) return;
+    const snippet = formatNoteForWriter({
+      title: item.title,
+      page: segment.page,
+      content: segment.content
+    });
+    const section = draft.sections[activeSection];
+    const gap = section.content && !section.content.endsWith("\n") ? "\n\n" : section.content ? "\n" : "";
+    const content = `${section.content}${gap}${snippet}`;
+    const sections = draft.sections.map((s, i) => (i === activeSection ? { ...s, content } : s));
+    update({ sections });
+    setNotesOpen(false);
+    setNoteQuery("");
+    showToast("已插入手记");
+  };
+
+  const openNoteSource = (item, segment) => {
+    if (!item.pdfUrl && !item.localPdf) return;
+    onReadPdf?.(item.pdfUrl, item.title, item.doi, item.paperId, {
+      page: segment?.page || 1,
+      tab: "notes"
+    });
   };
 
   const insertCitation = (paper) => {
@@ -159,6 +205,7 @@ export default function WriterPage() {
             <div className="editor-toolbar">
               <div className="editor-type"><Badge tone="type">{TEMPLATES[draft.type]?.label || "论文"}</Badge></div>
               <div className="editor-actions">
+                <Button variant="ghost" size="sm" icon={StickyNote} onClick={openNotesPicker}>插入手记</Button>
                 <Button variant="ghost" size="sm" icon={Quote} onClick={() => setCitationOpen(true)}>插入引用</Button>
                 <Button variant="ghost" size="sm" icon={FileDown} onClick={exportMarkdown}>导出 MD</Button>
                 <Button size="sm" icon={Save} onClick={() => update({})}>保存</Button>
@@ -195,7 +242,7 @@ export default function WriterPage() {
                           const sections = draft.sections.map((s, si) => (si === i ? { ...s, content: e.target.value } : s));
                           scheduleSave({ sections });
                         }}
-                        placeholder="在这一节写下内容。需要引用时，点击上方“插入引用”。"
+                        placeholder="在这一节写下内容。可插入手记或文献引用。"
                       />
                     ) : null}
                   </section>
@@ -220,6 +267,26 @@ export default function WriterPage() {
               </button>
             ))}
           </div>
+        </Modal>
+      ) : null}
+
+      {notesOpen && draft ? (
+        <Modal title="插入阅读手记" onClose={() => setNotesOpen(false)} width="720px">
+          <p className="citation-note">把 PDF 里写过的手记插入当前章节。也可以先跳回原文对应页，核对后再写入。</p>
+          <div className="writer-note-search">
+            <input value={noteQuery} onChange={(event) => setNoteQuery(event.target.value)} placeholder="筛选文献或手记内容..." />
+          </div>
+          {notesError ? <p className="error-text">{notesError}</p> : null}
+          {notesLoading ? <p className="notes-loading">正在读取手记…</p> : (
+            <ReadingNotesList
+              items={noteItems}
+              query={noteQuery}
+              onOpen={openNoteSource}
+              onInsert={insertNote}
+              insertLabel="插入这段"
+              emptyDesc="还没有阅读手记。打开 PDF 右侧「手记」，写完并插入页码后，就能在这里选入论文。"
+            />
+          )}
         </Modal>
       ) : null}
 

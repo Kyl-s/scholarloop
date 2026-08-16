@@ -39,7 +39,8 @@ import {
 import { getProxyUrl, fetchWithFallback } from "./proxy.js";
 import { interpretPdf } from "./pdfInterpret.js";
 import { mergeUsages, parseChatUsage } from "../src/llmUsage.js";
-import { clearPdfCache, getPdfCache, resolveLocalPdfPath, resolvePaperPdfPath, savePdfCache, savePdfSource } from "./pdfCache.js";
+import { clearPdfCache, getPdfCache, listPdfCaches, resolveLocalPdfPath, resolvePaperPdfPath, savePdfCache, savePdfSource } from "./pdfCache.js";
+import { parseReadingNotes } from "../src/readingNotes.js";
 import { fetchPdfWithOpenAccessFallback } from "./pdfResolve.js";
 import {
   cancelPdfMathTranslation,
@@ -595,6 +596,30 @@ app.post("/api/agent/models", async (req, res) => {
 });
 
 app.get("/api/library", (_req, res) => res.json(getData().library));
+
+app.get("/api/reading-notes", (_req, res) => {
+  const library = getData().library || [];
+  const byId = Object.fromEntries(library.map((paper) => [paper.id, paper]));
+  const items = listPdfCaches()
+    .filter((cache) => String(cache.readingNotes || "").trim())
+    .map((cache) => {
+      const paper = byId[cache.paperId] || {};
+      return {
+        paperId: cache.paperId,
+        title: paper.title || cache.paperId,
+        authors: paper.authors || [],
+        year: paper.year || "",
+        doi: paper.doi || "",
+        pdfUrl: paper.pdfUrl || cache.pdfUrl || "",
+        localPdf: Boolean(paper.localPdf || cache.pdfUrl),
+        savedAt: cache.savedAt || "",
+        notes: cache.readingNotes,
+        segments: parseReadingNotes(cache.readingNotes)
+      };
+    })
+    .sort((a, b) => String(b.savedAt || "").localeCompare(String(a.savedAt || "")));
+  res.json(items);
+});
 
 app.get("/api/memories", (_req, res) => res.json(getMemories()));
 

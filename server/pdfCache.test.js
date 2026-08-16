@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mergePdfCache, normalizePdfCache } from "./pdfCache.js";
+import { listPdfCaches, mergePdfCache, normalizePdfCache } from "./pdfCache.js";
 
 test("normalizes and merges PDF cache without carrying API configuration", () => {
   const first = normalizePdfCache({
@@ -25,4 +25,13 @@ test("normalizes and merges PDF cache without carrying API configuration", () =>
   assert.equal(merged.paragraphTranslations["1:0"], "段落译文");
   assert.equal(merged.readingNotes, "第 3 页：方法关键是 TI");
   assert.equal(merged.paperId, "paper-1");
+});
+
+test("listPdfCaches 返回数组", () => {
+  const caches = listPdfCaches();
+  assert.equal(Array.isArray(caches), true);
+  for (const cache of caches) {
+    assert.equal(typeof cache.paperId, "string");
+    assert.equal(typeof cache.readingNotes, "string");
+  }
 });

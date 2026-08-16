@@ -71,6 +71,7 @@ export const api = {
     method: "PUT",
     body: JSON.stringify(body)
   }),
+  getReadingNotes: () => request("/api/reading-notes"),
   getPdfCache: (id) => request(`/api/library/${encodeURIComponent(id)}/pdf-cache`),
   savePdfCache: (id, body) => request(`/api/library/${encodeURIComponent(id)}/pdf-cache`, {
     method: "PUT",

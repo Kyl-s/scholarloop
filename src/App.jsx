@@ -6,6 +6,7 @@ import LibraryPage from "./pages/LibraryPage.jsx";
 import PathPage from "./pages/PathPage.jsx";
 import JournalsPage from "./pages/JournalsPage.jsx";
 import WriterPage from "./pages/WriterPage.jsx";
+import NotesPage from "./pages/NotesPage.jsx";
 import SettingsPage from "./pages/SettingsPage.jsx";
 import AgentFocusPage from "./pages/AgentFocusPage.jsx";
 import MemoryPage from "./pages/MemoryPage.jsx";
@@ -38,7 +39,14 @@ export default function App() {
     setView((prev) => ({ ...prev, page: "library", subtitle: "文献库" }));
   };
 
-  const openReader = (pdfUrl, title, doi, paperId) => setReader({ url: pdfUrl, title: title || "PDF 文档", doi, paperId });
+  const openReader = (pdfUrl, title, doi, paperId, options = {}) => setReader({
+    url: pdfUrl,
+    title: title || "PDF 文档",
+    doi,
+    paperId,
+    page: Number(options.page) > 0 ? Number(options.page) : null,
+    tab: options.tab || null
+  });
 
   return (
     <Shell
@@ -65,10 +73,21 @@ export default function App() {
       {view.page === "memory" ? <MemoryPage /> : null}
       {view.page === "path" ? <PathPage onNavigate={navigate} /> : null}
       {view.page === "journals" ? <JournalsPage /> : null}
-      {view.page === "writer" ? <WriterPage /> : null}
+      {view.page === "notes" ? <NotesPage onReadPdf={openReader} /> : null}
+      {view.page === "writer" ? <WriterPage onReadPdf={openReader} /> : null}
       {view.page === "agent" ? <AgentFocusPage onOpenQuick={() => setQuickAgentOpen(true)} onNavigate={navigate} /> : null}
       {view.page === "settings" ? <SettingsPage onNavigate={navigate} /> : null}
-      {reader ? <PdfReader url={reader.url} title={reader.title} doi={reader.doi} paperId={reader.paperId} onClose={() => setReader(null)} /> : null}
+      {reader ? (
+        <PdfReader
+          url={reader.url}
+          title={reader.title}
+          doi={reader.doi}
+          paperId={reader.paperId}
+          initialPage={reader.page}
+          initialTab={reader.tab}
+          onClose={() => setReader(null)}
+        />
+      ) : null}
     </Shell>
   );
 }
