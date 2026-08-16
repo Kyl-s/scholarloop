@@ -4,6 +4,7 @@ import { api } from "../api.js";
 import { useData } from "../store.jsx";
 import { Badge, Button, SectionHead } from "../components/ui.jsx";
 import ApiConfigForm from "../components/ApiConfigForm.jsx";
+import UsageStats from "../components/UsageStats.jsx";
 
 export default function SettingsPage({ onNavigate }) {
   const { meta, library, path, drafts, refresh, updatePath, settings, updateSettings } = useData();
@@ -103,6 +104,7 @@ export default function SettingsPage({ onNavigate }) {
           <div className="settings-head"><KeyRound size={17} /> API 配置</div>
           <p className="institution-intro">可添加多个 OpenAI 兼容供应商（DeepSeek、Kimi、通义等），随时切换当前启用的一套。Agent、PDF 翻译与解读、AI 检索都使用当前启用的配置。</p>
           <ApiConfigForm />
+          <UsageStats />
           <div className="settings-note">
             <Info size={15} />
             <p>{meta?.hasOpenAI

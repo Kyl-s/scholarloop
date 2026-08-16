@@ -3,6 +3,8 @@
  * 使用用户 Agent 配置（baseUrl/apiKey/model），与 /api/translate 一致
  */
 
+import { mergeUsages, parseChatUsage } from "../src/llmUsage.js";
+
 const SECTION_RE =
   /\b(abstract|introduction|background|related\s+work|method|methods|methodology|approach|experiment|experiments|evaluation|results?|discussion|conclusion|conclusions|limitation|limitations|future\s+work|summary|贡献|摘要|引言|背景|相关工作|方法|实验|结果|讨论|结论|局限|未来工作)\b/i;
 
@@ -241,7 +243,7 @@ async function callChat({ baseUrl, apiKey, model, system, user, maxTokens = 5000
   const data = await r.json();
   const content = String(data.choices?.[0]?.message?.content || "").trim();
   if (!content) throw new Error("模型返回为空");
-  return content;
+  return { content, usage: parseChatUsage(data) };
 }
 
 function systemPrompt(mode) {
@@ -343,6 +345,13 @@ export async function interpretPdf({
   }
 
   const q = String(question || "").trim();
+  const usages = [];
+
+  const runChat = async (opts) => {
+    const out = await callChat(opts);
+    if (out?.usage) usages.push(out.usage);
+    return out.content;
+  };
 
   // 追问模式
   if (q) {
@@ -360,7 +369,7 @@ export async function interpretPdf({
       .join("\n\n");
 
     const attempt = () =>
-      callChat({
+      runChat({
         baseUrl,
         apiKey,
         model,
@@ -389,7 +398,9 @@ export async function interpretPdf({
       usedChars,
       pageCoverage,
       answer: answerText,
-      evidence: evidence.filter((item) => pageNums.includes(item.page))
+      evidence: evidence.filter((item) => pageNums.includes(item.page)),
+      usage: mergeUsages(usages),
+      model
     };
   }
 
@@ -404,7 +415,7 @@ export async function interpretPdf({
       "你是论文阅读助手。根据正文片段用中文写简洁要点笔记（问题/方法/实验/结论/术语），不超过 800 字，不要 JSON。";
     const note = async (part, tag) => {
       try {
-        return await callChat({
+        return await runChat({
           baseUrl,
           apiKey,
           model,
@@ -423,7 +434,7 @@ export async function interpretPdf({
 
   const user = `论文标题：${title || "（未知）"}\n覆盖页：${pageCoverage}\n\n正文摘录：\n${userCorpus}`;
   const attempt = () =>
-    callChat({
+    runChat({
       baseUrl,
       apiKey,
       model,
@@ -451,6 +462,8 @@ export async function interpretPdf({
     mode: resolvedMode,
     usedChars,
     pageCoverage,
+    usage: mergeUsages(usages),
+    model,
     result: {
       ...normalized,
       evidence: normalized.evidence.filter((item) => pageNums.includes(item.page))

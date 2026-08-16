@@ -8,8 +8,13 @@ const pages = [
   { page: 3, text: "Figure 2 shows the targeting result and the measured error." }
 ];
 
-function mockResponse(content) {
-  return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+function mockResponse(content, usage = {
+  prompt_tokens: 100,
+  completion_tokens: 40,
+  total_tokens: 140,
+  prompt_tokens_details: { cached_tokens: 20 }
+}) {
+  return new Response(JSON.stringify({ choices: [{ message: { content } }], usage }), {
     status: 200,
     headers: { "Content-Type": "application/json" }
   });
@@ -36,6 +41,9 @@ test("keeps structured page evidence in a full interpretation", async () => {
       reason: "该页展示实验结果",
       quote: "targeting result"
     }]);
+    assert.equal(result.usage.promptTokens, 100);
+    assert.equal(result.usage.cachedTokens, 20);
+    assert.equal(result.model, "test-model");
   } finally {
     global.fetch = previousFetch;
   }

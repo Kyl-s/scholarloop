@@ -45,6 +45,8 @@ import {
 import { createSavedInterpretation, interpretationStorageKey, normalizeSavedInterpretation } from "../pdfInterpretation.js";
 import { openPdfExternal } from "../openPdfExternal.js";
 import { useAgentConfig } from "../agentConfig.js";
+import { estimateTokensFromText } from "../llmUsage.js";
+import UsageMeter from "./UsageMeter.jsx";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -969,7 +971,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
       setInterpretMeta({
         mode: saved.mode,
         usedChars: saved.usedChars,
-        pageCoverage: saved.pageCoverage
+        pageCoverage: saved.pageCoverage,
+        usage: saved.usage,
+        model: saved.model
       });
       setFollowups(saved.followups || []);
       setSaveInterpretationStatus("saved");
@@ -2106,7 +2110,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
         const nextMeta = {
           mode: data.mode || resolved,
           usedChars: data.usedChars,
-          pageCoverage: data.pageCoverage
+          pageCoverage: data.pageCoverage,
+          usage: data.usage,
+          model: data.model || config?.model || ""
         };
         setInterpretResult(nextResult);
         setInterpretMeta(nextMeta);
@@ -2156,7 +2162,11 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
       });
       const nextFollowups = settleFollowup(followups, followupId, data.answer || "", "done", data.evidence || []);
       setFollowups(nextFollowups);
-      await persistInterpretation({ result: interpretResult, meta: interpretMeta, followups: nextFollowups });
+      const nextMeta = data.usage
+        ? { ...interpretMeta, usage: data.usage, model: data.model || interpretMeta?.model || config?.model || "" }
+        : interpretMeta;
+      if (nextMeta !== interpretMeta) setInterpretMeta(nextMeta);
+      await persistInterpretation({ result: interpretResult, meta: nextMeta, followups: nextFollowups });
     } catch (err) {
       setFollowups((prev) => settleFollowup(prev, followupId, `追问失败：${err.message}`, "error"));
     } finally {
@@ -3090,6 +3100,15 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
                   快速：摘要/引言/结论要点 · 完全：更广正文 + 基础知识分层。
                   快捷键 Ctrl+I / Ctrl+Shift+I · 放大侧栏 Ctrl+Shift+F
                 </p>
+                <UsageMeter
+                  usage={interpretMeta?.usage}
+                  model={interpretMeta?.model || config?.model || ""}
+                  estimateTokens={estimateTokensFromText(
+                    Object.values(effectiveTextByPage || {}).join("\n").slice(0, interpretMeta?.mode === "full" ? 28000 : 12000)
+                  )}
+                  usedChars={interpretMeta?.usedChars || 0}
+                  pageCoverage={interpretMeta?.pageCoverage || ""}
+                />
 
                 {interpretProgress ? <div className="pdf-translate-progress">{interpretProgress}</div> : null}
                 {interpretError ? <div className="pdf-config-hint">{interpretError}</div> : null}

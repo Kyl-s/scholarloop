@@ -1,4 +1,5 @@
 import { loadAgentConfig } from "./agentConfig.js";
+import { recordLlmUsage } from "./llmUsage.js";
 
 async function request(url, options = {}) {
   const res = await fetch(url, {
@@ -22,6 +23,18 @@ function agentConfig() {
   return loadAgentConfig();
 }
 
+function trackUsage(kind, data, config) {
+  if (data?.usage) {
+    recordLlmUsage({
+      kind,
+      model: config?.model || data.model || "",
+      providerName: config?.name || "",
+      ...data.usage
+    });
+  }
+  return data;
+}
+
 export const api = {
   get: (url) => request(url),
   post: (url, body) => request(url, { method: "POST", body: JSON.stringify(body || {}) }),
@@ -41,14 +54,18 @@ export const api = {
     method: "POST",
     body: JSON.stringify({ ...body, config: agentConfig() })
   }),
-  translate: (body) => request("/api/translate", {
+  translate: async (body) => trackUsage("translate", await request("/api/translate", {
     method: "POST",
     body: JSON.stringify(body)
-  }),
-  interpretPdf: (body) => request("/api/pdf/interpret", {
+  }), body?.config),
+  interpretPdf: async (body) => trackUsage(body?.question ? "followup" : "interpret", await request("/api/pdf/interpret", {
     method: "POST",
     body: JSON.stringify(body)
-  }),
+  }), body?.config),
+  agentChat: async (body) => trackUsage("agent", await request("/api/agent/chat", {
+    method: "POST",
+    body: JSON.stringify(body || {})
+  }), body?.config),
   getPaperInterpretation: (id) => request(`/api/library/${encodeURIComponent(id)}/interpretation`),
   savePaperInterpretation: (id, body) => request(`/api/library/${encodeURIComponent(id)}/interpretation`, {
     method: "PUT",

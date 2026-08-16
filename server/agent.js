@@ -1,4 +1,5 @@
 import { searchPapers } from "./sources.js";
+import { mergeUsages, parseChatUsage } from "../src/llmUsage.js";
 import { analyzePaper } from "./analyze.js";
 import {
   addPathTask as addPathTaskToPath,
@@ -314,6 +315,7 @@ export async function agentChat({ messages = [], config = {} }) {
     content: normalizeContent(m.content || "")
   }))];
   const toolCalls = [];
+  const usages = [];
 
   for (let round = 0; round < 6; round++) {
     const res = await fetch(`${baseUrl}/chat/completions`, {
@@ -340,6 +342,7 @@ export async function agentChat({ messages = [], config = {} }) {
       throw new Error(`模型接口错误 ${res.status}: ${detail}`);
     }
     const json = await res.json();
+    usages.push(parseChatUsage(json));
     const message = json.choices?.[0]?.message;
     if (!message) throw new Error("模型未返回有效消息");
 
@@ -359,9 +362,13 @@ export async function agentChat({ messages = [], config = {} }) {
       continue;
     }
 
-    return { content: normalizeContent(message.content), toolCalls };
+    return { content: normalizeContent(message.content), toolCalls, usage: mergeUsages(usages) };
   }
 
   const last = apiMessages.filter((m) => m.role === "assistant").pop();
-  return { content: normalizeContent(last?.content) || "Agent 已完成处理，但未能生成最终回答。", toolCalls };
+  return {
+    content: normalizeContent(last?.content) || "Agent 已完成处理，但未能生成最终回答。",
+    toolCalls,
+    usage: mergeUsages(usages)
+  };
 }

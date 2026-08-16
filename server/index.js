@@ -38,6 +38,7 @@ import {
 } from "./store.js";
 import { getProxyUrl, fetchWithFallback } from "./proxy.js";
 import { interpretPdf } from "./pdfInterpret.js";
+import { mergeUsages, parseChatUsage } from "../src/llmUsage.js";
 import { clearPdfCache, getPdfCache, resolveLocalPdfPath, resolvePaperPdfPath, savePdfCache, savePdfSource } from "./pdfCache.js";
 import { fetchPdfWithOpenAccessFallback } from "./pdfResolve.js";
 import {
@@ -449,7 +450,7 @@ app.post("/api/translate", async (req, res) => {
     const data = await r.json();
     const content = extractModelText(data);
     if (!content) throw new Error(modelResponseError(data));
-    return restoreUrls(content, urls);
+    return { text: restoreUrls(content, urls), usage: parseChatUsage(data) };
   }
 
   function splitChunks(input, maxLen = 1000) {
@@ -495,16 +496,21 @@ app.post("/api/translate", async (req, res) => {
     const maxChunks = pageMode ? 8 : 25;
     const chunks = splitChunks(text, maxLen).slice(0, maxChunks);
     const translated = [];
+    const usages = [];
     for (const chunk of chunks) {
       try {
-        translated.push(await callModel(chunk));
+        const out = await callModel(chunk);
+        translated.push(out.text);
+        usages.push(out.usage);
       } catch {
         await new Promise((r) => setTimeout(r, 1200));
-        translated.push(await callModel(chunk));
+        const out = await callModel(chunk);
+        translated.push(out.text);
+        usages.push(out.usage);
       }
       await new Promise((r) => setTimeout(r, 300));
     }
-    res.json({ text: translated.join("\n\n") });
+    res.json({ text: translated.join("\n\n"), usage: mergeUsages(usages) });
   } catch (err) {
     res.status(502).json({ error: `翻译失败：${err.message}` });
   }

@@ -120,7 +120,7 @@ export default function AgentDrawer({ open, onClose, onNavigate }) {
     setMessages(history);
     setBusy(true);
     try {
-      const result = await api.post("/api/agent/chat", { messages: history, config });
+      const result = await api.agentChat({ messages: history, config });
       setMessages([...history, { role: "agent", content: asText(result.content) || "Agent 没有返回内容。", toolCalls: result.toolCalls || [] }]);
       if (result.toolCalls?.some((t) => t.name === "complete_task")) refresh();
     } catch (err) {

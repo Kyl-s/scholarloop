@@ -69,7 +69,9 @@ test("configured translation reaches an OpenAI-compatible model", async () => {
     });
 
     assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { text: "本地假模型译文" });
+    const body = await response.json();
+    assert.equal(body.text, "本地假模型译文");
+    assert.equal(body.usage.promptTokens, 0);
     assert.equal(modelRequest.messages[0].content.includes("SCHOLARLOOP_KEEP_数字"), true);
   } finally {
     appServer.kill();
@@ -117,7 +119,9 @@ test("accepts structured chat completion content returned by compatible provider
     });
 
     assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { text: "结构化格式译文" });
+    const body = await response.json();
+    assert.equal(body.text, "结构化格式译文");
+    assert.ok(body.usage);
   } finally {
     appServer.kill();
     await close(modelServer);

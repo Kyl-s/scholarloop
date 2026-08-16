@@ -1,3 +1,5 @@
+import { hasUsage, normalizeUsage } from "./llmUsage.js";
+
 export function interpretationStorageKey({ paperId, doi, url, title } = {}) {
   const identity = String(paperId || doi || url || title || "unknown").trim();
   return `scholarloop.pdf.interpretation.${encodeURIComponent(identity)}`;
@@ -19,6 +21,8 @@ export function createSavedInterpretation({ result, meta, followups = [], savedA
     mode: meta?.mode === "full" ? "full" : "quick",
     usedChars: Number(meta?.usedChars) || 0,
     pageCoverage: String(meta?.pageCoverage || ""),
+    usage: hasUsage(meta?.usage) ? normalizeUsage(meta.usage) : undefined,
+    model: String(meta?.model || "").trim(),
     result: clonedResult,
     followups: cloneJson(Array.isArray(followups) ? followups : []) || [],
     savedAt: String(savedAt || new Date().toISOString())
@@ -34,6 +38,8 @@ export function normalizeSavedInterpretation(value) {
     mode: value.mode === "full" ? "full" : "quick",
     usedChars: Number(value.usedChars) || 0,
     pageCoverage: String(value.pageCoverage || ""),
+    usage: hasUsage(value.usage) ? normalizeUsage(value.usage) : undefined,
+    model: String(value.model || "").trim(),
     result,
     followups: Array.isArray(value.followups) ? value.followups : [],
     savedAt: String(value.savedAt || "")
