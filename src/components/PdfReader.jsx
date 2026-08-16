@@ -31,6 +31,7 @@ import { useData } from "../store.jsx";
 import { IconButton, Segmented } from "./ui.jsx";
 import { renderMarkdown } from "./markdown.jsx";
 import { normalizePdfSelection, normalizedSelectionAnchor } from "../pdfTranslation.js";
+import { attachPdfTextLayerSelection, pickSelectionAnchorRect } from "../pdfTextSelection.js";
 import { createPendingFollowup, settleFollowup } from "../pdfChat.js";
 import { buildPdfTextLayout, extractReadablePdfText, PDF_TEXT_LAYOUT_VERSION } from "../pdfText.js";
 import { buildLayoutTranslationPrompt, joinLayoutTranslation, parseLayoutTranslation } from "../pdfLayoutTranslation.js";
@@ -985,6 +986,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
     let textLayerTask = null;
     let textLayerDoubleClick = null;
     let pageRenderTask = null;
+    let detachTextSelection = null;
     if ((!doc && !imageSource) || !canvasRef.current) return undefined;
 
     if (imageSource) {
@@ -1086,6 +1088,16 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
           textContainer.addEventListener("dblclick", textLayerDoubleClick);
         }
         await Promise.all([renderPromise, textPromise]);
+        if (cancelled) return;
+        if (textContainer) {
+          detachTextSelection = attachPdfTextLayerSelection(textContainer, {
+            onSelectionStart: () => setSelectionPopup(null)
+          });
+          if (cancelled) {
+            detachTextSelection?.();
+            detachTextSelection = null;
+          }
+        }
       } catch (err) {
         if (cancelled || err?.name === "RenderingCancelledException" || /cancel/i.test(String(err?.message || ""))) return;
         // 版式页渲染失败：不写全局 error，也不永久锁死；下次切换可重试
@@ -1104,6 +1116,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
         /* ignore */
       }
       textLayerTask?.cancel?.();
+      detachTextSelection?.();
       if (textLayerDoubleClick && textLayerRef.current) {
         textLayerRef.current.removeEventListener("dblclick", textLayerDoubleClick);
       }
@@ -1577,7 +1590,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
         return;
       }
       const text = normalizePdfSelection(selection.toString());
-      const anchor = normalizedSelectionAnchor(range.getBoundingClientRect(), surface.getBoundingClientRect());
+      const selectionRect = pickSelectionAnchorRect(range.getClientRects(), range.getBoundingClientRect());
+      const anchor = normalizedSelectionAnchor(selectionRect, surface.getBoundingClientRect());
       if (!text || !anchor) {
         setSelectionPopup(null);
         return;

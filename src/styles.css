@@ -3052,6 +3052,8 @@ code {
   background: #fff;
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.28);
   overflow: visible;
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
 }
 
 .pdf-page-surface.is-ocr-selecting {
@@ -3189,9 +3191,12 @@ code {
   transform-origin: 0 0;
   -webkit-text-size-adjust: none;
   text-size-adjust: none;
+  forced-color-adjust: none;
   --min-font-size: 1;
   --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
   --min-font-size-inv: calc(1 / var(--min-font-size));
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
 }
 
 .pdf-text-layer :is(span, br) {
@@ -3229,11 +3234,21 @@ code {
   background: rgba(36, 86, 230, 0.28);
 }
 
+.pdf-text-layer br::selection {
+  background: transparent;
+}
+
 .pdf-text-layer .endOfContent {
   position: absolute;
   display: block;
   inset: 100% 0 0;
+  z-index: 0;
+  cursor: default;
   user-select: none;
+}
+
+.pdf-text-layer.selecting .endOfContent {
+  top: 0;
 }
 
 .pdf-layout-translation-layer {
@@ -3471,6 +3486,7 @@ code {
   border-radius: 7px;
   background: rgba(255, 255, 255, 0.98);
   box-shadow: 0 6px 18px rgba(9, 31, 70, 0.2);
+  user-select: none;
 }
 
 .pdf-selection-popover span,
