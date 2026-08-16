@@ -1,6 +1,6 @@
 {
   "name": "scholar-loop",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "ScholarLoop - research paper discovery, reading and writing loop",
