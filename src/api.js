@@ -72,6 +72,10 @@ export const api = {
     body: JSON.stringify(body)
   }),
   getReadingNotes: () => request("/api/reading-notes"),
+  getNotes: () => request("/api/notes"),
+  createNote: (body) => request("/api/notes", { method: "POST", body: JSON.stringify(body || {}) }),
+  updateNote: (id, body) => request(`/api/notes/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body || {}) }),
+  deleteNote: (id) => request(`/api/notes/${encodeURIComponent(id)}`, { method: "DELETE" }),
   getPdfCache: (id) => request(`/api/library/${encodeURIComponent(id)}/pdf-cache`),
   savePdfCache: (id, body) => request(`/api/library/${encodeURIComponent(id)}/pdf-cache`, {
     method: "PUT",

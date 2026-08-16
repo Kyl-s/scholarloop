@@ -4,6 +4,7 @@ import { useData } from "../store.jsx";
 import { api } from "../api.js";
 import { formatNoteForWriter } from "../readingNotes.js";
 import ReadingNotesList from "../components/ReadingNotesList.jsx";
+import StandaloneNotesList from "../components/StandaloneNotesList.jsx";
 import { Badge, Button, EmptyState, IconButton, Modal, Segmented, TextArea } from "../components/ui.jsx";
 
 const TEMPLATES = {
@@ -40,13 +41,14 @@ const TEMPLATES = {
 };
 
 export default function WriterPage({ onReadPdf }) {
-  const { drafts, library, saveDraft, deleteDraft } = useData();
+  const { drafts, library, notes, saveDraft, deleteDraft } = useData();
   const [currentId, setCurrentId] = useState(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState("");
   const [citationOpen, setCitationOpen] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
+  const [noteTab, setNoteTab] = useState("reading");
   const [noteItems, setNoteItems] = useState([]);
   const [noteQuery, setNoteQuery] = useState("");
   const [notesLoading, setNotesLoading] = useState(false);
@@ -99,6 +101,7 @@ export default function WriterPage({ onReadPdf }) {
 
   const openNotesPicker = async () => {
     setNotesOpen(true);
+    setNoteTab("reading");
     setNotesLoading(true);
     setNotesError("");
     try {
@@ -111,13 +114,8 @@ export default function WriterPage({ onReadPdf }) {
     }
   };
 
-  const insertNote = (item, segment) => {
+  const appendSnippet = (snippet) => {
     if (!draft) return;
-    const snippet = formatNoteForWriter({
-      title: item.title,
-      page: segment.page,
-      content: segment.content
-    });
     const section = draft.sections[activeSection];
     const gap = section.content && !section.content.endsWith("\n") ? "\n\n" : section.content ? "\n" : "";
     const content = `${section.content}${gap}${snippet}`;
@@ -126,6 +124,22 @@ export default function WriterPage({ onReadPdf }) {
     setNotesOpen(false);
     setNoteQuery("");
     showToast("已插入手记");
+  };
+
+  const insertNote = (item, segment) => {
+    appendSnippet(formatNoteForWriter({
+      title: item.title,
+      page: segment.page,
+      content: segment.content
+    }));
+  };
+
+  const insertStandaloneNote = (item) => {
+    appendSnippet(formatNoteForWriter({
+      kind: "standalone",
+      title: item.title,
+      content: item.content
+    }));
   };
 
   const openNoteSource = (item, segment) => {
@@ -271,20 +285,48 @@ export default function WriterPage({ onReadPdf }) {
       ) : null}
 
       {notesOpen && draft ? (
-        <Modal title="插入阅读手记" onClose={() => setNotesOpen(false)} width="720px">
-          <p className="citation-note">把 PDF 里写过的手记插入当前章节。也可以先跳回原文对应页，核对后再写入。</p>
-          <div className="writer-note-search">
-            <input value={noteQuery} onChange={(event) => setNoteQuery(event.target.value)} placeholder="筛选文献或手记内容..." />
+        <Modal title="插入手记" onClose={() => setNotesOpen(false)} width="720px">
+          <p className="citation-note">
+            {noteTab === "reading"
+              ? "把 PDF 里写过的阅读手记插入当前章节。也可以先跳回原文对应页，核对后再写入。"
+              : "把手记里自己写的内容插入当前章节，不必绑定某篇论文。"}
+          </p>
+          <div className="writer-note-toolbar">
+            <Segmented
+              value={noteTab}
+              onChange={setNoteTab}
+              options={[
+                { value: "reading", label: "阅读手记" },
+                { value: "free", label: "手记" }
+              ]}
+            />
+            <div className="writer-note-search">
+              <input
+                value={noteQuery}
+                onChange={(event) => setNoteQuery(event.target.value)}
+                placeholder={noteTab === "reading" ? "筛选文献或手记内容..." : "筛选手记标题或内容..."}
+              />
+            </div>
           </div>
           {notesError ? <p className="error-text">{notesError}</p> : null}
-          {notesLoading ? <p className="notes-loading">正在读取手记…</p> : (
-            <ReadingNotesList
-              items={noteItems}
+          {noteTab === "reading" ? (
+            notesLoading ? <p className="notes-loading">正在读取手记…</p> : (
+              <ReadingNotesList
+                items={noteItems}
+                query={noteQuery}
+                onOpen={openNoteSource}
+                onInsert={insertNote}
+                insertLabel="插入这段"
+                emptyDesc="还没有阅读手记。打开 PDF 右侧「手记」，写完并插入页码后，就能在这里选入论文。"
+              />
+            )
+          ) : (
+            <StandaloneNotesList
+              items={notes}
               query={noteQuery}
-              onOpen={openNoteSource}
-              onInsert={insertNote}
-              insertLabel="插入这段"
-              emptyDesc="还没有阅读手记。打开 PDF 右侧「手记」，写完并插入页码后，就能在这里选入论文。"
+              onInsert={insertStandaloneNote}
+              insertLabel="插入这篇"
+              emptyDesc="还没有独立手记。到「手记」页新建一篇，不必绑定论文。"
             />
           )}
         </Modal>

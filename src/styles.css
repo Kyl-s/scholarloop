@@ -5758,8 +5758,19 @@ code {
   margin-bottom: 12px;
 }
 
+.writer-note-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
 .writer-note-search {
   margin-bottom: 12px;
+}
+
+.writer-note-toolbar .writer-note-search {
+  margin-bottom: 0;
 }
 
 .writer-note-search input {
@@ -5786,7 +5797,16 @@ code {
 }
 
 .notes-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
   margin: 16px 0 14px;
+}
+
+.notes-toolbar .toolbar-search {
+  flex: 1 1 240px;
+  min-width: 200px;
 }
 
 .notes-loading,
@@ -5869,6 +5889,78 @@ code {
   justify-content: flex-end;
   flex-wrap: wrap;
   margin-top: 10px;
+}
+
+.standalone-notes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.standalone-note-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(36, 86, 230, 0.08);
+}
+
+.standalone-note-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.standalone-note-head h3 {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.standalone-note-head p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.standalone-note-card > p {
+  margin: 8px 0 0;
+  color: #354967;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.standalone-note-actions,
+.standalone-note-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.standalone-note-editor {
+  margin-bottom: 14px;
+  padding: 16px 18px;
+}
+
+.standalone-note-editor-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.standalone-note-editor-head strong {
+  display: block;
+  font-size: 14px;
+}
+
+.standalone-note-editor-head span {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .citation-list {

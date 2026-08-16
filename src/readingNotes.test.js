@@ -78,5 +78,9 @@ test("写入论文时带上文献标题和页码", () => {
     formatNoteForWriter({ title: "Tree of Thoughts", page: 3, content: "搜索空间可剪枝。" }),
     "【手记 · Tree of Thoughts · 第 3 页】\n搜索空间可剪枝。"
   );
+  assert.equal(
+    formatNoteForWriter({ kind: "standalone", title: "实验假设", content: "先补对照。" }),
+    "【手记 · 实验假设】\n先补对照。"
+  );
   assert.equal(excerptNote("一段很长的手记内容用来测试截断是否生效1234567890", 12), "一段很长的手记内容用来测…");
 });

@@ -28,6 +28,10 @@ import {
   getJournals,
   upsertJournal,
   removeJournal,
+  getNotes,
+  upsertNote,
+  updateNote,
+  removeNote,
   getSettings,
   updateSettings,
   importAll,
@@ -919,6 +923,31 @@ app.post("/api/journals", async (req, res) => {
 
 app.delete("/api/journals/:id", (req, res) => {
   removeJournal(req.params.id);
+  res.json({ ok: true });
+});
+
+app.get("/api/notes", (_req, res) => res.json(getNotes()));
+
+app.post("/api/notes", (req, res) => {
+  try {
+    res.json(upsertNote(req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.put("/api/notes/:id", (req, res) => {
+  try {
+    const note = updateNote(req.params.id, req.body || {});
+    if (!note) return res.status(404).json({ error: "手记不存在" });
+    res.json(note);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete("/api/notes/:id", (req, res) => {
+  removeNote(req.params.id);
   res.json({ ok: true });
 });
 

@@ -9,18 +9,20 @@ export function DataProvider({ children }) {
   const [path, setPathState] = useState(null);
   const [drafts, setDrafts] = useState([]);
   const [journals, setJournals] = useState([]);
+  const [notes, setNotes] = useState([]);
   const [settings, setSettings] = useState({});
   const [stats, setStats] = useState(null);
   const [meta, setMeta] = useState(null);
   const [ready, setReady] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [lib, memoryData, pathData, draftData, journalData, settingData, statData, metaData] = await Promise.all([
+    const [lib, memoryData, pathData, draftData, journalData, noteData, settingData, statData, metaData] = await Promise.all([
       api.get("/api/library"),
       api.getMemories(),
       api.get("/api/path"),
       api.get("/api/drafts"),
       api.get("/api/journals"),
+      api.getNotes().catch(() => []),
       api.get("/api/settings"),
       api.get("/api/stats"),
       api.get("/api/sources")
@@ -30,6 +32,7 @@ export function DataProvider({ children }) {
     setPathState(pathData);
     setDrafts(draftData);
     setJournals(journalData);
+    setNotes(noteData);
     setSettings(settingData);
     setStats(statData);
     setMeta(metaData);
@@ -116,6 +119,23 @@ export function DataProvider({ children }) {
     refresh();
   }, [refresh]);
 
+  const createNote = useCallback(async (note) => {
+    const saved = await api.createNote(note);
+    setNotes((prev) => [saved, ...prev.filter((item) => item.id !== saved.id)]);
+    return saved;
+  }, []);
+
+  const updateNote = useCallback(async (id, patch) => {
+    const saved = await api.updateNote(id, patch);
+    setNotes((prev) => prev.map((item) => (item.id === id ? saved : item)));
+    return saved;
+  }, []);
+
+  const deleteNote = useCallback(async (id) => {
+    await api.deleteNote(id);
+    setNotes((prev) => prev.filter((item) => item.id !== id));
+  }, []);
+
   const updateSettings = useCallback(async (patch) => {
     const s = await api.put("/api/settings", patch);
     setSettings(s);
@@ -124,8 +144,8 @@ export function DataProvider({ children }) {
   }, [refresh]);
 
   const value = useMemo(
-    () => ({ library, memories, path, drafts, journals, settings, stats, meta, ready, refresh, savePaper, updatePaper, removePaper, createMemory, updateMemory, deleteMemory, generatePath, updatePath, saveDraft, deleteDraft, saveJournal, deleteJournal, updateSettings }),
-    [library, memories, path, drafts, journals, settings, stats, meta, ready, refresh, savePaper, updatePaper, removePaper, createMemory, updateMemory, deleteMemory, generatePath, updatePath, saveDraft, deleteDraft, saveJournal, deleteJournal, updateSettings]
+    () => ({ library, memories, path, drafts, journals, notes, settings, stats, meta, ready, refresh, savePaper, updatePaper, removePaper, createMemory, updateMemory, deleteMemory, generatePath, updatePath, saveDraft, deleteDraft, saveJournal, deleteJournal, createNote, updateNote, deleteNote, updateSettings }),
+    [library, memories, path, drafts, journals, notes, settings, stats, meta, ready, refresh, savePaper, updatePaper, removePaper, createMemory, updateMemory, deleteMemory, generatePath, updatePath, saveDraft, deleteDraft, saveJournal, deleteJournal, createNote, updateNote, deleteNote, updateSettings]
   );
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 }

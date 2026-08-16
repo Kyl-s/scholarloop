@@ -100,10 +100,14 @@ export function excerptNote(text, max = 140) {
   return value.length > max ? `${value.slice(0, max)}…` : value;
 }
 
-export function formatNoteForWriter({ title, page, content } = {}) {
+export function formatNoteForWriter({ title, page, content, kind } = {}) {
+  const body = String(content || "").trim();
+  if (kind === "standalone") {
+    const head = `【手记 · ${title || "未命名手记"}】`;
+    return body ? `${head}\n${body}` : head;
+  }
   const loc = page ? `第 ${page} 页` : "未标页";
   const head = `【手记 · ${title || "文献"} · ${loc}】`;
-  const body = String(content || "").trim();
   return body ? `${head}\n${body}` : head;
 }
 

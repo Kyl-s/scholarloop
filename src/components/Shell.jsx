@@ -25,7 +25,7 @@ const NAV = [
   { id: "memory", label: "我的记忆", icon: Bookmark },
   { id: "path", label: "学习路径", icon: Route },
   { id: "journals", label: "思考记录", icon: Brain },
-  { id: "notes", label: "阅读手记", icon: StickyNote },
+  { id: "notes", label: "手记", icon: StickyNote },
   { id: "writer", label: "论文写作", icon: PenLine },
   { id: "agent", label: "Agent 专注", icon: Bot },
   { id: "settings", label: "设置", icon: Settings }

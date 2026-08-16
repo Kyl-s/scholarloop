@@ -26,6 +26,7 @@ const defaultData = () => ({
   },
   drafts: [],
   journals: [],
+  notes: [],
   settings: {
     openLinksInNewTab: true,
     defaultSources: ["arxiv", "openalex", "semanticscholar", "pubmed", "crossref", "cnki"],
@@ -64,6 +65,7 @@ export function loadData() {
       ...defaultData(),
       ...raw,
       memories: normalizeMemoryList(raw.memories),
+      notes: normalizeNoteList(raw.notes),
       path: { ...defaultData().path, ...(raw.path || {}) },
       settings: {
         ...defaultData().settings,
@@ -431,9 +433,88 @@ export function removeJournal(id) {
   save();
 }
 
+const NOTE_TITLE_MAX = 200;
+const NOTE_CONTENT_MAX = 200000;
+
+export function normalizeNoteInput(value = {}, base = {}) {
+  const source = { ...base, ...(value || {}) };
+  const content = String(source.content ?? "").slice(0, NOTE_CONTENT_MAX);
+  const title = String(source.title ?? "").trim().slice(0, NOTE_TITLE_MAX)
+    || firstLineTitle(content);
+  if (!title && !content.trim()) return null;
+  return { title: title || "未命名手记", content };
+}
+
+function firstLineTitle(content) {
+  const line = String(content || "").split(/\r?\n/).find((item) => item.trim()) || "";
+  return line.trim().slice(0, 40);
+}
+
+function normalizeStoredNote(value) {
+  const normalized = normalizeNoteInput(value);
+  if (!normalized) return null;
+  const now = new Date().toISOString();
+  return {
+    id: String(value?.id || randomUUID()),
+    ...normalized,
+    createdAt: String(value?.createdAt || now),
+    updatedAt: String(value?.updatedAt || now)
+  };
+}
+
+function normalizeNoteList(value) {
+  return Array.isArray(value) ? value.map(normalizeStoredNote).filter(Boolean) : [];
+}
+
+export function getNotes() {
+  const current = getData();
+  if (!Array.isArray(current.notes)) current.notes = [];
+  return current.notes;
+}
+
+export function upsertNote(value = {}) {
+  const current = getData();
+  if (!Array.isArray(current.notes)) current.notes = [];
+  const existing = value.id ? current.notes.find((note) => note.id === value.id) : null;
+  const normalized = normalizeNoteInput(value, existing || {});
+  if (!normalized) throw new Error("手记标题或内容不能为空");
+  const now = new Date().toISOString();
+  if (existing) {
+    Object.assign(existing, normalized, { id: existing.id, updatedAt: now });
+    save();
+    return existing;
+  }
+  const record = { id: randomUUID(), ...normalized, createdAt: now, updatedAt: now };
+  current.notes.unshift(record);
+  save();
+  return record;
+}
+
+export function updateNote(id, patch = {}) {
+  const current = getData();
+  const note = (current.notes || []).find((item) => item.id === id);
+  if (!note) return null;
+  const normalized = normalizeNoteInput(patch, note);
+  if (!normalized) throw new Error("手记标题或内容不能为空");
+  Object.assign(note, normalized, { id, updatedAt: new Date().toISOString() });
+  save();
+  return note;
+}
+
+export function removeNote(id) {
+  const current = getData();
+  current.notes = (current.notes || []).filter((note) => note.id !== id);
+  save();
+}
+
 export function importAll(payload) {
   if (!payload || typeof payload !== "object") throw new Error("导入数据格式不正确");
-  data = { ...defaultData(), ...payload, memories: normalizeMemoryList(payload.memories) };
+  data = {
+    ...defaultData(),
+    ...payload,
+    memories: normalizeMemoryList(payload.memories),
+    notes: normalizeNoteList(payload.notes)
+  };
   save();
   return data;
 }

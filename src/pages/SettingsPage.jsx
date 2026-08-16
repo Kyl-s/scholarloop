@@ -271,7 +271,7 @@ export default function SettingsPage({ onNavigate }) {
 
       <section className="panel about-panel">
         <div className="settings-head"><Info size={17} /> 关于 ScholarLoop</div>
-        <p>ScholarLoop V1.1 帮助你把“学基础 → 找文献 → 读摘要 → 深理解 → 复述输出 → 写论文”串成一条可追踪的闭环。当前版本包含：六源聚合检索、摘要结构化解读、版式对照翻译、阅读手记、五问阅读法、理解等级与复习安排、七阶段学习路径、论文草稿与引用管理。</p>
+        <p>ScholarLoop V1.1 帮助你把“学基础 → 找文献 → 读摘要 → 深理解 → 复述输出 → 写论文”串成一条可追踪的闭环。当前版本包含：六源聚合检索、摘要结构化解读、版式对照翻译、阅读手记与独立手记、五问阅读法、理解等级与复习安排、七阶段学习路径、论文草稿与引用管理。</p>
         <div className="about-counts">
           <span><strong>{library.length}</strong> 篇文献</span>
           <span><strong>{path?.stages?.length || 0}</strong> 个学习阶段</span>
