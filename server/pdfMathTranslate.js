@@ -1538,13 +1538,13 @@ export function buildPdfMathTranslateInvocation({ inputPath, outputDir, config =
   const speed = getPdfMathSpeedOptions(config);
   const glossaryPath = getAcademicGlossaryPath();
   const systemPrompt = String(config.pdfMathSystemPrompt || ACADEMIC_ZH_SYSTEM_PROMPT).trim();
-  const fontFamily = String(config.pdfMathFontFamily || "serif").trim() || "serif";
+  const fontFamily = String(config.pdfMathFontFamily || "").trim();
   // 通顺 + 对齐观感：
   // - 学术中文 prompt + 静态术语表（术语一致）
-  // - 衬线中文字体（减少兼容区怪字）
+  // - 默认不锁死 serif/关富文本：让 BabelDOC 按原文 span 保留颜色和粗细
   // - 公式字符模式（少拆公式）
   // - 去水印；按页时只输出已译页
-  // 加速策略保留：更高 qps/workers、跳过扫描检测与自动抽术语、关富文本
+  // 加速策略保留：更高 qps/workers、跳过扫描检测与自动抽术语
   const args = [
       inputPath,
       "--output",
@@ -1568,9 +1568,6 @@ export function buildPdfMathTranslateInvocation({ inputPath, outputDir, config =
       String(speed.workers),
       "--no-auto-extract-glossary",
       "--skip-scanned-detection",
-      "--disable-rich-text-translate",
-      "--primary-font-family",
-      fontFamily,
       "--watermark-output-mode",
       "no_watermark",
       "--formular-char-pattern",
@@ -1580,6 +1577,13 @@ export function buildPdfMathTranslateInvocation({ inputPath, outputDir, config =
     ];
   if (systemPrompt) {
     args.push("--custom-system-prompt", systemPrompt);
+  }
+  // 仅当显式指定时才锁字体族 / 关掉富文本（默认跟原文颜色和字重）
+  if (fontFamily) {
+    args.push("--primary-font-family", fontFamily);
+  }
+  if (config.pdfMathDisableRichText === true || process.env.PDFMATH_DISABLE_RICH_TEXT === "1") {
+    args.push("--disable-rich-text-translate");
   }
   if (existsFile(glossaryPath) && config.pdfMathNoGlossary !== true) {
     args.push("--glossaries", glossaryPath);

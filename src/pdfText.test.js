@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildPdfTextLayout, extractReadablePdfText } from "./pdfText.js";
+import { buildPdfTextLayout, extractReadablePdfText, inferFontWeightFromName, samplePdfLineAppearance } from "./pdfText.js";
 
 test("orders PDF text by its visible top-to-bottom line positions", () => {
   const items = [
@@ -48,4 +48,33 @@ test("builds percentage text boxes without changing the page geometry", () => {
   assert.equal(layout[0].top, 3.9375);
   assert.equal(layout[0].width > 0, true);
   assert.equal(layout[0].height > 0, true);
+});
+
+test("infers heavy/medium journal font names as bold-ish weights", () => {
+  assert.equal(inferFontWeightFromName("AdvPSHN-H"), 800);
+  assert.equal(inferFontWeightFromName("AdvPSHN-M"), 600);
+  assert.equal(inferFontWeightFromName("SourceHanSerif-Regular"), 400);
+});
+
+test("samples foreground teal and white paper from a fake canvas", () => {
+  const pixels = new Uint8ClampedArray(4 * 4);
+  // 3 white + 1 Cell teal
+  pixels.set([255, 255, 255, 255], 0);
+  pixels.set([255, 255, 255, 255], 4);
+  pixels.set([255, 255, 255, 255], 8);
+  pixels.set([13, 88, 138, 255], 12);
+  const canvas = {
+    width: 2,
+    height: 2,
+    getContext() {
+      return {
+        getImageData() {
+          return { data: pixels };
+        }
+      };
+    }
+  };
+  const appearance = samplePdfLineAppearance(canvas, { left: 0, top: 0, width: 100, height: 100 }, 2, 2);
+  assert.equal(appearance.color, "rgb(12, 84, 144)");
+  assert.equal(appearance.background, "rgb(252, 252, 252)");
 });

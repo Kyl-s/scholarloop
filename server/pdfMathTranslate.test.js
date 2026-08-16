@@ -93,11 +93,11 @@ test("builds PDFMathTranslate-next args without legacy flags or API keys", () =>
   assert.equal(args[args.indexOf("--pool-max-workers") + 1], "8");
   assert.ok(args.includes("--no-auto-extract-glossary"));
   assert.ok(args.includes("--skip-scanned-detection"));
-  assert.ok(args.includes("--disable-rich-text-translate"));
+  assert.equal(args.includes("--disable-rich-text-translate"), false);
   // 通顺 + 对齐观感
   assert.ok(args.includes("--custom-system-prompt"));
   assert.match(args[args.indexOf("--custom-system-prompt") + 1], /academic translator|学术|Simplified Chinese|简体中文/i);
-  assert.equal(args[args.indexOf("--primary-font-family") + 1], "serif");
+  assert.equal(args.includes("--primary-font-family"), false);
   assert.equal(args[args.indexOf("--watermark-output-mode") + 1], "no_watermark");
   assert.ok(args.includes("--glossaries"));
   assert.match(args[args.indexOf("--glossaries") + 1], /academic-zh-glossary\.csv$/i);

@@ -3,7 +3,16 @@
  * order a person reads the page.  Build lines from their page coordinates so
  * the text sent to translation follows the visible document from top to bottom.
  */
-export const PDF_TEXT_LAYOUT_VERSION = 2;
+export const PDF_TEXT_LAYOUT_VERSION = 3;
+
+/** 从 PDF 字体名猜字重。期刊嵌入字体常不带 bold 位，只能看名字。 */
+export function inferFontWeightFromName(fontName) {
+  const name = String(fontName || "");
+  if (/black|heavy|extrabold/i.test(name) || /[-_]h(?:[-_]|$)/i.test(name)) return 800;
+  if (/bold|semibold|demibold/i.test(name) || /[-_]b(?:[-_]|$)/i.test(name)) return 700;
+  if (/medium/i.test(name) || /[-_]m(?:[-_]|$)/i.test(name)) return 600;
+  return 400;
+}
 
 function normalizeTextItems(items) {
   const source = Array.isArray(items) ? items : [];
@@ -21,7 +30,8 @@ function normalizeTextItems(items) {
         height: Math.max(1, Math.abs(Number(transform[3])) || Number(item?.height) || 8),
         width: Math.max(1, Math.abs(Number(item?.width)) || 0),
         widthKnown: Number(item?.width) > 0,
-        hasEOL: Boolean(item?.hasEOL)
+        hasEOL: Boolean(item?.hasEOL),
+        fontName: String(item?.fontName || "")
       };
     })
     .filter((item) => item.text);
@@ -45,13 +55,17 @@ function lineFromItems(items) {
   const row = [...items].sort((a, b) => (a.x - b.x) || (a.index - b.index));
   const left = Math.min(...row.map((item) => item.x));
   const right = Math.max(...row.map((item) => item.x + item.width));
+  const widest = row.reduce((best, item) => ((item.width || 0) > (best.width || 0) ? item : best), row[0]);
+  const fontName = widest?.fontName || "";
   return {
     text: joinLineItems(row),
     items: row,
     x: left,
     y: Math.max(...row.map((item) => item.y)),
     width: Math.max(1, right - left),
-    height: Math.max(...row.map((item) => item.height))
+    height: Math.max(...row.map((item) => item.height)),
+    fontName,
+    fontWeight: inferFontWeightFromName(fontName)
   };
 }
 
@@ -255,11 +269,90 @@ export function buildPdfTextLayout(items, viewport) {
       top: Math.max(0, Math.min(100, (top / pageHeight) * 100 - heightPercent * 0.85)),
       width: Math.max(0.5, Math.min(100, ((right - left) / pageWidth) * 100)),
       height: Math.max(0.5, Math.min(100, heightPercent)),
-      fontSize: Math.max(6, line.height)
+      fontSize: Math.max(6, line.height),
+      fontName: line.fontName || "",
+      fontWeight: line.fontWeight || inferFontWeightFromName(line.fontName)
     };
   });
 }
 
 export function extractReadablePdfText(items) {
   return groupReadablePdfLines(items).map((line) => line.text).join("\n");
+}
+
+function quantizeRgb(r, g, b, step = 12) {
+  return [Math.round(r / step) * step, Math.round(g / step) * step, Math.round(b / step) * step];
+}
+
+function modeRgb(pixels) {
+  if (!pixels.length) return null;
+  const counts = new Map();
+  for (const [r, g, b] of pixels) {
+    const key = quantizeRgb(r, g, b).join(",");
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  let best = null;
+  let bestCount = 0;
+  for (const [key, count] of counts) {
+    if (count > bestCount) {
+      best = key.split(",").map(Number);
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+function rgbCss(rgb) {
+  return rgb ? `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})` : "";
+}
+
+/**
+ * 从已渲染的原页 canvas 取样：前景色给译文，浅色给遮罩，避免一律深蓝+白底。
+ * canvas 须已画好原文；cssWidth/cssHeight 是 CSS 像素（不含 DPR）。
+ */
+export function samplePdfLineAppearance(canvas, line, cssWidth, cssHeight) {
+  const width = Number(cssWidth) || 0;
+  const height = Number(cssHeight) || 0;
+  if (!canvas || !width || !height || !line) return {};
+  const ctx = canvas.getContext?.("2d", { willReadFrequently: true });
+  if (!ctx?.getImageData) return {};
+  const dpr = canvas.width / width;
+  const x = Math.max(0, Math.floor((Number(line.left) / 100) * width * dpr));
+  const y = Math.max(0, Math.floor((Number(line.top) / 100) * height * dpr));
+  const w = Math.max(1, Math.floor((Number(line.width) / 100) * width * dpr));
+  const h = Math.max(1, Math.floor((Number(line.height) / 100) * height * dpr));
+  const sw = Math.min(w, canvas.width - x);
+  const sh = Math.min(h, canvas.height - y);
+  if (sw < 1 || sh < 1) return {};
+  let data;
+  try {
+    data = ctx.getImageData(x, y, sw, sh).data;
+  } catch {
+    return {};
+  }
+  const foreground = [];
+  const background = [];
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    if (data[i + 3] < 128) continue;
+    const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    const chroma = Math.max(r, g, b) - Math.min(r, g, b);
+    if (lum > 242 && chroma < 18) background.push([r, g, b]);
+    else foreground.push([r, g, b]);
+  }
+  const color = rgbCss(modeRgb(foreground));
+  const backgroundColor = rgbCss(modeRgb(background));
+  const next = {};
+  if (color) next.color = color;
+  if (backgroundColor) next.background = backgroundColor;
+  return next;
+}
+
+export function applySampledLineAppearance(lines, canvas, cssWidth, cssHeight) {
+  return (Array.isArray(lines) ? lines : []).map((line) => ({
+    ...line,
+    ...samplePdfLineAppearance(canvas, line, cssWidth, cssHeight)
+  }));
 }

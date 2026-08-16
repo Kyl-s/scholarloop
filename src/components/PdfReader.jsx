@@ -33,7 +33,7 @@ import { renderMarkdown } from "./markdown.jsx";
 import { normalizePdfSelection, normalizedSelectionAnchor } from "../pdfTranslation.js";
 import { attachPdfTextLayerSelection, isPdfSelectionOverlayTarget, pickSelectionAnchorRect } from "../pdfTextSelection.js";
 import { createPendingFollowup, settleFollowup } from "../pdfChat.js";
-import { buildPdfTextLayout, extractReadablePdfText, PDF_TEXT_LAYOUT_VERSION } from "../pdfText.js";
+import { applySampledLineAppearance, buildPdfTextLayout, extractReadablePdfText, PDF_TEXT_LAYOUT_VERSION } from "../pdfText.js";
 import { buildLayoutTranslationPrompt, joinLayoutTranslation, parseLayoutTranslation } from "../pdfLayoutTranslation.js";
 import {
   normalizeOcrBox,
@@ -273,7 +273,11 @@ function PdfLayoutTranslationLine({ line, scale }) {
         top: `${line.top}%`,
         width: `${line.width}%`,
         height: `${Math.max(line.height, 1.2)}%`,
-        fontSize: `${Math.max(7, Math.min(18, Number(line.fontSize || 10) * scale * 0.86))}px`
+        fontSize: `${Math.max(7, Math.min(22, Number(line.fontSize || 10) * scale * 0.92))}px`,
+        color: line.color || undefined,
+        background: line.background || undefined,
+        fontWeight: line.fontWeight || undefined,
+        boxShadow: line.background ? `0 0 0 1px ${line.background}` : undefined
       }}
     >
       <span ref={textRef} style={{ transform: `scaleX(${fitScale})` }}>{line.text}</span>
@@ -1084,8 +1088,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
         const textContent = await page.getTextContent();
         if (cancelled) return;
         // 仅在原文上建立文本布局缓存，供文字翻译覆盖层使用
+        let pageLayout = null;
         if (!renderFromLayout) {
-          const pageLayout = buildPdfTextLayout(textContent.items, page.getViewport({ scale: 1 }));
+          pageLayout = buildPdfTextLayout(textContent.items, page.getViewport({ scale: 1 }));
           setPageTextLayouts((previous) => previous[pageNum] ? previous : { ...previous, [pageNum]: pageLayout });
           if (displayMode === "translated" && pageTranslations[pageNum] && !isTranslationError(pageTranslations[pageNum]) && !pageTranslationLayouts[pageNum]) {
             setPageTranslationLayouts((previous) => previous[pageNum]
@@ -1116,6 +1121,24 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
         }
         await Promise.all([renderPromise, textPromise]);
         if (cancelled) return;
+        // 原页画完后取样颜色/底色，译文覆盖层跟原文走
+        if (!renderFromLayout && pageLayout?.length) {
+          const painted = applySampledLineAppearance(pageLayout, canvas, cssWidth, cssHeight);
+          setPageTextLayouts((previous) => ({ ...previous, [pageNum]: painted }));
+          setPageTranslationLayouts((previous) => {
+            const current = previous[pageNum];
+            if (!Array.isArray(current) || !current.length) return previous;
+            return {
+              ...previous,
+              [pageNum]: current.map((line, index) => ({
+                ...line,
+                color: painted[index]?.color || line.color,
+                background: painted[index]?.background || line.background,
+                fontWeight: painted[index]?.fontWeight || line.fontWeight
+              }))
+            };
+          });
+        }
         if (textContainer) {
           detachTextSelection = attachPdfTextLayerSelection(textContainer, {
             onSelectionStart: () => setSelectionPopup(null)
