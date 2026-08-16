@@ -3251,12 +3251,20 @@ code {
   top: 0;
 }
 
+.pdf-page-surface:has(.pdf-layout-translation-layer) .pdf-text-layer {
+  pointer-events: none;
+}
+
+.pdf-page-surface.is-hand-mode .pdf-layout-translation-layer {
+  pointer-events: none;
+}
+
 .pdf-layout-translation-layer {
   position: absolute;
   inset: 0;
   z-index: 3;
   overflow: hidden;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .pdf-layout-translation-line {
@@ -3275,6 +3283,8 @@ code {
   white-space: nowrap;
   text-overflow: clip;
   box-shadow: 0 0 0 1px #fff;
+  cursor: text;
+  user-select: text;
 }
 
 .pdf-layout-translation-line > span {

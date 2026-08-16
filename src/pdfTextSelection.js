@@ -4,6 +4,63 @@
  * 拖选时用 .endOfContent + .selecting 挡住尚未经过的 span。
  */
 
+/** 同一行允许的 top 差（textLayer 用页面高度百分比） */
+const PDF_TEXT_LAYER_LINE_SLOP = 0.45;
+
+export function comparePdfTextLayerBoxes(a, b, lineSlop = PDF_TEXT_LAYER_LINE_SLOP) {
+  const dy = Number(a?.top) - Number(b?.top);
+  if (Math.abs(dy) > lineSlop) return dy;
+  return Number(a?.left) - Number(b?.left);
+}
+
+export function sortPdfTextLayerBoxes(boxes, lineSlop = PDF_TEXT_LAYER_LINE_SLOP) {
+  return [...(boxes || [])].sort((a, b) => comparePdfTextLayerBoxes(a, b, lineSlop));
+}
+
+/**
+ * 译文/盖回原文后，PDF 文字流顺序常和画面不一致。
+ * 选择模式的 .endOfContent 按 DOM 顺序挡字，必须先改成从上到下、从左到右。
+ */
+export function orderPdfTextLayerForSelection(textLayer) {
+  if (!textLayer) return 0;
+  const end = textLayer.querySelector(":scope > .endOfContent");
+  const leaves = [];
+  const walk = (parent) => {
+    for (const child of [...parent.children]) {
+      if (child.classList.contains("endOfContent")) continue;
+      if (child.classList.contains("markedContent")) {
+        walk(child);
+        continue;
+      }
+      if (child.tagName === "BR") continue;
+      if (child.tagName === "SPAN") {
+        leaves.push({
+          el: child,
+          top: parseFloat(child.style.top) || 0,
+          left: parseFloat(child.style.left) || 0
+        });
+      }
+    }
+  };
+  walk(textLayer);
+  const ordered = sortPdfTextLayerBoxes(leaves);
+  for (const { el } of ordered) textLayer.append(el);
+  textLayer.querySelectorAll("span.markedContent").forEach((node) => {
+    if (!node.querySelector("span")) node.remove();
+  });
+  textLayer.querySelectorAll(":scope > br").forEach((node) => node.remove());
+  for (let i = 0; i < ordered.length; i += 1) {
+    const next = ordered[i + 1];
+    if (!next || Math.abs(next.top - ordered[i].top) > PDF_TEXT_LAYER_LINE_SLOP) {
+      const br = textLayer.ownerDocument.createElement("br");
+      br.setAttribute("role", "presentation");
+      ordered[i].el.after(br);
+    }
+  }
+  if (end) textLayer.append(end);
+  return ordered.length;
+}
+
 export function pickSelectionAnchorRect(rects, fallback) {
   const list = Array.from(rects || []).filter((rect) => rect && rect.width > 0 && rect.height > 0);
   return list.at(-1) || fallback || null;

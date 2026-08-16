@@ -31,7 +31,7 @@ import { useData } from "../store.jsx";
 import { IconButton, Segmented } from "./ui.jsx";
 import { renderMarkdown } from "./markdown.jsx";
 import { normalizePdfSelection, normalizedSelectionAnchor } from "../pdfTranslation.js";
-import { attachPdfTextLayerSelection, isPdfSelectionOverlayTarget, pickSelectionAnchorRect } from "../pdfTextSelection.js";
+import { attachPdfTextLayerSelection, isPdfSelectionOverlayTarget, orderPdfTextLayerForSelection, pickSelectionAnchorRect } from "../pdfTextSelection.js";
 import { createPendingFollowup, settleFollowup } from "../pdfChat.js";
 import { applySampledLineAppearance, buildPdfTextLayout, extractReadablePdfText, PDF_TEXT_LAYOUT_VERSION } from "../pdfText.js";
 import { buildLayoutTranslationPrompt, joinLayoutTranslation, parseLayoutTranslation } from "../pdfLayoutTranslation.js";
@@ -1121,6 +1121,11 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
         }
         await Promise.all([renderPromise, textPromise]);
         if (cancelled) return;
+        if (textContainer) {
+          textContainer.style.width = `${cssWidth}px`;
+          textContainer.style.height = `${cssHeight}px`;
+          orderPdfTextLayerForSelection(textContainer);
+        }
         // 原页画完后取样颜色/底色，译文覆盖层跟原文走
         if (!renderFromLayout && pageLayout?.length) {
           const painted = applySampledLineAppearance(pageLayout, canvas, cssWidth, cssHeight);
@@ -1636,7 +1641,10 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
       const range = selection.getRangeAt(0);
       const textLayer = textLayerRef.current;
       const surface = pageSurfaceRef.current;
-      if (!textLayer || !surface || !textLayer.contains(range.commonAncestorContainer)) {
+      const overlay = surface?.querySelector(".pdf-layout-translation-layer");
+      const inTextLayer = Boolean(textLayer && textLayer.contains(range.commonAncestorContainer));
+      const inOverlay = Boolean(overlay && overlay.contains(range.commonAncestorContainer));
+      if (!surface || (!inTextLayer && !inOverlay)) {
         return;
       }
       const text = normalizePdfSelection(selection.toString());
