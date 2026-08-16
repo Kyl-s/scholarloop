@@ -3479,9 +3479,12 @@ code {
 .pdf-selection-popover {
   position: absolute;
   z-index: 8;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
   width: min(236px, 56%);
   transform: translate(-50%, 8px);
-  padding: 6px 28px 6px 7px;
+  padding: 6px 7px;
   border: 1px solid #c9d7ef;
   border-radius: 7px;
   background: rgba(255, 255, 255, 0.98);
@@ -3489,10 +3492,20 @@ code {
   user-select: none;
 }
 
+.pdf-selection-popover-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.pdf-selection-popover-copy {
+  min-width: 0;
+  flex: 1;
+}
+
 .pdf-selection-popover span,
 .pdf-selection-popover em {
   display: block;
-  margin-bottom: 5px;
   color: #4a5971;
   font-size: 10.5px;
   line-height: 1.4;
@@ -3506,21 +3519,22 @@ code {
 }
 
 .pdf-selection-popover em {
+  margin-top: 4px;
   color: #c44646;
   font-style: normal;
 }
 
 .pdf-selection-popover > button:not(.pdf-selection-popover-close) {
+  align-self: flex-start;
   padding: 4px 8px;
   font-size: 11px;
 }
 
 .pdf-selection-popover .pdf-selection-popover-close {
-  position: absolute;
-  top: 1px;
-  right: 1px;
+  position: static;
   display: grid;
   place-items: center;
+  flex: 0 0 24px;
   width: 24px;
   height: 24px;
   padding: 0;

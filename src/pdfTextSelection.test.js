@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { pickSelectionAnchorRect, usesNativePdfSelection } from "./pdfTextSelection.js";
+import { isPdfSelectionOverlayTarget, pickSelectionAnchorRect, usesNativePdfSelection } from "./pdfTextSelection.js";
 
 test("anchors the translation popover on the last visible selection line", () => {
   const last = pickSelectionAnchorRect(
@@ -19,6 +19,14 @@ test("ignores empty client rects when choosing a selection anchor", () => {
     pickSelectionAnchorRect([{ left: 0, top: 0, width: 0, height: 0 }], fallback),
     fallback
   );
+});
+
+test("ignores mouse events that originate from the translation popover", () => {
+  const popover = { classList: { contains: (name) => name === "pdf-selection-popover" } };
+  const button = { closest: (selector) => selector.includes("pdf-selection-popover") ? popover : null };
+  const pageText = { closest: () => null };
+  assert.equal(isPdfSelectionOverlayTarget(button), true);
+  assert.equal(isPdfSelectionOverlayTarget(pageText), false);
 });
 
 test("treats Chromium 148+ as having native PDF selection", () => {

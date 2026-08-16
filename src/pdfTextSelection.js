@@ -9,6 +9,11 @@ export function pickSelectionAnchorRect(rects, fallback) {
   return list.at(-1) || fallback || null;
 }
 
+/** 点在翻译气泡/译文卡片上时，不要当成新的 PDF 选区 */
+export function isPdfSelectionOverlayTarget(target) {
+  return Boolean(target?.closest?.(".pdf-selection-popover, .pdf-selection-translation-card"));
+}
+
 export function usesNativePdfSelection(win = globalThis, probeEl = null) {
   const nav = win.navigator;
   if (!nav) return false;

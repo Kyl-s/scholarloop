@@ -31,7 +31,7 @@ import { useData } from "../store.jsx";
 import { IconButton, Segmented } from "./ui.jsx";
 import { renderMarkdown } from "./markdown.jsx";
 import { normalizePdfSelection, normalizedSelectionAnchor } from "../pdfTranslation.js";
-import { attachPdfTextLayerSelection, pickSelectionAnchorRect } from "../pdfTextSelection.js";
+import { attachPdfTextLayerSelection, isPdfSelectionOverlayTarget, pickSelectionAnchorRect } from "../pdfTextSelection.js";
 import { createPendingFollowup, settleFollowup } from "../pdfChat.js";
 import { buildPdfTextLayout, extractReadablePdfText, PDF_TEXT_LAYOUT_VERSION } from "../pdfText.js";
 import { buildLayoutTranslationPrompt, joinLayoutTranslation, parseLayoutTranslation } from "../pdfLayoutTranslation.js";
@@ -1395,7 +1395,6 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
       ocrSelectionCache: { [popup.regionKey]: nextOcrCache[popup.regionKey] },
       selectionTranslations: { [pageNum]: nextSelectionTranslations[pageNum] }
     });
-    setDisplayMode("bilingual");
     setSelectionPopup(null);
     setOcrSelectionBox(null);
   };
@@ -1575,9 +1574,10 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
     if (notesSaveTimerRef.current) window.clearTimeout(notesSaveTimerRef.current);
   }, []);
 
-  const captureTextSelection = () => {
+  const captureTextSelection = (event) => {
     if (interactionMode === "hand" || panDragRef.current.active) return;
     if (ocrDragRef.current.active || ocrSelectMode) return;
+    if (isPdfSelectionOverlayTarget(event?.target)) return;
     requestAnimationFrame(() => {
       const selection = window.getSelection?.();
       if (!selection || selection.rangeCount < 1 || selection.isCollapsed) {
@@ -1622,7 +1622,6 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
       };
       setSelectionTranslations(nextSelectionTranslations);
       void persistPdfCache({ selectionTranslations: { [pageNum]: nextSelectionTranslations[pageNum] } });
-      setDisplayMode("bilingual");
       setSelectionPopup(null);
       window.getSelection?.()?.removeAllRanges?.();
     } catch (err) {
@@ -2517,16 +2516,20 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
                   </div>
                 ) : null}
 
-                    {!usingLayoutPdf && displayMode !== "original" ? currentSelectionTranslations.map((item) => (
+                    {currentSelectionTranslations.map((item) => (
                   <div
                     className="pdf-selection-translation-card"
                     key={item.id}
                     style={{ left: `${item.x}%`, top: `${item.y}%` }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onMouseUp={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onPointerUp={(event) => event.stopPropagation()}
                   >
                     <button type="button" className="pdf-selection-translation-close" aria-label="关闭选区译文" onClick={() => removeSelectionTranslation(item.id)}>×</button>
                     <span>{item.translation}</span>
                   </div>
-                )) : null}
+                ))}
 
                     {!usingLayoutPdf && !layoutPageResolved.url && displayMode === "bilingual" && !hasInlineTranslation && !pageTranslationFailed ? (
                   <div className="pdf-empty-translation-overlay">
@@ -2542,12 +2545,28 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
                 ) : null}
 
                     {selectionPopup ? (
-                  <div className="pdf-selection-popover" style={{ left: `${selectionPopup.x}%`, top: `${selectionPopup.y}%` }}>
-                    <button type="button" className="pdf-selection-popover-close" aria-label="关闭局部翻译" onClick={() => setSelectionPopup(null)}>×</button>
-                    {selectionPopup.ocr ? <strong className="pdf-ocr-popup-label">OCR 识别结果</strong> : null}
-                    <span>{selectionPopup.text.slice(0, 90)}{selectionPopup.text.length > 90 ? "…" : ""}</span>
-                    {selectionPopup.error ? <em>{selectionPopup.error}</em> : null}
-                    <button type="button" onClick={translateSelection} disabled={!config || selectionLoading}>
+                  <div
+                    className="pdf-selection-popover"
+                    style={{ left: `${selectionPopup.x}%`, top: `${selectionPopup.y}%` }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onMouseUp={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onPointerUp={(event) => event.stopPropagation()}
+                  >
+                    <div className="pdf-selection-popover-head">
+                      <div className="pdf-selection-popover-copy">
+                        {selectionPopup.ocr ? <strong className="pdf-ocr-popup-label">OCR 识别结果</strong> : null}
+                        <span>{selectionPopup.text.slice(0, 90)}{selectionPopup.text.length > 90 ? "…" : ""}</span>
+                        {selectionPopup.error ? <em>{selectionPopup.error}</em> : null}
+                      </div>
+                      <button type="button" className="pdf-selection-popover-close" aria-label="关闭局部翻译" onClick={() => setSelectionPopup(null)}>×</button>
+                    </div>
+                    <button
+                      type="button"
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={translateSelection}
+                      disabled={!config || selectionLoading}
+                    >
                       {selectionLoading ? "翻译中…" : config ? (selectionPopup.ocr ? "翻译 OCR 选区" : "翻译选中文字") : "请先配置 API"}
                     </button>
                     </div>
