@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { collectNotePages, excerptNote, formatNoteForWriter, insertPageMarker, parseReadingNotes } from "./readingNotes.js";
+import { caretAfterLeadingMarker, collectNotePages, excerptNote, formatNoteForWriter, insertPageMarker, normalizeReadingNotes, parseReadingNotes } from "./readingNotes.js";
 
 test("无页标记的手记视为整段", () => {
   const segments = parseReadingNotes("方法核心是时间干涉。");
@@ -53,6 +53,24 @@ test("插入页标记时，无标记的旧正文放在标记后面", () => {
   const segments = parseReadingNotes(next);
   assert.equal(segments.length, 1);
   assert.equal(segments[0].page, 1);
+});
+
+test("再标一页时新标记仍加在文首，旧页正文跟着旧标记", () => {
+  const first = insertPageMarker("本篇论文是关于 TI-TMS。", 1, "2026/8/16 15:49:04");
+  const second = insertPageMarker(first, 3, "2026/8/16 16:00:00");
+  assert.equal(second.startsWith("—— 第 3 页 · 2026/8/16 16:00:00 ——"), true);
+  assert.match(second, /—— 第 1 页 · 2026\/8\/16 15:49:04 ——\n本篇论文是关于 TI-TMS。/);
+  const segments = parseReadingNotes(second);
+  assert.equal(segments[0].page, 3);
+  assert.equal(segments[0].content, "");
+  assert.equal(segments[1].page, 1);
+  assert.equal(segments[1].content, "本篇论文是关于 TI-TMS。");
+  assert.equal(caretAfterLeadingMarker(second), second.indexOf("\n") + 1);
+});
+
+test("整理旧文末标记为文首标记加正文", () => {
+  const normalized = normalizeReadingNotes("本篇论文是关于 TI-TMS。\n\n—— 第 1 页 · 2026/8/16 15:49:04 ——");
+  assert.equal(normalized, "—— 第 1 页 · 2026/8/16 15:49:04 ——\n本篇论文是关于 TI-TMS。\n");
 });
 
 test("写入论文时带上文献标题和页码", () => {

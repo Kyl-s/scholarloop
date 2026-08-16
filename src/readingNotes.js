@@ -8,21 +8,45 @@ export function formatPageMarker(page, stamp) {
   return when ? `—— 第 ${pageNum} 页 · ${when} ——` : `—— 第 ${pageNum} 页 ——`;
 }
 
+export function serializeReadingNotes(segments) {
+  const blocks = [];
+  for (const segment of segments || []) {
+    const content = String(segment?.content || "").trim();
+    if (segment?.page) {
+      const head = formatPageMarker(segment.page, segment.stamp);
+      blocks.push(content ? `${head}\n${content}` : head);
+    } else if (content) {
+      blocks.push(content);
+    }
+  }
+  return blocks.length ? `${blocks.join("\n\n")}\n` : "";
+}
+
+export function normalizeReadingNotes(text) {
+  const source = String(text || "");
+  if (!source.trim()) return "";
+  return serializeReadingNotes(parseReadingNotes(source));
+}
+
+export function caretAfterLeadingMarker(text) {
+  const source = String(text || "");
+  const newline = source.indexOf("\n");
+  return newline === -1 ? source.length : newline + 1;
+}
+
 export function insertPageMarker(text, page, stamp) {
   const marker = formatPageMarker(page, stamp);
-  const source = String(text || "").replace(/\s+$/, "");
-  if (!source.trim()) return `${marker}\n`;
+  const normalized = normalizeReadingNotes(text).replace(/\s+$/, "");
+  if (!normalized.trim()) return `${marker}\n`;
 
-  const matches = [...source.matchAll(pageMarkerRegex())];
+  const matches = [...normalized.matchAll(pageMarkerRegex())];
   if (!matches.length) {
-    // 先写后标页：把标记放在正文前，避免正文变成「未标页」
-    return `${marker}\n${source}\n`;
+    // 先写后标页：标记一律放文首，后面才是这一页的正文
+    return `${marker}\n${normalized}\n`;
   }
 
-  const last = matches[matches.length - 1];
-  const afterLast = source.slice(last.index + last[0].length);
-  if (!afterLast.trim()) return `${source}\n\n${marker}\n`;
-  return `${source}\n\n${marker}\n`;
+  // 再标一页：新标记仍加在文首，旧页整段下移
+  return `${marker}\n\n${normalized}\n`;
 }
 
 export function parseReadingNotes(text) {

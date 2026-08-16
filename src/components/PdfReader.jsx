@@ -44,7 +44,7 @@ import {
 } from "../pdfOcr.js";
 import { createSavedInterpretation, interpretationStorageKey, normalizeSavedInterpretation } from "../pdfInterpretation.js";
 import { openPdfExternal } from "../openPdfExternal.js";
-import { collectNotePages, insertPageMarker, parseReadingNotes } from "../readingNotes.js";
+import { caretAfterLeadingMarker, collectNotePages, insertPageMarker, normalizeReadingNotes, parseReadingNotes } from "../readingNotes.js";
 import { useAgentConfig } from "../agentConfig.js";
 import { estimateTokensFromText } from "../llmUsage.js";
 import UsageMeter from "./UsageMeter.jsx";
@@ -579,7 +579,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
       const el = notesTextareaRef.current;
       if (!el) return;
       el.focus();
-      el.selectionStart = el.selectionEnd = el.value.length;
+      const caret = caretAfterLeadingMarker(el.value);
+      el.selectionStart = el.selectionEnd = caret;
     });
   };
 
@@ -744,8 +745,12 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
             return "";
           }
         })();
-    setReadingNotes(restoredNotes);
-    setNotesSaveStatus(restoredNotes ? (paperId && cache?.readingNotes != null ? "saved" : "local") : "idle");
+    const normalizedNotes = normalizeReadingNotes(restoredNotes);
+    setReadingNotes(normalizedNotes);
+    setNotesSaveStatus(normalizedNotes ? (paperId && cache?.readingNotes != null ? "saved" : "local") : "idle");
+    if (normalizedNotes && normalizedNotes !== restoredNotes) {
+      void persistReadingNotes(normalizedNotes);
+    }
 
     try {
       let data;
@@ -3042,7 +3047,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
                   </div>
                 </div>
                 <p className="pdf-notes-hint">
-                  想到什么写什么。可先写再标页，或先标页再写；正文都会归到这一页，并可在「阅读手记」里跳回原文。
+                  页标记加在文首，标记下面才是这一页的正文。再标另一页时，新标记仍加在最上面。
                 </p>
                 <div className="pdf-notes-toolbar">
                   <button type="button" onClick={insertNotesPageMarker} title="在文末插入当前页标记">
