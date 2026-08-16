@@ -101,7 +101,7 @@ export default function SettingsPage({ onNavigate }) {
       <div className="settings-grid">
         <section className="panel settings-panel api-settings-panel">
           <div className="settings-head"><KeyRound size={17} /> API 配置</div>
-          <p className="institution-intro">输入你自己的 OpenAI 兼容接口。Agent、PDF 翻译与解读、AI 检索都使用这份配置。</p>
+          <p className="institution-intro">可添加多个 OpenAI 兼容供应商（DeepSeek、Kimi、通义等），随时切换当前启用的一套。Agent、PDF 翻译与解读、AI 检索都使用当前启用的配置。</p>
           <ApiConfigForm />
           <div className="settings-note">
             <Info size={15} />

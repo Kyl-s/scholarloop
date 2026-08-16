@@ -5607,6 +5607,110 @@ code {
   margin-bottom: 4px;
 }
 
+.api-provider-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 4px;
+}
+
+.api-provider-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.api-provider-row.is-active {
+  border-color: rgba(36, 86, 230, 0.35);
+  background: var(--accent-soft);
+}
+
+.api-provider-row.is-editing {
+  box-shadow: inset 0 0 0 1px rgba(36, 86, 230, 0.22);
+}
+
+.api-provider-row strong {
+  display: block;
+  font-size: 13px;
+}
+
+.api-provider-row span {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.api-provider-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.api-provider-text-btn {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 6px;
+}
+
+.api-provider-add-row {
+  display: flex;
+  justify-content: flex-start;
+  margin: 6px 0 4px;
+}
+
+.api-provider-editor {
+  margin-top: 6px;
+}
+
+.api-provider-editor-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 8px 0 2px;
+}
+
+.api-provider-editor-head > strong {
+  font-size: 13px;
+}
+
+.api-preset-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.api-preset-chip {
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: #fff;
+  color: #3d4d68;
+  font-size: 11.5px;
+  line-height: 1;
+  padding: 6px 9px;
+  cursor: pointer;
+}
+
+.api-preset-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
 .api-config-status p {
   font-size: 12.5px;
   color: #47556e;
