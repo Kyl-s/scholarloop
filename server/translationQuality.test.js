@@ -6,17 +6,22 @@ import {
   buildGlossaryHintForText,
   buildTextTranslateSystemPrompt,
   getAcademicGlossaryPath,
+  looksLikeBatchJsonRequest,
   protectUrls,
-  restoreUrls
+  restoreUrls,
+  sanitizeTranslationModelOutput,
+  stripLlmCodeFences
 } from "./translationQuality.js";
 
 test("academic system prompt asks for fluent Simplified Chinese", () => {
   assert.match(ACADEMIC_ZH_SYSTEM_PROMPT, /Simplified Chinese|简体中文/i);
   assert.match(ACADEMIC_ZH_SYSTEM_PROMPT, /academic|学术|journal/i);
   assert.match(ACADEMIC_ZH_SYSTEM_PROMPT, /terminology|consistent|术语/i);
-  // 必须兼容 BabelDOC 批量 JSON，禁止「只输出纯译文」
-  assert.match(ACADEMIC_ZH_SYSTEM_PROMPT, /JSON array|Output Format/i);
+  // 不要在 role_block 里规定 JSON/纯译文，否则会和 BabelDOC 两条路径互相打架
+  assert.doesNotMatch(ACADEMIC_ZH_SYSTEM_PROMPT, /JSON array/i);
   assert.doesNotMatch(ACADEMIC_ZH_SYSTEM_PROMPT, /Output only the translation/i);
+  assert.match(ACADEMIC_ZH_SYSTEM_PROMPT, /Output Format|user message/i);
+  assert.match(ACADEMIC_ZH_SYSTEM_PROMPT, /markdown fences|围栏/i);
   assert.match(ACADEMIC_ZH_SYSTEM_PROMPT, /URL|http|doi/i);
 });
 
@@ -53,4 +58,28 @@ test("glossary file exists and glossary hint only includes matching terms", () =
   assert.match(hint, /deep brain stimulation|DBS|时间干涉|temporally interfering/i);
   const empty = buildGlossaryHintForText("hello world only");
   assert.equal(empty, "");
+});
+
+test("strips one-line and multiline markdown JSON fences", () => {
+  assert.equal(stripLlmCodeFences("```json[{\"id\":1,\"output\":\"作者\"}]```"), "[{\"id\":1,\"output\":\"作者\"}]");
+  assert.equal(
+    stripLlmCodeFences("```json\n[{\"id\":1,\"output\":\"作者\"}]\n```"),
+    "[{\"id\":1,\"output\":\"作者\"}]"
+  );
+});
+
+test("sidebar/fallback path extracts output from leaked JSON", () => {
+  const leaked = "```json[  {    \"id\": 1,    \"output\": \"Nir Grossman, David Bono\"  }]```";
+  assert.equal(sanitizeTranslationModelOutput(leaked), "Nir Grossman, David Bono");
+  assert.equal(sanitizeTranslationModelOutput("非侵入性深部脑刺激"), "非侵入性深部脑刺激");
+});
+
+test("batch path keeps a clean JSON array after fence stripping", () => {
+  const leaked = "```json[{\"id\":0,\"input\":\"hello\",\"output\":\"你好\"}]```";
+  assert.equal(
+    sanitizeTranslationModelOutput(leaked, { expectJson: true }),
+    "[{\"id\":0,\"output\":\"你好\"}]"
+  );
+  assert.equal(looksLikeBatchJsonRequest("## Output Format\nReturn a JSON array"), true);
+  assert.equal(looksLikeBatchJsonRequest("Output ONLY the translated zh text."), false);
 });

@@ -9,6 +9,7 @@ import {
   getAcademicGlossaryPath
 } from "./translationQuality.js";
 import { fetchWithFallback, getProxyUrl } from "./proxy.js";
+import { applyPdfMathLlmProxyEnv } from "./pdfMathLlmProxy.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -803,6 +804,7 @@ function preparePdfMathTranslation({ data, config = {}, sourceLang = "en", targe
   delete env.OPENAI_MODEL;
   // Keep credentials out of argv and ScholarLoop files; PDFMathTranslate reads them from its child env.
   Object.assign(env, invocation.env);
+  applyPdfMathLlmProxyEnv(env);
   return {
     jobId,
     jobDir,
@@ -1378,6 +1380,7 @@ function resumePdfMathTranslation(job, args = {}) {
   delete env.OPENAI_BASE_URL;
   delete env.OPENAI_MODEL;
   Object.assign(env, invocation.env);
+  applyPdfMathLlmProxyEnv(env);
   prepared.invocation = invocation;
   prepared.env = env;
 

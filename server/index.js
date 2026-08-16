@@ -57,8 +57,10 @@ import {
   buildGlossaryHintForText,
   buildTextTranslateSystemPrompt,
   protectUrls,
-  restoreUrls
+  restoreUrls,
+  sanitizeTranslationModelOutput
 } from "./translationQuality.js";
+import { handlePdfMathLlmProxy, setPdfMathLlmProxyPort } from "./pdfMathLlmProxy.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -345,6 +347,20 @@ function decoratePdfMathJob(job) {
   };
 }
 
+app.post(
+  [
+    "/api/internal/pdf-math-llm/:token/chat/completions",
+    "/api/internal/pdf-math-llm/:token/v1/chat/completions"
+  ],
+  async (req, res) => {
+    try {
+      await handlePdfMathLlmProxy(req, res);
+    } catch (err) {
+      if (!res.headersSent) res.status(502).json({ error: err.message || "翻译代理失败" });
+    }
+  }
+);
+
 app.get("/api/pdf/translate-layout/:job", (req, res) => {
   const job = getPdfMathTranslationJob(req.params.job);
   if (!job) return res.status(404).json({ error: "排版翻译任务不存在或已失效" });
@@ -449,7 +465,7 @@ app.post("/api/translate", async (req, res) => {
       throw new Error(`${r.status} ${detail.slice(0, 200)}`);
     }
     const data = await r.json();
-    const content = extractModelText(data);
+    const content = sanitizeTranslationModelOutput(extractModelText(data));
     if (!content) throw new Error(modelResponseError(data));
     return { text: restoreUrls(content, urls), usage: parseChatUsage(data) };
   }
@@ -990,6 +1006,7 @@ app.use((err, _req, res, _next) => {
 
 const server = app.listen(PORT, () => {
   const actualPort = server.address().port;
+  setPdfMathLlmProxyPort(actualPort);
   console.log(`ScholarLoop server: http://127.0.0.1:${actualPort}`);
   console.log(`SCHOLARLOOP_PORT=${actualPort}`);
 });

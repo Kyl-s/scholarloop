@@ -127,3 +127,52 @@ test("accepts structured chat completion content returned by compatible provider
     await close(modelServer);
   }
 });
+
+test("strips leaked JSON fences from sidebar translation output", async () => {
+  const modelServer = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        choices: [{
+          message: {
+            content: "```json[{\"id\":1,\"output\":\"通过时间干涉电场实现非侵入性深部脑刺激\"}]```"
+          }
+        }]
+      }));
+    });
+  });
+  const modelPort = await listen(modelServer);
+  const portServer = http.createServer();
+  const appPort = await listen(portServer);
+  await close(portServer);
+  const appServer = spawn(process.execPath, ["server/index.js"], {
+    cwd: ROOT,
+    env: { ...process.env, PORT: String(appPort) },
+    stdio: "ignore"
+  });
+
+  try {
+    await waitForHealth(`http://127.0.0.1:${appPort}/api/health`);
+    const response = await fetch(`http://127.0.0.1:${appPort}/api/translate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        text: "Noninvasive Deep Brain Stimulation via Temporally Interfering Electric Fields",
+        config: {
+          baseUrl: `http://127.0.0.1:${modelPort}`,
+          apiKey: "dummy-local-test-key",
+          model: "mock-model"
+        }
+      })
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.text, "通过时间干涉电场实现非侵入性深部脑刺激");
+    assert.equal(body.text.includes("```"), false);
+    assert.equal(body.text.includes("\"id\""), false);
+  } finally {
+    appServer.kill();
+    await close(modelServer);
+  }
+});

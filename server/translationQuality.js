@@ -6,7 +6,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * 版式译 custom-system-prompt（写入 BabelDOC 的 role_block）。
- * 注意：批量路径要求模型返回 JSON 数组；禁止写「只输出纯译文」，否则整批解析失败会回退逐段、极慢像卡住。
+ * 只写文风/术语，不要写输出格式：
+ * - 批量路径自带「返回 JSON 数组」；role_block 若写「只输出纯译文」会冲掉该格式，整批失败后回退逐段、极慢。
+ * - 回退逐段路径要求纯文本；role_block 若写「必须输出 JSON」会把 ```json[{"id":1,"output":"..."}]``` 原样画进 PDF。
+ * 输出格式交给 BabelDOC 模板；围栏/泄漏由 sanitizeTranslationModelOutput 与本地 LLM 代理剥离。
  */
 export const ACADEMIC_ZH_SYSTEM_PROMPT = [
   "You are a professional native Chinese academic translator for scientific papers.",
@@ -15,8 +18,8 @@ export const ACADEMIC_ZH_SYSTEM_PROMPT = [
   "(noninvasive→非侵入性, recruit→募集, stimulation→刺激); keep common acronyms (DBS, TI, c-fos, EEG).",
   "Keep placeholders, tags, pure numbers/units/math tokens unchanged when they are not prose.",
   "Never translate URLs, DOIs, or web links (http/https/www/doi.org): copy them exactly as in the input.",
-  "Strictly follow the Structure Rules and Output Format sections below (JSON array with id/output).",
-  "Do not add explanations outside that JSON."
+  "Follow the Output Format and Structure Rules in the user message for this request.",
+  "Never wrap the answer in markdown fences or extra commentary."
 ].join(" ");
 
 /** 匹配需原样保留的网址 / DOI 链接 */
@@ -96,4 +99,101 @@ export function buildGlossaryHintForText(text, { maxEntries = 24 } = {}) {
   }
   if (!hits.length) return "";
   return `\n本段可用术语对照（出现时请优先采用）：${hits.join("；")}。`;
+}
+
+/** 去掉模型爱加的 ```json 围栏和 <think> */
+export function stripLlmCodeFences(text) {
+  let s = String(text || "").trim();
+  s = s.replace(/^<think>[\s\S]*?<\/think>/i, "").trim();
+  s = s.replace(/^<json>\s*/i, "").replace(/\s*<\/json>\s*$/i, "").trim();
+  const wrapped = s.match(/^```(?:json|JSON)?\s*([\s\S]*?)\s*```$/);
+  if (wrapped) return wrapped[1].trim();
+  if (/^```(?:json|JSON)?/.test(s)) {
+    s = s.replace(/^```(?:json|JSON)?\s*/, "");
+    s = s.replace(/\s*```$/, "");
+  }
+  return s.trim();
+}
+
+function tryParseJson(raw) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function firstJsonValue(text) {
+  const s = String(text || "").trim();
+  const direct = tryParseJson(s);
+  if (direct != null) return direct;
+  const arrayMatch = s.match(/\[[\s\S]*\]/);
+  if (arrayMatch) {
+    const parsed = tryParseJson(arrayMatch[0]);
+    if (parsed != null) return parsed;
+  }
+  const objectMatch = s.match(/\{[\s\S]*\}/);
+  if (objectMatch) {
+    const parsed = tryParseJson(objectMatch[0]);
+    if (parsed != null) return parsed;
+  }
+  return null;
+}
+
+function isTranslationRecord(item) {
+  return Boolean(item && typeof item === "object" && ("output" in item || ("id" in item && "input" in item)));
+}
+
+function collectTranslationOutputs(parsed) {
+  if (Array.isArray(parsed)) {
+    if (!parsed.length || !parsed.every(isTranslationRecord)) return null;
+    return parsed.map((item) => String(item.output ?? item.input ?? ""));
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  if (typeof parsed.output === "string") return [parsed.output];
+  if (Array.isArray(parsed.translations)) return collectTranslationOutputs(parsed.translations);
+  if (Array.isArray(parsed.results)) return collectTranslationOutputs(parsed.results);
+  return null;
+}
+
+function compactTranslationJson(parsed) {
+  if (Array.isArray(parsed)) {
+    return JSON.stringify(parsed.map((item) => ({
+      id: item.id,
+      output: String(item.output ?? item.input ?? "")
+    })));
+  }
+  if (parsed && typeof parsed === "object" && (parsed.id != null || typeof parsed.output === "string")) {
+    return JSON.stringify([{
+      id: parsed.id ?? 0,
+      output: String(parsed.output ?? parsed.input ?? "")
+    }]);
+  }
+  return "";
+}
+
+/** 批量路径的用户消息会带 JSON 数组说明 / id+input */
+export function looksLikeBatchJsonRequest(prompt) {
+  const s = String(prompt || "");
+  return /Return a JSON array/i.test(s)
+    || /## Output Format/.test(s)
+    || /"id"\s*:\s*\d+\s*,\s*"input"\s*:/.test(s);
+}
+
+/**
+ * 清洗模型译文：
+ * - expectJson=true（BabelDOC 批量）：剥围栏，只留合法 [{id,output}]
+ * - expectJson=false（侧栏 / 逐段回退）：若整段是 JSON，抽出 output，避免把 JSON 画进 PDF/面板
+ */
+export function sanitizeTranslationModelOutput(text, { expectJson = false } = {}) {
+  const cleaned = stripLlmCodeFences(text);
+  if (!cleaned) return "";
+  const parsed = firstJsonValue(cleaned);
+  const outputs = parsed ? collectTranslationOutputs(parsed) : null;
+  if (expectJson) {
+    if (outputs) return compactTranslationJson(parsed) || cleaned;
+    return cleaned;
+  }
+  if (outputs) return outputs.filter(Boolean).join("\n\n");
+  return cleaned;
 }
