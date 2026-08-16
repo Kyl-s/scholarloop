@@ -10,6 +10,7 @@ import {
 } from "./translationQuality.js";
 import { fetchWithFallback, getProxyUrl } from "./proxy.js";
 import { applyPdfMathLlmProxyEnv } from "./pdfMathLlmProxy.js";
+import { applyPdf2zhListMarkerPatch } from "./pdfListMarkers.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -30,6 +31,24 @@ const pdfMathInstallState = {
 };
 /** 识别公式/符号字符，尽量不译，减少 E1(x,y) 被拆坏 */
 const FORMULAR_CHAR_PATTERN = String.raw`^[α-ωΑ-Ωµ∂∇∆∑∏∫≈≠≤≥±×÷√∞°′″∈∉⊂⊃∪∩∧∨¬∀∃∝∼≡≪≫†‡]`;
+const PDF2ZH_PARAGRAPH_FINDER = path.join(
+  PDF_MATH_INSTALL_DIR,
+  "site-packages",
+  "babeldoc",
+  "format",
+  "pdf",
+  "document_il",
+  "midend",
+  "paragraph_finder.py"
+);
+
+function ensurePdf2zhListMarkerPatch() {
+  try {
+    applyPdf2zhListMarkerPatch(PDF2ZH_PARAGRAPH_FINDER);
+  } catch {
+    /* 本地 pdf2zh 未安装时忽略，翻译启动时会再报安装提示 */
+  }
+}
 
 function existsFile(value) {
   try {
@@ -1530,6 +1549,7 @@ export function cancelPdfMathTranslation(jobId) {
 }
 
 export function buildPdfMathTranslateInvocation({ inputPath, outputDir, config = {}, sourceLang = "en", targetLang = "zh", page = 0 } = {}) {
+  ensurePdf2zhListMarkerPatch();
   const from = normalizeLanguage(sourceLang, "en");
   const to = normalizeLanguage(targetLang, "zh");
   const baseUrl = String(config.baseUrl || "").trim().replace(/\/+$/, "");
