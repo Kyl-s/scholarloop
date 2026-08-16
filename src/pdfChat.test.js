@@ -26,6 +26,14 @@ test("a failed answer keeps the user's question and exposes the error state", ()
   ]);
 });
 
+test("settling against a stale list still keeps the user's question", () => {
+  const next = settleFollowup([], "ask-1", "这是答案。", "done", [], { q: "解释图 2" });
+  assert.equal(next.length, 1);
+  assert.equal(next[0].id, "ask-1");
+  assert.equal(next[0].q, "解释图 2");
+  assert.equal(next[0].a, "这是答案。");
+});
+
 test("an answer keeps page evidence for clickable PDF navigation", () => {
   const pending = [createPendingFollowup("ask-1", "解释图 2")];
   assert.deepEqual(

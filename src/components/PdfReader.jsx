@@ -341,6 +341,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
   const askInputRef = useRef(null);
   const aiScrollRef = useRef(null);
   const followupIdRef = useRef(0);
+  const followupsRef = useRef([]);
   const evidenceTimerRef = useRef(null);
   const pdfCacheSaveQueueRef = useRef(Promise.resolve());
   const loadedInterpretationRef = useRef("");
@@ -699,6 +700,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
     setEvidenceHighlight(null);
     setSaveInterpretationStatus("idle");
     setSaveInterpretationError("");
+    followupsRef.current = [];
     setFollowups([]);
     setPdfCacheStatus(paperId && !isTranslatedVariant ? "reading" : "idle");
     setPdfCacheError("");
@@ -975,7 +977,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
         usage: saved.usage,
         model: saved.model
       });
-      setFollowups(saved.followups || []);
+      const restoredFollowups = saved.followups || [];
+      followupsRef.current = restoredFollowups;
+      setFollowups(restoredFollowups);
       setSaveInterpretationStatus("saved");
     };
 
@@ -2098,6 +2102,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
 
       setInterpretLoading(true);
       setInterpretProgress(resolved === "full" ? "完全解读：正在阅读全文要点…" : "快速解读：正在提取摘要与结论…");
+      followupsRef.current = [];
       setFollowups([]);
       try {
         const data = await api.interpretPdf({
@@ -2147,7 +2152,10 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
       return;
     }
     const followupId = `followup-${Date.now()}-${followupIdRef.current++}`;
-    setFollowups((prev) => [...prev, createPendingFollowup(followupId, q)]);
+    const pending = createPendingFollowup(followupId, q);
+    const withPending = [...followupsRef.current, pending];
+    followupsRef.current = withPending;
+    setFollowups(withPending);
     setAskInput("");
     setAskLoading(true);
     setInterpretError("");
@@ -2160,7 +2168,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
         question: q,
         prior: interpretResult
       });
-      const nextFollowups = settleFollowup(followups, followupId, data.answer || "", "done", data.evidence || []);
+      const nextFollowups = settleFollowup(followupsRef.current, followupId, data.answer || "", "done", data.evidence || [], { q });
+      followupsRef.current = nextFollowups;
       setFollowups(nextFollowups);
       const nextMeta = data.usage
         ? { ...interpretMeta, usage: data.usage, model: data.model || interpretMeta?.model || config?.model || "" }
@@ -2168,7 +2177,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
       if (nextMeta !== interpretMeta) setInterpretMeta(nextMeta);
       await persistInterpretation({ result: interpretResult, meta: nextMeta, followups: nextFollowups });
     } catch (err) {
-      setFollowups((prev) => settleFollowup(prev, followupId, `追问失败：${err.message}`, "error"));
+      const nextFollowups = settleFollowup(followupsRef.current, followupId, `追问失败：${err.message}`, "error", [], { q });
+      followupsRef.current = nextFollowups;
+      setFollowups(nextFollowups);
     } finally {
       setAskLoading(false);
     }
