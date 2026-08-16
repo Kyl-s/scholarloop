@@ -2509,7 +2509,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose }) {
                     key={item.id}
                     style={{ left: `${item.x}%`, top: `${item.y}%` }}
                   >
-                    <button type="button" aria-label="关闭选区译文" onClick={() => removeSelectionTranslation(item.id)}>×</button>
+                    <button type="button" className="pdf-selection-translation-close" aria-label="关闭选区译文" onClick={() => removeSelectionTranslation(item.id)}>×</button>
                     <span>{item.translation}</span>
                   </div>
                 )) : null}
