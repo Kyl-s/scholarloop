@@ -46,7 +46,8 @@ import { interpretPdf } from "./pdfInterpret.js";
 import { mergeUsages, parseChatUsage } from "../src/llmUsage.js";
 import { clearPdfCache, getPdfCache, listPdfCaches, resolveLocalPdfPath, resolvePaperPdfPath, savePdfCache, savePdfSource } from "./pdfCache.js";
 import { parseReadingNotes } from "../src/readingNotes.js";
-import { fetchPdfWithOpenAccessFallback } from "./pdfResolve.js";
+import { fetchPdfWithOpenAccessFallback, isPdfBuffer, normalizeDoi } from "./pdfResolve.js";
+import { buildImportedPdfPaper, downloadPdf, guessPdfNameFromUrl, normalizeAuthorsInput } from "./pdfImportShared.js";
 import {
   cancelPdfMathTranslation,
   getPdfMathTranslateFile,
@@ -815,34 +816,89 @@ app.post("/api/import/pdf", async (req, res) => {
   const data = String(req.body?.data || "");
   const config = req.body?.config || {};
   const pdfName = String(req.body?.pdfName || "").trim();
+  // 可选元数据参数：显式传入的 title/authors/doi 优先于 PDF 提取值（authors 兼容数组或逗号分隔字符串）
+  const explicit = {
+    title: String(req.body?.title || "").trim(),
+    doi: normalizeDoi(req.body?.doi || ""),
+    authors: normalizeAuthorsInput(req.body?.authors)
+  };
   if (!data) return res.status(400).json({ error: "PDF 数据不能为空" });
   try {
     const buffer = Buffer.from(data, "base64");
-    const text = await extractPdfText(buffer);
-    const base = guessPdfMetadata(text);
-    const ai = await extractPdfMetadataAi(text, config);
-    const pdfsDir = path.join(__dirname, "..", "data", "pdfs");
-    if (!fs.existsSync(pdfsDir)) fs.mkdirSync(pdfsDir, { recursive: true });
-    const fileName = `${randomUUID()}.pdf`;
-    fs.writeFileSync(path.join(pdfsDir, fileName), buffer);
-    let title = (base.title || ai?.title || "").trim();
-    if (!title && pdfName) title = pdfName.replace(/\.pdf$/i, "").trim().slice(0, 300);
-    if (!title) title = `未命名文献（${new Date().toISOString().slice(0, 10)}）`;
-    const paper = makeManualPaper({
-      ...base,
-      ...(ai || {}),
-      title,
-      source: "manual",
-      url: "",
-      pdfUrl: `/api/pdf/file/${fileName}`
+    if (!isPdfBuffer(buffer)) throw new Error("上传内容不是有效的 PDF 文件（缺少 %PDF- 文件头）");
+    // 落盘 data/pdfs（复用 savePdfSource 的命名/哈希逻辑），pdfUrl 形如 /api/pdf/file/<uuid>.pdf
+    const source = savePdfSource(buffer);
+    // 与 /api/import/pdf-from-url 共用同一条提取→合并→DOI 反查流水线
+    const paper = await buildImportedPdfPaper(buffer, {
+      pdfName,
+      config,
+      explicit,
+      pdfUrl: source.pdfUrl,
+      resolveByDoi,
+      extractText: extractPdfText,
+      guessMetadata: guessPdfMetadata,
+      extractAi: extractPdfMetadataAi
     });
-    paper.aiExtracted = Boolean(ai);
-    paper.localPdf = true;
     res.json(paper);
   } catch (err) {
     res.status(400).json({ error: `PDF 解析失败：${err.message}` });
   }
 });
+
+// 服务端下载 URL 指向的 PDF 并导入：可附加到已有文献（paperId）或新建记录
+app.post("/api/import/pdf-from-url", async (req, res) => {
+  const url = String(req.body?.url || "").trim();
+  if (!url) return res.status(400).json({ ok: false, error: "缺少 PDF 下载链接（url）" });
+  const cookie = String(req.body?.cookie || "").trim();
+  const sourceUrl = String(req.body?.sourceUrl || "").trim();
+  const paperId = String(req.body?.paperId || "").trim();
+  const explicit = {
+    title: String(req.body?.title || "").trim(),
+    doi: normalizeDoi(req.body?.doi || ""),
+    authors: normalizeAuthorsInput(req.body?.authors)
+  };
+  try {
+    // 服务端下载：带 Cookie/浏览器 UA/Referer，跟随重定向，100MB 上限，校验 %PDF- 头
+    const { buffer } = await downloadPdf(url, { cookie, sourceUrl });
+    // 与 /api/import/pdf 相同的落盘与元数据流水线
+    const source = savePdfSource(buffer, sourceUrl);
+    const paper = await buildImportedPdfPaper(buffer, {
+      pdfName: guessPdfNameFromUrl(url),
+      explicit,
+      pdfUrl: source.pdfUrl,
+      // 记录来源页：优先 sourceUrl（文章页），否则记下载地址
+      url: sourceUrl || url,
+      resolveByDoi,
+      extractText: extractPdfText,
+      guessMetadata: guessPdfMetadata,
+      extractAi: extractPdfMetadataAi
+    });
+    // 附加模式：仅填空缺字段，不覆盖已有元数据
+    if (paperId) {
+      const existing = getData().library.find((p) => p.id === paperId);
+      if (!existing) return res.status(404).json({ ok: false, error: "未找到要附加 PDF 的文献记录" });
+      const patch = { pdfUrl: source.pdfUrl, localPdf: true };
+      for (const field of ["title", "authors", "year", "venue", "doi", "abstract", "keywords"]) {
+        if (paper[field] !== undefined && paper[field] !== null && !filledField(existing[field])) {
+          patch[field] = paper[field];
+        }
+      }
+      const updated = updatePaper(paperId, patch);
+      return res.json({ ok: true, paper: updated, attached: true });
+    }
+    res.json({ ok: true, paper, attached: false });
+  } catch (err) {
+    // 错误统一 { ok:false, error } 形状；not-pdf → 422，其余按错误类别给状态码
+    const status = err?.kind === "not-pdf" ? 422 : err?.kind === "too-large" ? 413 : err?.kind === "network" ? 502 : 500;
+    res.status(status).json({ ok: false, error: err?.message || "导入 PDF 失败" });
+  }
+});
+
+/** 判断文献记录里的字段是否为"空缺"（用于附加 PDF 时仅填空字段） */
+function filledField(value) {
+  if (Array.isArray(value)) return value.filter(Boolean).length > 0;
+  return String(value ?? "").trim().length > 0;
+}
 
 app.get("/api/path", (_req, res) => res.json(syncPathEvidence(getData().path, getData())));
 
