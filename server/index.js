@@ -18,6 +18,7 @@ import {
   removeMemory,
   upsertPaper,
   updatePaper,
+  findByDoi,
   getPaperInterpretation,
   savePaperInterpretation,
   removePaper,
@@ -839,6 +840,15 @@ app.post("/api/import/pdf", async (req, res) => {
       guessMetadata: guessPdfMetadata,
       extractAi: extractPdfMetadataAi
     });
+    // 库内查重：构建出的记录带 DOI 时，附加到同 DOI 的已有记录而不是新建
+    if (paper.doi) {
+      const duplicate = findByDoi(paper.doi);
+      if (duplicate) {
+        const attachedPaper = attachPdfToPaper(duplicate, paper, source.pdfUrl);
+        // 响应保持裸 paper 形状（LibraryPage 直接 upsert 该对象），attached 作为标记字段附在记录上
+        return res.json({ ...attachedPaper, attached: true });
+      }
+    }
     res.json(paper);
   } catch (err) {
     res.status(400).json({ error: `PDF 解析失败：${err.message}` });
@@ -877,14 +887,15 @@ app.post("/api/import/pdf-from-url", async (req, res) => {
     if (paperId) {
       const existing = getData().library.find((p) => p.id === paperId);
       if (!existing) return res.status(404).json({ ok: false, error: "未找到要附加 PDF 的文献记录" });
-      const patch = { pdfUrl: source.pdfUrl, localPdf: true };
-      for (const field of ["title", "authors", "year", "venue", "doi", "abstract", "keywords"]) {
-        if (paper[field] !== undefined && paper[field] !== null && !filledField(existing[field])) {
-          patch[field] = paper[field];
-        }
+      return res.json({ ok: true, paper: attachPdfToPaper(existing, paper, source.pdfUrl), attached: true });
+    }
+    // 库内查重：构建出的记录带 DOI 时，附加到同 DOI 的已有记录而不是新建——
+    // 用户在文献库点开原搜索记录即可直接读到新落盘的 PDF，避免两条记录脱节
+    if (paper.doi) {
+      const duplicate = findByDoi(paper.doi);
+      if (duplicate) {
+        return res.json({ ok: true, paper: attachPdfToPaper(duplicate, paper, source.pdfUrl), attached: true });
       }
-      const updated = updatePaper(paperId, patch);
-      return res.json({ ok: true, paper: updated, attached: true });
     }
     res.json({ ok: true, paper, attached: false });
   } catch (err) {
@@ -893,6 +904,21 @@ app.post("/api/import/pdf-from-url", async (req, res) => {
     res.status(status).json({ ok: false, error: err?.message || "导入 PDF 失败" });
   }
 });
+
+/**
+ * 把导入的 PDF 附加到已有文献记录：pdfUrl 与 localPdf 必写，
+ * 其余字段（title/authors/year/venue/doi/abstract/keywords）只填空缺值，不覆盖已有元数据。
+ * /api/import/pdf 与 /api/import/pdf-from-url 的查重附加共用此函数，保证口径一致。
+ */
+function attachPdfToPaper(existing, paper, pdfUrl) {
+  const patch = { pdfUrl, localPdf: true };
+  for (const field of ["title", "authors", "year", "venue", "doi", "abstract", "keywords"]) {
+    if (paper[field] !== undefined && paper[field] !== null && !filledField(existing[field])) {
+      patch[field] = paper[field];
+    }
+  }
+  return updatePaper(existing.id, patch);
+}
 
 /** 判断文献记录里的字段是否为"空缺"（用于附加 PDF 时仅填空字段） */
 function filledField(value) {

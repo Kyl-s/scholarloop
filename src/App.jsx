@@ -130,7 +130,9 @@ export default function App() {
           onClose={() => setPdfDownload(null)}
           onIngested={(paper) => {
             setPdfDownload(null);
-            showToast(`已入库：${paper?.title || "文献"}`);
+            showToast(`${paper?.attached ? "已附加到已有文献并打开" : "已入库并打开"}：${paper?.title || "文献"}`);
+            // 入库成功后自动聚焦该文献：openPaper 切到文献库并高亮对应记录
+            if (paper) openPaper(paper);
           }}
         />
       ) : null}

@@ -149,6 +149,33 @@ test("buildImportedPdfPaper skips crossref lookup when doi missing and tolerates
   assert.equal(paper2.doi, "10.1000/broken"); // 显式 doi 仍存入记录
 });
 
+test("buildImportedPdfPaper triggers crossref lookup with extracted doi when explicit doi missing", async () => {
+  let calledWith = null;
+  const resolveByDoi = async (doi) => {
+    calledWith = doi;
+    return {
+      doi: "10.1000/canonical-doi", title: "Crossref 标题",
+      authors: ["Crossref 作者"], year: 2024, venue: "Crossref 期刊"
+    };
+  };
+  // 无显式 doi：PDF 首页文本几乎都印有 DOI，提取到的 doi 也应触发反查
+  const paper = await buildImportedPdfPaper(Buffer.from("%PDF-fake"), {
+    explicit: {},
+    pdfUrl: "/api/pdf/file/abc.pdf",
+    resolveByDoi,
+    extractText: async () => "First page text with doi 10.1000/extracted-doi printed on it",
+    guessMetadata: () => ({ title: "", authors: [], year: null, venue: "", doi: "https://doi.org/10.1000/extracted-doi", abstract: "", keywords: [] }),
+    extractAi: async () => null
+  });
+  // 提取到的 doi 被规范化（去 doi.org 前缀）后传给反查函数
+  assert.equal(calledWith, "10.1000/extracted-doi");
+  // merged.doi 取 Crossref 返回的规范值，而非提取值
+  assert.equal(paper.doi, "10.1000/canonical-doi");
+  // 反查结果补全了提取不到的字段
+  assert.equal(paper.title, "Crossref 标题");
+  assert.equal(paper.venue, "Crossref 期刊");
+});
+
 // ---------- downloadPdf：mock fetcher ----------
 
 function fakeResponse({ body = Buffer.alloc(0), status = 200, statusText = "OK", contentType = "application/pdf", headers = {} } = {}) {

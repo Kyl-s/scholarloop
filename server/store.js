@@ -11,6 +11,7 @@ import {
   splitPathTask as splitPathTaskInPath
 } from "./path.js";
 import { clearPdfCache, deletePdfSource } from "./pdfCache.js";
+import { normalizeDoi } from "./pdfResolve.js";
 import { parseNoteAttachments, stripNoteAttachments } from "../src/noteAttachments.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -133,6 +134,22 @@ export function updatePaper(id, patch) {
   }
   save();
   return paper;
+}
+
+/**
+ * 按 DOI 查找库内文献记录（用于 PDF 导入前的查重附加）。
+ * DOI 规范化口径与 pdfImportShared/pdfResolve 保持一致：
+ * 去 doi.org 前缀、去 doi: 前缀、trim，比较时忽略大小写。
+ * 未找到或入参为空时返回 null。
+ */
+export function findByDoi(doi) {
+  const normalized = normalizeDoi(doi);
+  if (!normalized) return null;
+  const lower = normalized.toLowerCase();
+  return data.library.find((p) => {
+    const paperDoi = normalizeDoi(p.doi);
+    return paperDoi && paperDoi.toLowerCase() === lower;
+  }) || null;
 }
 
 function normalizeEvidenceItems(value) {

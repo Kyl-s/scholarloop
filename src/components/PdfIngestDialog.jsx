@@ -111,10 +111,12 @@ export default function PdfIngestDialog({ download, onClose, onIngested }) {
       if (form.venue.trim()) body.venue = form.venue.trim();
       const result = await api.importPdfFromUrl(body);
       if (result?.ok === false) throw new Error(result.error || "PDF 入库失败");
-      setDone(result?.paper || null);
+      // attached 标记随 paper 一起传出，供外层区分「新建入库 / 附加已有文献」
+      const paper = result?.paper ? { ...result.paper, attached: Boolean(result.attached) } : null;
+      setDone(paper);
       await refresh();
       // 短暂展示成功提示后关闭
-      setTimeout(() => onIngested?.(result?.paper), 1200);
+      setTimeout(() => onIngested?.(paper), 1200);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -148,7 +150,7 @@ export default function PdfIngestDialog({ download, onClose, onIngested }) {
         </div>
         <label>来源链接 <input value={form.sourceUrl} onChange={setField("sourceUrl")} placeholder={download?.url || "https://..."} /></label>
         {done ? (
-          <p className="form-note"><Link2 size={13} /> 已入库：{done.title || form.title}</p>
+          <p className="form-note"><Link2 size={13} /> {done.attached ? "已附加到已有文献" : "已入库"}：{done.title || form.title}</p>
         ) : null}
         {error ? <p className="error-text">{error}</p> : null}
         {saveState ? (

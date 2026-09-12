@@ -81,7 +81,7 @@ export function mergeImportMetadata({ extracted = {}, explicit = {}, crossref = 
  *   - extractText(buffer) → 文本（失败容错为空串，损坏 PDF 也能导入）
  *   - guessMetadata(text) → 提取的基础元数据
  *   - extractAi(text, config) → AI 元数据（可为 null）
- *   - resolveByDoi(doi) → Crossref 反查（显式 doi 存在时才调用，失败不阻断导入）
+ *   - resolveByDoi(doi) → Crossref 反查（显式 doi 或 PDF 文本提取到的 doi 存在时才调用，失败不阻断导入）
  */
 export async function buildImportedPdfPaper(buffer, {
   pdfName = "",
@@ -114,12 +114,14 @@ export async function buildImportedPdfPaper(buffer, {
     }
   }
   const extracted = { ...base, ...(ai || {}), pdfUrl };
-  // 3. 显式 doi 规范化；有值时反查 Crossref 补全缺失字段（失败不阻断导入）
+  // 3. DOI 反查触发条件：显式传入的 doi 或 PDF 首页文本提取到的 doi 均可
+  //    （PDF 首页几乎都印有 DOI，提取到即可反查补全元数据；失败不阻断导入）
   const explicitDoi = normalizeDoi(explicit.doi);
+  const extractedDoi = normalizeDoi(extracted.doi);
   let crossref = null;
-  if (explicitDoi && typeof resolveByDoi === "function") {
+  if ((explicitDoi || extractedDoi) && typeof resolveByDoi === "function") {
     try {
-      crossref = await resolveByDoi(explicitDoi);
+      crossref = await resolveByDoi(explicitDoi || extractedDoi);
     } catch {
       crossref = null;
     }
