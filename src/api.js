@@ -54,7 +54,11 @@ export const api = {
     method: "POST",
     body: JSON.stringify({ ...body, config: agentConfig() })
   }),
-  translate: async (body) => trackUsage("translate", await request("/api/translate", {
+ translate: async (body) => trackUsage("translate", await request("/api/translate", {
+   method: "POST",
+   body: JSON.stringify(body)
+ }), body?.config),
+  translateVisualLayout: async (body) => trackUsage("translate", await request("/api/translate/visual-layout", {
     method: "POST",
     body: JSON.stringify(body)
   }), body?.config),
@@ -111,10 +115,21 @@ export const api = {
     method: "POST",
     body: JSON.stringify(body)
   }),
+  // 从 URL 导入 PDF：body { url, cookie?, sourceUrl?, title?, doi?, authors?, ... }
+  // 成功返回 { ok: true, paper, attached }，失败返回 { ok: false, error }
+  importPdfFromUrl: (body) => request("/api/import/pdf-from-url", {
+    method: "POST",
+    body: JSON.stringify(body || {})
+  }),
   pdfUrl: (url, proxy, doi) => `/api/pdf?url=${encodeURIComponent(url || "")}${proxy ? `&proxy=${encodeURIComponent(proxy)}` : ""}${doi ? `&doi=${encodeURIComponent(doi)}` : ""}`,
   analyze: (body) => request("/api/analyze", { method: "POST", body: JSON.stringify(body) }),
   deepAnalyze: (body) => request("/api/analyze/deep", { method: "POST", body: JSON.stringify(body) }),
   models: (body) => request("/api/agent/models", { method: "POST", body: JSON.stringify(body || {}) }),
   exportData: () => request("/api/data/export", { method: "POST" }),
-  exportDraft: (id) => request(`/api/drafts/${id}/export`, { method: "POST" })
+  checkPaperSource: (id) => request(`/api/sources/${encodeURIComponent(id)}/check`, { method: "POST" }),
+  exportDraft: (id) => request(`/api/drafts/${id}/export`, { method: "POST" }),
+  importJournal: (body) => request("/api/journals/import", {
+    method: "POST",
+    body: JSON.stringify(body || {})
+  })
 };

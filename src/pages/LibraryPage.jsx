@@ -178,6 +178,27 @@ function ImportModal({ onClose, onImported }) {
   const [bibtex, setBibtex] = useState("");
   const [pdfData, setPdfData] = useState("");
   const [pdfName, setPdfName] = useState("");
+  // PDF 导入可选元数据：DOI / 标题（可由 DOI 解析预填），authors 为解析结果仅用于提交
+  const [pdfDoi, setPdfDoi] = useState("");
+  const [pdfTitle, setPdfTitle] = useState("");
+  const [pdfAuthors, setPdfAuthors] = useState([]);
+  const [pdfMetaLoading, setPdfMetaLoading] = useState(false);
+
+  // 按 DOI 补全：调用现有 DOI 导入接口预填标题（并暂存作者供提交使用）
+  const resolvePdfMetaByDoi = async () => {
+    const doi = pdfDoi.trim();
+    if (!doi) return;
+    setPdfMetaLoading(true);
+    try {
+      const paper = await api.post("/api/import", { type: "doi", data: doi });
+      if (paper?.title) setPdfTitle(paper.title);
+      if (Array.isArray(paper?.authors)) setPdfAuthors(paper.authors);
+    } catch {
+      /* 解析失败不打断导入流程，PDF 内文识别仍会兜底 */
+    } finally {
+      setPdfMetaLoading(false);
+    }
+  };
 
   const submit = async () => {
     setLoading(true);
@@ -187,7 +208,15 @@ function ImportModal({ onClose, onImported }) {
       if (tab === "pdf") {
         if (!pdfData) throw new Error("请先选择 PDF 文件");
         const config = loadAgentConfig();
-        paper = await api.importPdf({ data: pdfData, pdfName, config });
+        paper = await api.importPdf({
+          data: pdfData,
+          pdfName,
+          config,
+          // 可选提示字段：服务端会用其覆盖/兜底内文识别结果
+          title: pdfTitle.trim() || undefined,
+          doi: pdfDoi.trim() || undefined,
+          authors: pdfAuthors.length ? pdfAuthors : undefined
+        });
       } else if (tab === "doi") {
         paper = await api.post("/api/import", { type: "doi", data: doi });
       } else if (tab === "bibtex") {
@@ -246,6 +275,15 @@ function ImportModal({ onClose, onImported }) {
       ) : null}
       {tab === "pdf" ? (
         <div className="import-form">
+          <div className="two-col">
+            <label>DOI（可选，自动补全元数据） <input value={pdfDoi} onChange={(e) => setPdfDoi(e.target.value)} placeholder="10.xxxx/xxxxx" /></label>
+            <label>按 DOI 补全
+              <Button size="sm" variant="ghost" icon={pdfMetaLoading ? Loader2 : Link2} onClick={resolvePdfMetaByDoi} disabled={pdfMetaLoading || !pdfDoi.trim()}>
+                {pdfMetaLoading ? "识别中" : "补全标题"}
+              </Button>
+            </label>
+          </div>
+          <label>标题（可选） <input value={pdfTitle} onChange={(e) => setPdfTitle(e.target.value)} placeholder="留空则自动从 PDF 内文识别" /></label>
           <label className="pdf-import-picker">
             <FileText size={18} />
             <span>{pdfName || "选择本地 PDF 文件"}</span>

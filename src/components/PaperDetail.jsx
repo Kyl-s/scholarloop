@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   BookOpen,
   Sparkles,
@@ -10,6 +10,7 @@ import {
   ListChecks,
   Loader2,
   Check,
+  Paperclip,
   Quote,
   Target,
   Map,
@@ -52,6 +53,10 @@ export default function PaperDetail({ paper: initialPaper, onClose, onSave, save
     notes: paper.notes || ""
   });
   const [toast, setToast] = useState("");
+  const [toastError, setToastError] = useState(false);
+  // 「附加本地 PDF」的隐藏文件选择器
+  const pdfInputRef = useRef(null);
+  const [attaching, setAttaching] = useState(false);
 
   const abstract = paper.abstract || "";
 
@@ -120,7 +125,36 @@ export default function PaperDetail({ paper: initialPaper, onClose, onSave, save
 
   const showToast = (msg, isError = false) => {
     setToast(msg);
+    setToastError(Boolean(isError));
     setTimeout(() => setToast(""), 2400);
+  };
+
+  // 附加本地 PDF：把选中的文件转 base64，直接挂到当前文献（不新建记录）。
+  // 走 POST /api/library/:id/pdf-source，服务端写盘并更新 pdfUrl / localPdf。
+  const attachLocalPdf = async (file) => {
+    if (!file || !paper.id) return;
+    setAttaching(true);
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("读取文件失败"));
+        reader.readAsDataURL(file);
+      });
+      const data = dataUrl.split(",")[1] || "";
+      if (!data) throw new Error("读取文件失败");
+      // 服务端返回 { paper, source }，paper 已带最新 pdfUrl
+      const result = await api.savePaperPdf(paper.id, { data, sourceUrl: paper.url || "" });
+      // 同步 store：PUT 幂等合并服务端返回的完整文献对象
+      const updated = await updatePaper(paper.id, result.paper);
+      setPaper(updated);
+      onUpdate?.(updated);
+      showToast("已附加本地 PDF");
+    } catch (err) {
+      showToast(err.message, true);
+    } finally {
+      setAttaching(false);
+    }
   };
 
   const tags = (paper.tags || []).slice(0, 8);
@@ -161,6 +195,28 @@ export default function PaperDetail({ paper: initialPaper, onClose, onSave, save
             {paper.doi ? (
               <Button variant="ghost" size="sm" onClick={() => openUrl(`https://doi.org/${paper.doi}`)}>DOI</Button>
             ) : null}
+            {/* 附加本地 PDF：为没有 pdfUrl 的文献补挂本地文件，已有 PDF 时也可替换 */}
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={attaching ? Loader2 : Paperclip}
+              onClick={() => pdfInputRef.current?.click()}
+              disabled={attaching}
+              title="选择本地 PDF 文件，挂载到该文献"
+            >
+              {attaching ? "附加中" : "附加本地 PDF"}
+            </Button>
+            <input
+              ref={pdfInputRef}
+              type="file"
+              accept="application/pdf,.pdf"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                attachLocalPdf(file);
+              }}
+            />
           </div>
         </div>
 
@@ -325,7 +381,7 @@ export default function PaperDetail({ paper: initialPaper, onClose, onSave, save
           </div>
         ) : null}
       </div>
-      {toast ? <div className={`toast ${toast.includes("失败") ? "error" : ""}`}>{toast}</div> : null}
+      {toast ? <div className={`toast ${toastError ? "error" : ""}`}>{toast}</div> : null}
     </Modal>
   );
 }
