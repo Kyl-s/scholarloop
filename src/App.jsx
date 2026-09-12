@@ -12,7 +12,7 @@ import AgentFocusPage from "./pages/AgentFocusPage.jsx";
 import MemoryPage from "./pages/MemoryPage.jsx";
 import PdfReader from "./components/PdfReader.jsx";
 import PdfReaderBoundary from "./components/PdfReaderBoundary.jsx";
-import PdfIngestDialog from "./components/PdfIngestDialog.jsx";
+import PdfIngestDialog, { getPdfDownloadsBridge } from "./components/PdfIngestDialog.jsx";
 
 export default function App() {
   const [view, setView] = useState({ page: "dashboard", subtitle: "" });
@@ -24,9 +24,9 @@ export default function App() {
   const [pdfDownload, setPdfDownload] = useState(null);
   const [toast, setToast] = useState("");
 
-  // 订阅 preload 的 PDF 下载拦截；API 尚未就绪时静默不启用拦截功能
+  // 订阅 preload 的 PDF 下载拦截；桥接 API 尚未就绪时静默不启用拦截功能
   useEffect(() => {
-    const off = window.scholarloopDownloads?.onPdfDownload?.((info) => {
+    const off = getPdfDownloadsBridge()?.onPdfDownload?.((info) => {
       if (info) setPdfDownload(info);
     });
     return () => {

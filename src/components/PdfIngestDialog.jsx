@@ -4,6 +4,16 @@ import { api } from "../api.js";
 import { useData } from "../store.jsx";
 import { Button, Modal } from "./ui.jsx";
 
+/**
+ * 获取 preload 暴露的 PDF 下载桥接对象。
+ * 优先契约命名 window.scholarloopDownloads，回退兼容当前 preload 的
+ * window.scholarloop；两者都缺失时返回 null（静默不启用拦截功能）。
+ */
+export function getPdfDownloadsBridge() {
+  if (typeof window === "undefined") return null;
+  return window.scholarloopDownloads || window.scholarloop || null;
+}
+
 /** 从 URL 中提取 DOI（支持 doi.org/10.xxxx 与裸 10.xxxx 模式） */
 export function extractDoi(url) {
   if (!url) return "";
@@ -49,7 +59,7 @@ export default function PdfIngestDialog({ download, onClose, onIngested }) {
 
   // 订阅另存结果（preload API 缺失时静默不启用）
   useEffect(() => {
-    const off = window.scholarloopDownloads?.onPdfDownloadSaved?.((info) => {
+    const off = getPdfDownloadsBridge()?.onPdfDownloadSaved?.((info) => {
       setSaveState(info || {});
     });
     return () => {
@@ -115,7 +125,7 @@ export default function PdfIngestDialog({ download, onClose, onIngested }) {
   // 次要操作：放弃拦截，走系统「另存为」对话框
   const saveToDisk = () => {
     setSaveState(null);
-    window.scholarloopDownloads?.savePdfAs?.(download?.downloadId);
+    getPdfDownloadsBridge()?.savePdfAs?.(download?.downloadId);
   };
 
   return (
@@ -150,7 +160,7 @@ export default function PdfIngestDialog({ download, onClose, onIngested }) {
         ) : null}
       </div>
       <div className="import-actions">
-        <Button variant="ghost" onClick={saveToDisk} disabled={!download?.downloadId || !window.scholarloopDownloads?.savePdfAs}>
+        <Button variant="ghost" onClick={saveToDisk} disabled={!download?.downloadId || !getPdfDownloadsBridge()?.savePdfAs}>
           仍另存到磁盘
         </Button>
         <Button variant="ghost" onClick={onClose}>取消</Button>
