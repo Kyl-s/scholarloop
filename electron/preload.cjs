@@ -17,23 +17,8 @@ function safeHttpUrl(value) {
   }
 }
 
-contextBridge.exposeInMainWorld("scholarloop", {
-  pdfFetch: (url) => ipcRenderer.invoke("pdf-fetch", url),
-  openInstitution: (url) => ipcRenderer.invoke("institution-open", url),
-  /** Subscribe to safe popup requests from the embedded institution browser. */
-  onInstitutionPopup: (listener) => {
-    if (typeof listener !== "function") return () => {};
-    const handler = (_event, value) => {
-      const url = safeHttpUrl(value);
-      if (url) listener(url);
-    };
-    ipcRenderer.on("institution-popup", handler);
-    return () => ipcRenderer.removeListener("institution-popup", handler);
-  },
-  /** 用系统默认或自选程序打开本地 PDF */
-  openPdfPath: (filePath, options) => ipcRenderer.invoke("pdf-open-path", filePath, options || {}),
-  /** 用系统默认程序打开手记附件 */
-  openNoteFile: (fileId) => ipcRenderer.invoke("note-open-file", fileId),
+// PDF 下载拦截 API：scholarloop 与 scholarloopDownloads 共用同一实现
+const pdfDownloadApi = {
   /**
    * 订阅内嵌浏览器捕获的 PDF 下载事件。
    * payload: { downloadId, url, filename, sourceUrl, cookies }
@@ -58,4 +43,27 @@ contextBridge.exposeInMainWorld("scholarloop", {
     ipcRenderer.on("pdf-download-saved", handler);
     return () => ipcRenderer.removeListener("pdf-download-saved", handler);
   }
+};
+
+contextBridge.exposeInMainWorld("scholarloop", {
+  pdfFetch: (url) => ipcRenderer.invoke("pdf-fetch", url),
+  openInstitution: (url) => ipcRenderer.invoke("institution-open", url),
+  /** Subscribe to safe popup requests from the embedded institution browser. */
+  onInstitutionPopup: (listener) => {
+    if (typeof listener !== "function") return () => {};
+    const handler = (_event, value) => {
+      const url = safeHttpUrl(value);
+      if (url) listener(url);
+    };
+    ipcRenderer.on("institution-popup", handler);
+    return () => ipcRenderer.removeListener("institution-popup", handler);
+  },
+  /** 用系统默认或自选程序打开本地 PDF */
+  openPdfPath: (filePath, options) => ipcRenderer.invoke("pdf-open-path", filePath, options || {}),
+  /** 用系统默认程序打开手记附件 */
+  openNoteFile: (fileId) => ipcRenderer.invoke("note-open-file", fileId),
+  ...pdfDownloadApi
 });
+
+// 统一命名契约：前端通过 window.scholarloopDownloads 访问 PDF 下载 API
+contextBridge.exposeInMainWorld("scholarloopDownloads", pdfDownloadApi);
