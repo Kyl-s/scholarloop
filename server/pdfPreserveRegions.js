@@ -221,7 +221,7 @@ function pythonCandidates() {
   ].filter((item) => item.cmd);
 }
 
-function buildPreservePythonEnv(extra = {}) {
+export function buildPreservePythonEnv(extra = {}) {
   // Python 在 Windows 控制台默认编码下无法把中文路径中的文本写入 JSON stdout。
   // 用户已指定的值优先，避免覆盖嵌入式 Python 或调用方的编码配置。
   return {

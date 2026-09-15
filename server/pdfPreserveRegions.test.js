@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  buildPreservePythonEnv,
   classifyPreserveLine,
   collectFormulaLeakBoxes,
   collectPreserveBoxes,
@@ -149,7 +150,7 @@ test("stamps the Cell author block back onto the translated page", () => {
       "-c",
       "import fitz,sys; d=fitz.open(sys.argv[1]); t=d[0].get_text('text'); print(t)",
       dest
-    ], { encoding: "utf8", env: { ...process.env, ...py.env }, timeout: 20000, windowsHide: true });
+    ], { encoding: "utf8", env: buildPreservePythonEnv(py.env), timeout: 20000, windowsHide: true });
     assert.equal(dumped.status, 0);
     const text = dumped.stdout;
     assert.match(text, /Nir Grossman/);
