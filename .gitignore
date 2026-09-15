@@ -16,3 +16,5 @@ tools/
 scripts/qq-codex-gateway.env
 CONTINUE.md
 .DS_Store
+__pycache__/
+*.pyc
