@@ -12,6 +12,15 @@ import { fetchWithFallback, getProxyUrl } from "./proxy.js";
 import { applyPdfMathLlmProxyEnv } from "./pdfMathLlmProxy.js";
 import { applyPdf2zhListMarkerPatch } from "./pdfListMarkers.js";
 import { restorePreservedPageOutputs } from "./pdfPreserveRegions.js";
+import { renderPdfPage, getPdfPageCount } from "./pdfPageRender.js";
+import {
+  compileLayoutAssistPrompt,
+  createPageAssistState,
+  layoutAssistIdentity,
+  normalizeLayoutAssist,
+  requestPdfVisualContext,
+  validatePdfVisualContext
+} from "./pdfVisualContext.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -102,17 +111,41 @@ function serializableJob(job) {
     priorityPage: job.priorityPage || 1,
     activePage: job.activePage || 0,
     translateMode: job.translateMode === "all-remaining" ? "all-remaining" : "reading-window",
-    pages: Array.isArray(job.pages) ? job.pages.map((page) => ({ ...page })) : [],
+    pages: Array.isArray(job.pages) ? job.pages.map((page) => serializePageState(page, job.layoutAssist)) : [],
     sourceLang: job.sourceLang || "en",
     targetLang: job.targetLang || "zh",
-    sourceSha256: job.sourceSha256 || ""
+    sourceSha256: job.sourceSha256 || "",
+    layoutAssist: serializeLayoutAssist(job),
+    identity: job.identity || null,
+    identityHash: job.identityHash || ""
+  };
+}
+
+function serializePageState(page, layoutAssist) {
+  const assist = page?.assist || createPageAssistState(layoutAssist);
+  return {
+    page: Number(page?.page) || 0,
+    status: String(page?.status || "queued"),
+    progress: String(page?.progress || ""),
+    error: String(page?.error || ""),
+    monoFile: String(page?.monoFile || ""),
+    dualFile: String(page?.dualFile || ""),
+    assist: {
+      status: String(assist.status || "queued"),
+      mode: "page-context-v1",
+      error: String(assist.error || ""),
+      errorCode: String(assist.errorCode || ""),
+      stage: String(assist.stage || ""),
+      retryable: assist.retryable === true,
+      context: assist.context && typeof assist.context === "object" ? assist.context : null
+    }
   };
 }
 
 function jobHasUsablePages(job) {
   if (!job) return false;
-  if (job.result?.monoFile || job.result?.dualFile) return true;
-  return (job.pages || []).some((page) => page?.status === "completed" && (page.monoFile || page.dualFile));
+  if (jobOutputLooksLikePdf(job, job.result?.monoFile) || jobOutputLooksLikePdf(job, job.result?.dualFile)) return true;
+  return (job.pages || []).some((page) => page?.status === "completed" && pageHasValidOutput(job, page));
 }
 
 function hydratePagesFromOutputDir(job) {
@@ -126,9 +159,18 @@ function hydratePagesFromOutputDir(job) {
     return job;
   }
   const pageMap = new Map((job.pages || []).map((page) => [Number(page.page), { ...page }]));
+  for (const page of pageMap.values()) {
+    if (page.monoFile && !fileLooksLikePdf(outputFilePath(outputDir, page.monoFile))) page.monoFile = "";
+    if (page.dualFile && !fileLooksLikePdf(outputFilePath(outputDir, page.dualFile))) page.dualFile = "";
+  }
+  if (job.result) {
+    if (job.result.monoFile && !fileLooksLikePdf(outputFilePath(outputDir, job.result.monoFile))) job.result.monoFile = "";
+    if (job.result.dualFile && !fileLooksLikePdf(outputFilePath(outputDir, job.result.dualFile))) job.result.dualFile = "";
+  }
   for (const name of files) {
     const match = String(name).match(/^page-(\d+)\.zh\.(mono|dual)\.pdf$/i);
     if (!match) continue;
+    if (!fileLooksLikePdf(outputFilePath(outputDir, name))) continue;
     const page = Number(match[1]);
     const kind = match[2].toLowerCase();
     const current = pageMap.get(page) || {
@@ -149,7 +191,7 @@ function hydratePagesFromOutputDir(job) {
   if (!pageMap.size && (job.result?.monoFile || job.result?.dualFile)) return job;
   if (pageMap.size) {
     job.pages = [...pageMap.values()].sort((a, b) => a.page - b.page);
-    job.completedPages = job.pages.filter((page) => page.status === "completed").length;
+    job.completedPages = job.pages.filter((page) => page.status === "completed" && pageHasValidOutput(job, page)).length;
     if (!job.pageCount) job.pageCount = job.pages.length;
   }
   return job;
@@ -158,6 +200,11 @@ function hydratePagesFromOutputDir(job) {
 function finalizeInterruptedJob(job) {
   if (!job) return null;
   hydratePagesFromOutputDir(job);
+  if (job.status === "completed" && !jobHasUsablePages(job) && (job.result || job.pages?.length)) {
+    job.status = "failed";
+    job.error = "本地版式译文产物校验失败，请重新开始翻译";
+    job.progress = "版式译文产物无效";
+  }
   if (["queued", "running", "canceling"].includes(job.status)) {
     if (jobHasUsablePages(job)) {
       for (const page of job.pages || []) {
@@ -206,6 +253,8 @@ function persistJob(job) {
         sourceLang: job.sourceLang || "en",
         targetLang: job.targetLang || "zh",
         sourceSha256: job.sourceSha256 || "",
+        identity: job.identity || null,
+        identityHash: job.identityHash || "",
         updatedAt: job.updatedAt || Date.now()
       });
     }
@@ -471,6 +520,7 @@ export function isPdfBuffer(buffer) {
 export function findPdfMathTranslateOutputs(outputDir) {
   const files = fs.readdirSync(outputDir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && /\.pdf$/i.test(entry.name))
+    .filter((entry) => fileLooksLikePdf(outputFilePath(outputDir, entry.name)))
     .map((entry) => entry.name)
     .sort((a, b) => a.localeCompare(b));
   const source = files.find((name) => /^source\.pdf$/i.test(name));
@@ -488,6 +538,88 @@ export function findPdfMathTranslateOutputs(outputDir) {
 function normalizeLanguage(value, fallback) {
   const normalized = String(value || fallback).trim().toLowerCase();
   return /^[a-z]{2,8}(?:-[a-z]{2,8})?$/.test(normalized) ? normalized : fallback;
+}
+
+function normalizeBaseUrl(value) {
+  const input = String(value || "").trim().replace(/\/+$/, "");
+  if (!input) return "";
+  try {
+    const url = new URL(input);
+    url.protocol = url.protocol.toLowerCase();
+    url.hostname = url.hostname.toLowerCase();
+    if ((url.protocol === "https:" && url.port === "443") || (url.protocol === "http:" && url.port === "80")) {
+      url.port = "";
+    }
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return input.toLowerCase();
+  }
+}
+
+function normalizeProvider(config = {}) {
+  return String(config.provider || config.providerName || config.name || "").trim().toLowerCase();
+}
+
+function executableIdentity(resolved) {
+  const command = String(resolved?.command || "").trim();
+  let stat = null;
+  try {
+    const info = fs.statSync(command);
+    stat = { size: Number(info.size) || 0, mtimeMs: Math.round(Number(info.mtimeMs) || 0) };
+  } catch {
+    stat = null;
+  }
+  return {
+    source: String(resolved?.source || ""),
+    commandHash: command
+      ? sha256Buffer(Buffer.from(process.platform === "win32" ? path.resolve(command).toLowerCase() : path.resolve(command), "utf8"))
+      : "",
+    stat,
+    argsPrefix: Array.isArray(resolved?.argsPrefix) ? resolved.argsPrefix.map((arg) => String(arg)) : []
+  };
+}
+
+export function createPdfMathTranslationIdentity({ config = {}, sourceLang = "en", targetLang = "zh", sourceSha256 = "", layoutAssist, binary = "", resolved } = {}) {
+  const actualResolved = resolved === undefined ? resolvePdfMathTranslateCommand(binary) : resolved;
+  const baseSystemPrompt = String(config.pdfMathSystemPrompt || ACADEMIC_ZH_SYSTEM_PROMPT).trim();
+  const speed = getPdfMathSpeedOptions(config);
+  const identity = {
+    version: "pdf-math-job-identity-v1",
+    provider: normalizeProvider(config),
+    baseUrl: normalizeBaseUrl(config.baseUrl),
+    model: String(config.model || "").trim(),
+    sourceLang: normalizeLanguage(sourceLang, "en"),
+    targetLang: normalizeLanguage(targetLang, "zh"),
+    sourceSha256: String(sourceSha256 || "").trim(),
+    pdfMathSystemPromptHash: sha256Buffer(Buffer.from(baseSystemPrompt, "utf8")),
+    layoutAssist: layoutAssistIdentity(layoutAssist),
+    output: {
+      fontFamily: String(config.pdfMathFontFamily || "").trim(),
+      noDual: config.pdfMathNoDual === true || process.env.PDFMATH_TRANSLATE_NO_DUAL === "1",
+      noGlossary: config.pdfMathNoGlossary === true,
+      disableRichText: config.pdfMathDisableRichText === true || process.env.PDFMATH_DISABLE_RICH_TEXT === "1",
+      sendTemperature: config.pdfMathSendTemperature === true || process.env.PDFMATH_SEND_TEMPERATURE === "1",
+      qps: speed.qps,
+      workers: speed.workers,
+      pageWorkers: getPdfMathPageWorkers(config)
+    },
+    engine: executableIdentity(actualResolved)
+  };
+  return {
+    identity,
+    identityHash: sha256Buffer(Buffer.from(JSON.stringify(identity), "utf8"))
+  };
+}
+
+function jobIdentityMatches(job, requested) {
+  return Boolean(
+    job?.identityHash
+    && job?.identity
+    && requested?.identityHash
+    && job.identityHash === requested.identityHash
+    && JSON.stringify(job.identity) === JSON.stringify(requested.identity)
+  );
 }
 
 function boundedPositiveInt(value, fallback, maximum = 16) {
@@ -644,16 +776,19 @@ function sleep(ms) {
 
 function jobAllPagesCompleted(job) {
   if (!job) return false;
-  if (job.status === "completed" && (!job.pages?.length || job.pages.every((page) => page.status === "completed"))) {
+  if (job.status === "completed" && !job.pages?.length) {
+    return jobOutputLooksLikePdf(job, job.result?.monoFile) || jobOutputLooksLikePdf(job, job.result?.dualFile);
+  }
+  if (job.status === "completed" && job.pages.every((page) => page.status === "completed" && pageHasValidOutput(job, page))) {
     return true;
   }
   return Array.isArray(job.pages)
     && job.pages.length > 0
-    && job.pages.every((page) => page.status === "completed" && (page.monoFile || page.dualFile));
+    && job.pages.every((page) => page.status === "completed" && pageHasValidOutput(job, page));
 }
 
 function jobIncompletePages(job) {
-  return (job?.pages || []).filter((page) => page.status !== "completed" || !(page.monoFile || page.dualFile));
+  return (job?.pages || []).filter((page) => page.status !== "completed" || !pageHasValidOutput(job, page));
 }
 
 function tail(value, max = 1600) {
@@ -772,6 +907,23 @@ function runProcess(command, args, options = {}) {
   });
 }
 
+
+function serializeLayoutAssist(job) {
+  const assist = normalizeLayoutAssist(job?.layoutAssist);
+  const runtime = job?.layoutAssist && typeof job.layoutAssist === "object" ? job.layoutAssist : {};
+  return {
+    ...assist,
+    status: String(runtime.status || (assist.enabled ? "active" : "disabled")),
+    stage: String(runtime.stage || ""),
+    errorCode: String(runtime.errorCode || ""),
+    error: String(runtime.error || "")
+  };
+}
+
+function isPermanentVisionError(code) {
+  return ["VISION_AUTH", "VISION_MODEL_UNAVAILABLE", "VISION_UNSUPPORTED"].includes(String(code || ""));
+}
+
 function publicPdfMathJob(job) {
   if (!job) return null;
   return {
@@ -788,15 +940,18 @@ function publicPdfMathJob(job) {
     priorityPage: job.priorityPage || 1,
     activePage: job.activePage || 0,
     translateMode: job.translateMode === "all-remaining" ? "all-remaining" : "reading-window",
-    pages: Array.isArray(job.pages) ? job.pages.map((page) => ({ ...page })) : [],
+    pages: Array.isArray(job.pages) ? job.pages.map((page) => serializePageState(page, job.layoutAssist)) : [],
     sourceLang: job.sourceLang || "en",
     targetLang: job.targetLang || "zh",
     sourceSha256: job.sourceSha256 || "",
+    layoutAssist: serializeLayoutAssist(job),
+    identity: job.identity || null,
+    identityHash: job.identityHash || "",
     persisted: true
   };
 }
 
-function preparePdfMathTranslation({ data, config = {}, sourceLang = "en", targetLang = "zh", binary = "", paperId = "" } = {}) {
+function preparePdfMathTranslation({ data, config = {}, sourceLang = "en", targetLang = "zh", binary = "", paperId = "", layoutAssist, layoutAssistDeps = {} } = {}) {
   const buffer = Buffer.from(String(data || ""), "base64");
   if (!isPdfBuffer(buffer)) throw new Error("只能对 PDF 文件使用排版翻译");
 
@@ -815,6 +970,17 @@ function preparePdfMathTranslation({ data, config = {}, sourceLang = "en", targe
   const from = normalizeLanguage(sourceLang, "en");
   const to = normalizeLanguage(targetLang, "zh");
   const sourceSha256 = sha256Buffer(buffer);
+  const normalizedLayoutAssist = normalizeLayoutAssist(layoutAssist);
+  const identityInfo = createPdfMathTranslationIdentity({
+    config,
+    sourceLang: from,
+    targetLang: to,
+    sourceSha256,
+    layoutAssist: normalizedLayoutAssist,
+    resolved
+  });
+  const pageRenderer = layoutAssistDeps.renderer || layoutAssistDeps.renderPage || renderPdfPage;
+  const pageCounter = layoutAssistDeps.getPageCount || getPdfPageCount;
   fs.mkdirSync(outputDir, { recursive: true });
   fs.writeFileSync(inputPath, buffer);
   const invocation = buildPdfMathTranslateInvocation({ inputPath, outputDir, config, sourceLang: from, targetLang: to });
@@ -836,6 +1002,13 @@ function preparePdfMathTranslation({ data, config = {}, sourceLang = "en", targe
     sourceLang: from,
     targetLang: to,
     config,
+    layoutAssist: normalizedLayoutAssist,
+    identity: identityInfo.identity,
+    identityHash: identityInfo.identityHash,
+    pageRenderer,
+    pageCounter,
+    visionAnalyzer: layoutAssistDeps.vision || layoutAssistDeps.analyzePage || requestPdfVisualContext,
+    layoutAssistDeps,
     paperId: cleanPaperId(paperId),
     sourceSha256
   };
@@ -849,14 +1022,15 @@ function translatedPageFileName(pageNumber, kind) {
   return `${pageFilePrefix(pageNumber)}.zh.${kind}.pdf`;
 }
 
-function createPageStates(pageCount) {
+function createPageStates(pageCount, layoutAssist) {
   return Array.from({ length: pageCount }, (_, index) => ({
     page: index + 1,
     status: "queued",
     progress: "等待处理",
     error: "",
     monoFile: "",
-    dualFile: ""
+    dualFile: "",
+    assist: createPageAssistState(layoutAssist)
   }));
 }
 
@@ -873,15 +1047,45 @@ function wasPagePreempted(job) {
 }
 
 function fileLooksLikePdf(filePath) {
+  let descriptor;
   try {
     if (!existsFile(filePath)) return false;
     const stat = fs.statSync(filePath);
     // 空文件/目录不算产物；未写完的 0 字节残留不能当「已就绪」
-    if (!stat.isFile() || stat.size < 1) return false;
-    return true;
+    if (!stat.isFile() || stat.size < 5) return false;
+    const header = Buffer.alloc(5);
+    descriptor = fs.openSync(filePath, "r");
+    const bytesRead = fs.readSync(descriptor, header, 0, header.length, 0);
+    return bytesRead === header.length && header.toString("latin1") === "%PDF-";
   } catch {
     return false;
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        fs.closeSync(descriptor);
+      } catch {
+        // 读取失败时忽略关闭文件描述符的错误
+      }
+    }
   }
+}
+
+function outputFilePath(outputDir, fileName) {
+  const name = String(fileName || "");
+  if (!/^[A-Za-z0-9._-]+\.pdf$/i.test(name)) return "";
+  const root = path.resolve(outputDir);
+  const file = path.resolve(root, name);
+  return file.startsWith(`${root}${path.sep}`) ? file : "";
+}
+
+function jobOutputLooksLikePdf(job, fileName) {
+  const outputDir = job?.jobId ? path.join(JOBS_DIR, String(job.jobId), "output") : "";
+  const file = outputFilePath(outputDir, fileName);
+  return Boolean(file) && fileLooksLikePdf(file);
+}
+
+function pageHasValidOutput(job, pageState) {
+  return jobOutputLooksLikePdf(job, pageState?.monoFile) || jobOutputLooksLikePdf(job, pageState?.dualFile);
 }
 
 function resolveExistingPageOutputs(prepared, page) {
@@ -910,6 +1114,155 @@ function promoteExistingPageOutput(job, prepared, pageState, { allowWhileRunning
   return true;
 }
 
+function pageInterruptionOutcome(job) {
+  if (job?.cancelRequested) return "canceled";
+  if (job?.pagePreemptRequested) return "preempted";
+  return "";
+}
+
+function safeLayoutAssistError(error) {
+  const code = String(error?.code || "").trim();
+  const messages = {
+    VISION_UNSUPPORTED: "当前模型或接口不支持图片输入，请更换视觉模型或关闭页面图片辅助翻译",
+    VISION_AUTH: "视觉模型鉴权失败，请检查 API Key、模型权限和接口地址",
+    VISION_MODEL_UNAVAILABLE: "当前模型不存在或已失效，请在设置中刷新并选择可用模型",
+    VISION_TOO_LARGE: "页面图片被上游拒绝（请求过大），请降低图片分辨率或关闭页面图片辅助翻译",
+    VISION_TIMEOUT: "视觉模型请求超时，已回退普通翻译",
+    VISION_NETWORK: "视觉模型网络请求失败，已回退普通翻译",
+    VISION_EMPTY: "视觉模型返回为空，已回退普通翻译",
+    VISION_REASONING_ONLY: "视觉模型只返回了思考过程，已回退普通翻译",
+    VISION_INVALID_JSON: "视觉模型返回格式无效，已回退普通翻译",
+    VISION_INVALID_SCHEMA: "视觉模型页面语境结构无效，已回退普通翻译",
+    VISION_UPSTREAM: "视觉模型请求失败，已回退普通翻译",
+    VISION_RENDER: "页面视觉准备失败，已回退普通翻译"
+  };
+  return messages[code] || "页面视觉辅助不可用，已回退普通翻译";
+}
+
+function finishPageInterruption(job, pageState, outcome) {
+  const assist = pageState.assist || createPageAssistState(job.layoutAssist);
+  if (outcome === "canceled") {
+    pageState.status = "canceled";
+    pageState.progress = "已取消";
+    pageState.monoFile = "";
+    pageState.dualFile = "";
+    pageState.assist = { ...assist, status: "canceled", error: "", errorCode: "", context: null };
+    persistJob(job);
+    return;
+  }
+  requeuePageState(pageState, "已让出给当前阅读页");
+  pageState.monoFile = "";
+  pageState.dualFile = "";
+  pageState.assist = { ...assist, status: "queued", error: "", errorCode: "", context: null };
+  // 只有已经处理完本次抢占时才消费标志，不能在视觉准备期间提前清除。
+  job.pagePreemptRequested = false;
+  persistJob(job);
+}
+
+async function preparePageVisualContext(job, prepared, pageState, { signal } = {}) {
+  const layoutAssist = normalizeLayoutAssist(prepared.layoutAssist || job.layoutAssist);
+  if (!layoutAssist.enabled) {
+    pageState.assist = createPageAssistState(layoutAssist);
+    return null;
+  }
+  if (job.layoutAssist?.status === "degraded" && job.layoutAssist?.scope === "job") {
+    pageState.assist = {
+      ...(pageState.assist || createPageAssistState(layoutAssist)),
+      status: "fallback",
+      stage: String(job.layoutAssist.stage || "request"),
+      errorCode: String(job.layoutAssist.errorCode || "VISION_UPSTREAM"),
+      error: String(job.layoutAssist.error || "视觉辅助已降级，已回退普通翻译"),
+      retryable: false,
+      context: null
+    };
+    return null;
+  }
+  const interrupted = pageInterruptionOutcome(job);
+  if (interrupted) return { outcome: interrupted };
+  const existing = pageState.assist?.context;
+  if (pageState.assist?.status === "ready" && existing) {
+    try {
+      const validated = validatePdfVisualContext(existing, { page: pageState.page, lineCount: 240 });
+      const afterValidation = pageInterruptionOutcome(job);
+      return afterValidation ? { outcome: afterValidation } : validated;
+    } catch {
+      pageState.assist.context = null;
+    }
+  }
+  pageState.assist = {
+    ...(pageState.assist || createPageAssistState(layoutAssist)),
+    status: "rendering",
+    mode: layoutAssist.mode,
+    error: "",
+    errorCode: ""
+  };
+  touchJob(job, { progress: `正在准备第 ${pageState.page} 页视觉语境` });
+  try {
+    const rendered = await Promise.resolve(prepared.pageRenderer(prepared.inputPath, pageState.page, { signal }));
+    const afterRender = pageInterruptionOutcome(job);
+    if (afterRender) return { outcome: afterRender };
+    if (!rendered?.textLayer || !Array.isArray(rendered.lines) || !rendered.lines.length) {
+      throw new Error("本页没有文本层，已回退普通翻译");
+    }
+    if (!rendered.image) throw new Error("页面图像不可用，已回退普通翻译");
+    pageState.assist.status = "analyzing";
+    touchJob(job, { progress: `正在分析第 ${pageState.page} 页视觉语境` });
+    const context = await prepared.visionAnalyzer({
+      rendered,
+      page: pageState.page,
+      config: prepared.config,
+      fetchImpl: prepared.layoutAssistDeps.fetchImpl,
+      signal
+    });
+    const afterVision = pageInterruptionOutcome(job);
+    if (afterVision) return { outcome: afterVision };
+    const validated = validatePdfVisualContext(context, {
+      page: pageState.page,
+      lineCount: Math.min(240, rendered.lines.filter((line) => String(line?.text || "").trim()).length)
+    });
+    pageState.assist.status = "ready";
+    pageState.assist.context = validated;
+    pageState.assist.error = "";
+    pageState.assist.errorCode = "";
+    pageState.assist.stage = "";
+    pageState.assist.retryable = false;
+    pageState.assist.retryCount = 0;
+    persistJob(job);
+    return validated;
+  } catch (error) {
+    const interruptedAfterError = pageInterruptionOutcome(job);
+    if (interruptedAfterError) return { outcome: interruptedAfterError };
+    const code = String(error?.code || "VISION_RENDER").slice(0, 80);
+    const retryable = error?.retryable === true && Number(pageState.assist?.retryCount || 0) < 1;
+    if (retryable) {
+      pageState.assist.retryCount = Number(pageState.assist.retryCount || 0) + 1;
+      pageState.assist.status = "queued";
+      pageState.assist.stage = String(error?.stage || "request");
+      persistJob(job);
+      return preparePageVisualContext(job, prepared, pageState, { signal });
+    }
+    // 视觉能力是辅助能力，失败只影响语境分析，不阻塞普通翻译。
+    pageState.assist.status = "fallback";
+    pageState.assist.context = null;
+    pageState.assist.stage = String(error?.stage || (code === "VISION_RENDER" ? "render" : "request"));
+    pageState.assist.retryable = error?.retryable === true;
+    pageState.assist.errorCode = code;
+    pageState.assist.error = safeLayoutAssistError(error);
+    if (isPermanentVisionError(code)) {
+      job.layoutAssist = {
+        ...job.layoutAssist,
+        status: "degraded",
+        scope: "job",
+        stage: pageState.assist.stage,
+        errorCode: code,
+        error: pageState.assist.error
+      };
+    }
+    persistJob(job);
+    return null;
+  }
+}
+
 async function executePdfMathTranslationPage(job, prepared, pageState) {
   const page = pageState.page;
   // 开始前：仅当非 running 且磁盘已有合法 PDF 才跳过
@@ -932,18 +1285,42 @@ async function executePdfMathTranslationPage(job, prepared, pageState) {
   const pageDir = path.join(prepared.jobDir, "pages", pageFilePrefix(page));
   const pageOutputDir = path.join(pageDir, "output");
   fs.mkdirSync(pageOutputDir, { recursive: true });
+  const work = describePageWork(job, page);
+  pageState.progress = work.short;
+  job.activePage = page;
+  // 视觉阶段也属于本页的 active 工作，取消/翻页可以在此阶段被观测并抢占。
+  const visualAbortController = new AbortController();
+  job.visualAbortController = visualAbortController;
+  touchJob(job, { progress: work.detail });
+  const pageContext = await preparePageVisualContext(job, prepared, pageState, {
+    signal: visualAbortController.signal
+  });
+  const visualOutcome = pageContext?.outcome;
+  if (visualOutcome) {
+    finishPageInterruption(job, pageState, visualOutcome);
+    if (job.activePage === page) job.activePage = 0;
+    if (job.visualAbortController === visualAbortController) job.visualAbortController = null;
+    persistJob(job);
+    return visualOutcome;
+  }
+  const beforeInvocation = pageInterruptionOutcome(job);
+  if (beforeInvocation) {
+    finishPageInterruption(job, pageState, beforeInvocation);
+    if (job.activePage === page) job.activePage = 0;
+    if (job.visualAbortController === visualAbortController) job.visualAbortController = null;
+    persistJob(job);
+    return beforeInvocation;
+  }
   const invocation = buildPdfMathTranslateInvocation({
     inputPath: prepared.inputPath,
     outputDir: pageOutputDir,
     config: prepared.config,
     sourceLang: prepared.sourceLang,
     targetLang: prepared.targetLang,
-    page
+    page,
+    pageContext
   });
-  const work = describePageWork(job, page);
   pageState.progress = work.short;
-  job.activePage = page;
-  job.pagePreemptRequested = false;
   touchJob(job, { progress: work.detail });
   let currentChild = null;
   try {
@@ -1089,6 +1466,7 @@ async function executePdfMathTranslationPage(job, prepared, pageState) {
     return "failed";
   } finally {
     if (job.activePage === page) job.activePage = 0;
+    if (job.visualAbortController === visualAbortController) job.visualAbortController = null;
     if (currentChild) job.children.delete(currentChild);
     job.child = [...job.children][0] || null;
     persistJob(job);
@@ -1257,6 +1635,7 @@ export function setPdfMathTranslationPriority(jobId, priorityPage, options = {})
   // 仅当「当前阅读页还没真正完成」且后台在做别的页时才抢占
   if (!priorityDone && active && active !== next) {
     job.pagePreemptRequested = true;
+    job.visualAbortController?.abort(new Error("页面抢占"));
     if (job.children?.size) {
       for (const child of job.children) killProcessTree(child);
     } else if (job.child) {
@@ -1328,13 +1707,13 @@ async function executePdfMathTranslation(job, prepared) {
     const outputs = findPdfMathTranslateOutputs(prepared.outputDir);
     const monoPath = outputs.mono ? path.join(prepared.outputDir, outputs.mono) : "";
     const dualPath = outputs.dual ? path.join(prepared.outputDir, outputs.dual) : "";
-    if (!existsFile(monoPath) && !existsFile(dualPath)) {
+    if (!fileLooksLikePdf(monoPath) && !fileLooksLikePdf(dualPath)) {
       throw new Error(`PDFMathTranslate 没有生成译文 PDF${tail(result.stderr || result.stdout) ? `：${tail(result.stderr || result.stdout)}` : ""}`);
     }
     job.result = {
       jobId: job.jobId,
-      monoFile: existsFile(monoPath) ? outputs.mono : "",
-      dualFile: existsFile(dualPath) ? outputs.dual : "",
+      monoFile: fileLooksLikePdf(monoPath) ? outputs.mono : "",
+      dualFile: fileLooksLikePdf(dualPath) ? outputs.dual : "",
       sourceLang: prepared.sourceLang,
       targetLang: prepared.targetLang
     };
@@ -1356,7 +1735,7 @@ async function executePdfMathTranslation(job, prepared) {
   }
 }
 
-function findReusableJob({ paperId, sourceSha256, sourceLang, targetLang, force = false } = {}) {
+function findReusableJob({ paperId, sourceSha256, sourceLang, targetLang, layoutAssist, identity, force = false } = {}) {
   if (force || !paperId) return null;
   const indexPath = paperIndexFile(paperId);
   if (!existsFile(indexPath)) return null;
@@ -1367,6 +1746,7 @@ function findReusableJob({ paperId, sourceSha256, sourceLang, targetLang, force 
     if (job.sourceLang && job.sourceLang !== sourceLang) return null;
     if (job.targetLang && job.targetLang !== targetLang) return null;
     if (sourceSha256 && job.sourceSha256 && job.sourceSha256 !== sourceSha256) return null;
+    if (!jobIdentityMatches(job, identity)) return null;
     if (["queued", "running", "canceling"].includes(job.status)) return { job, mode: "active" };
     if (jobAllPagesCompleted(job)) return { job, mode: "complete" };
     // 部分完成：复用已完成页，继续翻译剩余页
@@ -1378,17 +1758,36 @@ function findReusableJob({ paperId, sourceSha256, sourceLang, targetLang, force 
 }
 
 function resumePdfMathTranslation(job, args = {}) {
+  const layoutAssist = normalizeLayoutAssist(args.layoutAssist || job.layoutAssist);
+  const layoutAssistDeps = args.layoutAssistDeps || {};
+  const resolved = resolvePdfMathTranslateCommand(args.binary || "");
+  const identityInfo = createPdfMathTranslationIdentity({
+    config: args.config || {},
+    sourceLang: job.sourceLang || normalizeLanguage(args.sourceLang, "en"),
+    targetLang: job.targetLang || normalizeLanguage(args.targetLang, "zh"),
+    sourceSha256: job.sourceSha256 || "",
+    layoutAssist,
+    resolved
+  });
+  if (!jobIdentityMatches(job, identityInfo)) throw new Error("任务翻译配置已变化，请新建任务");
   const prepared = {
     jobId: job.jobId,
     jobDir: path.join(JOBS_DIR, job.jobId),
     outputDir: path.join(JOBS_DIR, job.jobId, "output"),
     inputPath: path.join(JOBS_DIR, job.jobId, "source.pdf"),
-    resolved: resolvePdfMathTranslateCommand(args.binary || ""),
+    resolved,
     config: args.config || {},
     sourceLang: job.sourceLang || normalizeLanguage(args.sourceLang, "en"),
     targetLang: job.targetLang || normalizeLanguage(args.targetLang, "zh"),
     paperId: job.paperId || "",
     sourceSha256: job.sourceSha256 || "",
+    layoutAssist,
+    identity: identityInfo.identity,
+    identityHash: identityInfo.identityHash,
+    pageRenderer: layoutAssistDeps.renderer || layoutAssistDeps.renderPage || renderPdfPage,
+    pageCounter: layoutAssistDeps.getPageCount || getPdfPageCount,
+    visionAnalyzer: layoutAssistDeps.vision || layoutAssistDeps.analyzePage || requestPdfVisualContext,
+    layoutAssistDeps,
     priorityPage: Number(args.priorityPage) || 1
   };
   if (!prepared.resolved) throw new Error(getPdfMathTranslateStatus(args.binary || "").installHint);
@@ -1411,6 +1810,7 @@ function resumePdfMathTranslation(job, args = {}) {
   prepared.env = env;
 
   job.cancelRequested = false;
+  job.layoutAssist = layoutAssist;
   job.pagePreemptRequested = false;
   job.error = "";
   job.child = null;
@@ -1427,7 +1827,7 @@ function resumePdfMathTranslation(job, args = {}) {
   if (!Array.isArray(job.pages) || !job.pages.length) {
     const pageCount = Number(args.pageCount) || job.pageCount || 0;
     job.pageCount = pageCount;
-    job.pages = createPageStates(pageCount);
+    job.pages = createPageStates(pageCount, layoutAssist);
   }
   hydratePagesFromOutputDir(job);
   PDF_MATH_JOBS.set(job.jobId, job);
@@ -1440,12 +1840,28 @@ export function startPdfMathTranslation(args = {}) {
   const paperId = cleanPaperId(args.paperId);
   const from = normalizeLanguage(args.sourceLang, "en");
   const to = normalizeLanguage(args.targetLang, "zh");
+  const layoutAssist = normalizeLayoutAssist(args.layoutAssist);
   const continueAll = Boolean(args.continueAll || args.translateMode === "all-remaining");
+  let requestedSourceSha256 = "";
+  try {
+    const probe = Buffer.from(String(args.data || ""), "base64");
+    if (isPdfBuffer(probe)) requestedSourceSha256 = sha256Buffer(probe);
+  } catch {
+    requestedSourceSha256 = "";
+  }
+  const requestedIdentity = createPdfMathTranslationIdentity({
+    config: args.config || {},
+    sourceLang: from,
+    targetLang: to,
+    sourceSha256: requestedSourceSha256,
+    layoutAssist,
+    binary: args.binary || ""
+  });
 
   // 前端带着已有 jobId 续译：不依赖 paperId，已完成页直接跳过
   if (!args.force && args.jobId) {
     const existing = resolveJob(args.jobId);
-    if (existing) {
+    if (existing && jobIdentityMatches(existing, requestedIdentity)) {
       hydratePagesFromOutputDir(existing);
       recountCompletedPages(existing);
       if (["queued", "running", "canceling"].includes(existing.status)) {
@@ -1474,6 +1890,8 @@ export function startPdfMathTranslation(args = {}) {
           sourceSha256: sha256Buffer(probe),
           sourceLang: from,
           targetLang: to,
+          layoutAssist,
+          identity: requestedIdentity,
           force: false
         });
         if (reusable?.mode === "active") {
@@ -1496,12 +1914,21 @@ export function startPdfMathTranslation(args = {}) {
     }
   }
 
-  const prepared = preparePdfMathTranslation({ ...args, paperId });
+  const prepared = preparePdfMathTranslation({ ...args, paperId, layoutAssist });
   prepared.priorityPage = Number(args.priorityPage) || 1;
   prepared.continueAll = continueAll;
   prepared.translateMode = continueAll ? "all-remaining" : "reading-window";
-  const requestedPageCount = Number(args.pageCount);
-  const progressive = args.progressive !== false && Number.isInteger(requestedPageCount) && requestedPageCount > 1;
+  let requestedPageCount = Number(args.pageCount);
+  if (layoutAssist.enabled && (!Number.isInteger(requestedPageCount) || requestedPageCount < 1)) {
+    try {
+      requestedPageCount = Number(prepared.pageCounter(prepared.inputPath)) || 0;
+    } catch {
+      requestedPageCount = 0;
+    }
+  }
+  const progressive = layoutAssist.enabled
+    ? Number.isInteger(requestedPageCount) && requestedPageCount > 0
+    : args.progressive !== false && Number.isInteger(requestedPageCount) && requestedPageCount > 1;
   const now = Date.now();
   const job = {
     jobId: prepared.jobId,
@@ -1521,10 +1948,13 @@ export function startPdfMathTranslation(args = {}) {
     startedAt: null,
     pageCount: progressive ? requestedPageCount : 0,
     completedPages: 0,
-    pages: progressive ? createPageStates(requestedPageCount) : [],
+    pages: progressive ? createPageStates(requestedPageCount, layoutAssist) : [],
     sourceLang: prepared.sourceLang,
     targetLang: prepared.targetLang,
-    sourceSha256: prepared.sourceSha256
+    sourceSha256: prepared.sourceSha256,
+    layoutAssist,
+    identity: prepared.identity,
+    identityHash: prepared.identityHash
   };
   PDF_MATH_JOBS.set(job.jobId, job);
   persistJob(job);
@@ -1546,6 +1976,7 @@ export function cancelPdfMathTranslation(jobId) {
   if (!job) return null;
   if (["completed", "failed", "canceled"].includes(job.status)) return publicPdfMathJob(job);
   job.cancelRequested = true;
+  job.visualAbortController?.abort(new Error("任务取消"));
   touchJob(job, { status: "canceling", progress: "正在停止排版翻译" });
   if (job.children?.size) {
     for (const child of job.children) killProcessTree(child);
@@ -1555,7 +1986,7 @@ export function cancelPdfMathTranslation(jobId) {
   return publicPdfMathJob(job);
 }
 
-export function buildPdfMathTranslateInvocation({ inputPath, outputDir, config = {}, sourceLang = "en", targetLang = "zh", page = 0 } = {}) {
+export function buildPdfMathTranslateInvocation({ inputPath, outputDir, config = {}, sourceLang = "en", targetLang = "zh", page = 0, pageContext = null } = {}) {
   ensurePdf2zhListMarkerPatch();
   const from = normalizeLanguage(sourceLang, "en");
   const to = normalizeLanguage(targetLang, "zh");
@@ -1564,7 +1995,8 @@ export function buildPdfMathTranslateInvocation({ inputPath, outputDir, config =
   const model = String(config.model || "").trim();
   const speed = getPdfMathSpeedOptions(config);
   const glossaryPath = getAcademicGlossaryPath();
-  const systemPrompt = String(config.pdfMathSystemPrompt || ACADEMIC_ZH_SYSTEM_PROMPT).trim();
+  const baseSystemPrompt = String(config.pdfMathSystemPrompt || ACADEMIC_ZH_SYSTEM_PROMPT).trim();
+  const systemPrompt = pageContext ? compileLayoutAssistPrompt(baseSystemPrompt, pageContext) : baseSystemPrompt;
   const fontFamily = String(config.pdfMathFontFamily || "").trim();
   // 通顺 + 对齐观感：
   // - 学术中文 prompt + 静态术语表（术语一致）
@@ -1640,7 +2072,7 @@ export function getPdfMathTranslateFile(jobId, fileName) {
     path.resolve(jobDir, String(fileName)),
     path.resolve(jobDir, "output", String(fileName))
   ];
-  return candidates.find((file) => file.startsWith(`${jobDir}${path.sep}`) && existsFile(file)) || null;
+  return candidates.find((file) => file.startsWith(`${jobDir}${path.sep}`) && fileLooksLikePdf(file)) || null;
 }
 
 export async function translatePdfWithMath({ data, config = {}, sourceLang = "en", targetLang = "zh", binary = "" } = {}) {

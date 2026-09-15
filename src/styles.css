@@ -3851,6 +3851,15 @@ code {
   line-height: 1.5;
 }
 
+.pdf-layout-ready-hint.is-mismatch {
+  border-color: #f0d59f;
+  background: #fffaf0;
+}
+
+.pdf-layout-ready-hint.is-mismatch .pdf-layout-ready-hint-main strong {
+  color: #9a6200;
+}
+
 .pdf-layout-ready-hint-main em {
   font-style: normal;
   font-weight: 600;
@@ -4304,6 +4313,72 @@ code {
   color: #9a6200;
 }
 
+.pdf-layout-primary-head em.mismatch {
+  background: #fff1d6;
+  color: #9a6200;
+}
+
+.pdf-layout-assist {
+  display: grid;
+  gap: 4px;
+  padding: 10px 11px;
+  border: 1px solid #d7e2f7;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.pdf-layout-assist.is-enabled {
+  border-color: #a9c2f5;
+  background: #f8faff;
+}
+
+.pdf-layout-assist-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #2a58c9;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.pdf-layout-assist-toggle input {
+  margin: 0;
+  accent-color: #2456e6;
+}
+
+.pdf-layout-assist-toggle input:disabled {
+  cursor: not-allowed;
+}
+
+.pdf-layout-assist p {
+  margin: 0;
+  color: #687892;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.pdf-layout-assist p span {
+  margin-left: 7px;
+  color: #52627d;
+  font-weight: 600;
+}
+
+.pdf-layout-assist-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 3px;
+  color: #60718c;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.pdf-layout-assist.is-enabled .pdf-layout-assist-status {
+  color: #2a58c9;
+  font-weight: 600;
+}
+
 .pdf-layout-status-card {
   display: flex;
   flex-direction: column;
@@ -4323,6 +4398,11 @@ code {
 .pdf-layout-status-card.is-done {
   border-color: #b7e0c8;
   background: #f3fbf6;
+}
+
+.pdf-layout-status-card.is-mismatch {
+  border-color: #f0d59f;
+  background: #fffaf0;
 }
 
 .pdf-layout-status-row {

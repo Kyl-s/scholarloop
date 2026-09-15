@@ -22,6 +22,8 @@ import {
   unloadPdfMathTranslationJob
 } from "./pdfMathTranslate.js";
 
+const FAKE_PDF = "%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
+
 test("从发行版资源里挑出 Windows zip", () => {
   const asset = pickPdfMathWindowsAsset([
     { name: "PDFMathTranslate-v2.8.0-src.tar.gz" },
@@ -40,9 +42,10 @@ test("recognizes PDF buffers and rejects non-PDF buffers", () => {
 test("finds mono and dual PDFMathTranslate outputs", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scholarloop-pdfmath-"));
   try {
-    fs.writeFileSync(path.join(dir, "source.pdf"), "%PDF-1.7");
-    fs.writeFileSync(path.join(dir, "source-mono.pdf"), "%PDF-1.7");
-    fs.writeFileSync(path.join(dir, "source-dual.pdf"), "%PDF-1.7");
+    fs.writeFileSync(path.join(dir, "source.pdf"), FAKE_PDF);
+    fs.writeFileSync(path.join(dir, "source-mono.pdf"), FAKE_PDF);
+    fs.writeFileSync(path.join(dir, "source-dual.pdf"), FAKE_PDF);
+    fs.writeFileSync(path.join(dir, "broken-mono.pdf"), "not a PDF");
     assert.deepEqual(findPdfMathTranslateOutputs(dir), {
       mono: "source-mono.pdf",
       dual: "source-dual.pdf",
@@ -60,11 +63,13 @@ test("serves PDFMathTranslate files from the output directory", () => {
   try {
     const fileName = "source.zh.mono.pdf";
     const expected = path.join(jobDir, fileName);
-    fs.writeFileSync(expected, "%PDF-1.7");
+    fs.writeFileSync(expected, FAKE_PDF);
     const resolved = getPdfMathTranslateFile(jobId, fileName);
     assert.ok(resolved);
     // junction / 真实路径可能不同，比较解析后的真实路径
     assert.equal(fs.realpathSync(resolved), fs.realpathSync(expected));
+    fs.writeFileSync(expected, "not a PDF");
+    assert.equal(getPdfMathTranslateFile(jobId, fileName), null);
   } finally {
     fs.rmSync(path.dirname(jobDir), { recursive: true, force: true });
   }
@@ -130,6 +135,23 @@ test("adds a page selector and only-include-translated-page for progressive page
   const pagesIdx = invocation.args.indexOf("--pages");
   assert.equal(invocation.args[pagesIdx + 1], "1");
   assert.ok(invocation.args.includes("--only-include-translated-page"));
+});
+
+test("merges page context into the custom prompt without changing argv protocol", () => {
+  const pageContext = {
+    version: "page-context-v1",
+    page: 1,
+    textLayer: true,
+    columns: 2,
+    readingOrder: [0],
+    regions: [{ kind: "text", order: 0, lineIndexes: [0], confidence: 1 }],
+    notes: ""
+  };
+  const plain = buildPdfMathTranslateInvocation({ inputPath: "source.pdf", outputDir: "out", page: 1 });
+  const assisted = buildPdfMathTranslateInvocation({ inputPath: "source.pdf", outputDir: "out", page: 1, pageContext });
+  assert.equal(assisted.args.slice(0, 10).join("|"), plain.args.slice(0, 10).join("|"));
+  assert.match(assisted.args[assisted.args.indexOf("--custom-system-prompt") + 1], /SCHOLARLOOP PAGE CONTEXT v1/);
+  assert.match(assisted.args[assisted.args.indexOf("--custom-system-prompt") + 1], /never output JSON/);
 });
 
 test("allows a provider-specific PDFMathTranslate speed profile", () => {
@@ -240,11 +262,12 @@ test("runs a layout translation as a pollable job and exposes its result", async
       "@echo off",
       "set \"OUT=%~3\"",
       "if not exist \"%OUT%\" mkdir \"%OUT%\"",
-      "> \"%OUT%\\source.zh.mono.pdf\" echo fake-pdf",
+      "> \"%OUT%\\source.zh.mono.pdf\" echo %%PDF-1.4",
+      ">> \"%OUT%\\source.zh.mono.pdf\" echo %%EOF",
       "exit /b 0",
       ""
     ].join("\r\n")
-    : "#!/bin/sh\nexit 0\n";
+    : "#!/bin/sh\nmkdir -p \"$3\"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > \"$3/source.zh.mono.pdf\"\n";
   fs.writeFileSync(command, script, { mode: 0o755 });
   const started = startPdfMathTranslation({
     data: Buffer.from("%PDF-1.7\n").toString("base64"),
@@ -303,11 +326,12 @@ test("publishes the first completed page while later pages are still running", a
       "set \"OUT=%~3\"",
       "echo %~3 | findstr /i \"page-002\" >nul && ping 127.0.0.1 -n 16 >nul",
       "if not exist \"%OUT%\" mkdir \"%OUT%\"",
-      "> \"%OUT%\\source.zh.mono.pdf\" echo fake-pdf",
+      "> \"%OUT%\\source.zh.mono.pdf\" echo %%PDF-1.4",
+      ">> \"%OUT%\\source.zh.mono.pdf\" echo %%EOF",
       "exit /b 0",
       ""
     ].join("\r\n")
-    : "#!/bin/sh\nmkdir -p \"$3\"\nprintf 'fake-pdf\\n' > \"$3/source.zh.mono.pdf\"\n";
+    : "#!/bin/sh\nmkdir -p \"$3\"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > \"$3/source.zh.mono.pdf\"\n";
   fs.writeFileSync(command, script, { mode: 0o755 });
   const started = startPdfMathTranslation({
     data: Buffer.from("%PDF-1.7\n").toString("base64"),
@@ -349,11 +373,12 @@ test("translates progressive PDF pages serially by default", async () => {
       "set \"OUT=%~3\"",
       "echo %~3 | findstr /i \"page-002\" >nul && ping 127.0.0.1 -n 8 >nul",
       "if not exist \"%OUT%\" mkdir \"%OUT%\"",
-      "> \"%OUT%\\source.zh.mono.pdf\" echo fake-pdf",
+      "> \"%OUT%\\source.zh.mono.pdf\" echo %%PDF-1.4",
+      ">> \"%OUT%\\source.zh.mono.pdf\" echo %%EOF",
       "exit /b 0",
       ""
     ].join("\r\n")
-    : "#!/bin/sh\ncase \"$3\" in *page-002*) sleep 10;; esac\nmkdir -p \"$3\"\nprintf 'fake-pdf\\n' > \"$3/source.zh.mono.pdf\"\n";
+    : "#!/bin/sh\ncase \"$3\" in *page-002*) sleep 10;; esac\nmkdir -p \"$3\"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > \"$3/source.zh.mono.pdf\"\n";
   fs.writeFileSync(command, script, { mode: 0o755 });
   const started = startPdfMathTranslation({
     data: Buffer.from("%PDF-1.7\n").toString("base64"),
@@ -394,11 +419,12 @@ test("reprioritizes a running progressive job to the current reading page", asyn
       "set \"OUT=%~3\"",
       "echo %~3 | findstr /i \"page-001\" >nul && ping 127.0.0.1 -n 20 >nul",
       "if not exist \"%OUT%\" mkdir \"%OUT%\"",
-      "> \"%OUT%\\source.zh.mono.pdf\" echo fake-pdf",
+      "> \"%OUT%\\source.zh.mono.pdf\" echo %%PDF-1.4",
+      ">> \"%OUT%\\source.zh.mono.pdf\" echo %%EOF",
       "exit /b 0",
       ""
     ].join("\r\n")
-    : "#!/bin/sh\ncase \"$3\" in *page-001*) sleep 20;; esac\nmkdir -p \"$3\"\nprintf 'fake-pdf\\n' > \"$3/source.zh.mono.pdf\"\n";
+    : "#!/bin/sh\ncase \"$3\" in *page-001*) sleep 20;; esac\nmkdir -p \"$3\"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > \"$3/source.zh.mono.pdf\"\n";
   fs.writeFileSync(command, script, { mode: 0o755 });
   const started = startPdfMathTranslation({
     data: Buffer.from("%PDF-1.7\n").toString("base64"),
@@ -458,13 +484,15 @@ test("persists layout translation job and restores after memory clear", async ()
       "@echo off",
       "set \"OUT=%~3\"",
       "if not exist \"%OUT%\" mkdir \"%OUT%\"",
-      "> \"%OUT%\\source.zh.mono.pdf\" echo fake-pdf",
+      "> \"%OUT%\\source.zh.mono.pdf\" echo %%PDF-1.4",
+      ">> \"%OUT%\\source.zh.mono.pdf\" echo %%EOF",
       "exit /b 0",
       ""
     ].join("\r\n")
-    : "#!/bin/sh\nmkdir -p \"$3\"\nprintf 'fake-pdf\\n' > \"$3/source.zh.mono.pdf\"\n";
+    : "#!/bin/sh\nmkdir -p \"$3\"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > \"$3/source.zh.mono.pdf\"\n";
   fs.writeFileSync(command, script, { mode: 0o755 });
   const paperId = "manual:persist-layout-test";
+  let differentModelJob = null;
   const started = startPdfMathTranslation({
     data: Buffer.from("%PDF-1.7\n").toString("base64"),
     binary: command,
@@ -508,9 +536,254 @@ test("persists layout translation job and restores after memory clear", async ()
     });
     assert.equal(reused.jobId, started.jobId);
     assert.equal(reused.status, "completed");
+
+    // 同一 paper / PDF 但模型变化时必须创建新的任务身份，不能复用旧产物。
+    differentModelJob = startPdfMathTranslation({
+      data: Buffer.from("%PDF-1.7\n").toString("base64"),
+      binary: command,
+      pageCount: 1,
+      progressive: false,
+      paperId,
+      config: { baseUrl: "http://127.0.0.1:1", apiKey: "test-secret", model: "different-model" }
+    });
+    assert.notEqual(differentModelJob.jobId, started.jobId);
+    assert.notEqual(differentModelJob.identityHash, started.identityHash);
+    assert.equal(differentModelJob.identity.model, "different-model");
+    let differentStatus = getPdfMathTranslationJob(differentModelJob.jobId);
+    for (let attempt = 0; attempt < 80 && !["completed", "failed", "canceled"].includes(differentStatus.status); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      differentStatus = getPdfMathTranslationJob(differentModelJob.jobId);
+    }
+    assert.equal(differentStatus.status, "completed", differentStatus.error || differentStatus.progress);
   } finally {
     fs.rmSync(path.join(process.cwd(), "data", "pdf-translations", started.jobId), { recursive: true, force: true });
+    if (differentModelJob) fs.rmSync(path.join(process.cwd(), "data", "pdf-translations", differentModelJob.jobId), { recursive: true, force: true });
     fs.rmSync(path.join(process.cwd(), "data", "pdf-translations", "by-paper", `${encodeURIComponent(paperId)}.json`), { force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("成功视觉辅助会把页面语境送入 PDFMathTranslate 调用", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scholarloop-pdfmath-visual-success-"));
+  const command = path.join(dir, process.platform === "win32" ? "fake-visual-success.cmd" : "fake-visual-success");
+  const capture = path.join(dir, "argv.txt");
+  const captureForBatch = capture.replace(/%/g, "%%");
+  const script = process.platform === "win32"
+    ? [
+      "@echo off",
+      "set \"OUT=%~3\"",
+      "set \"HAS_PROMPT=0\"",
+      "set \"HAS_CONTEXT=0\"",
+      "echo %* | findstr /c:\"SCHOLARLOOP\" >nul && set \"HAS_CONTEXT=1\"",
+      ":scan",
+      "if \"%~1\"==\"\" goto done",
+      "if \"%~1\"==\"--custom-system-prompt\" set \"HAS_PROMPT=1\"",
+      "echo %~1 | findstr /c:\"SCHOLARLOOP\" >nul && set \"HAS_CONTEXT=1\"",
+      "shift",
+      "goto scan",
+      ":done",
+      `> \"${captureForBatch}\" echo prompt=%HAS_PROMPT%;context=%HAS_CONTEXT%`,
+      "if not exist \"%OUT%\" mkdir \"%OUT%\"",
+      "> \"%OUT%\\source.zh.mono.pdf\" echo %%PDF-1.4",
+      ">> \"%OUT%\\source.zh.mono.pdf\" echo %%EOF",
+      "exit /b 0",
+      ""
+    ].join("\r\n")
+    : `#!/bin/sh\nprintf '%s\\n' "$@" > '${capture.replace(/'/g, "'\\''")}'\nmkdir -p "$3"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > "$3/source.zh.mono.pdf"\n`;
+  fs.writeFileSync(command, script, { mode: 0o755 });
+  const pageContext = {
+    version: "page-context-v1",
+    page: 1,
+    textLayer: true,
+    columns: 1,
+    readingOrder: [0],
+    regions: [{ kind: "text", order: 0, lineIndexes: [0], confidence: 1 }],
+    notes: ""
+  };
+  const started = startPdfMathTranslation({
+    data: Buffer.from("%PDF-1.7\n").toString("base64"),
+    binary: command,
+    pageCount: 1,
+    progressive: true,
+    layoutAssist: { enabled: true },
+    layoutAssistDeps: {
+      renderer: async (_input, page, { signal } = {}) => ({
+        page,
+        textLayer: true,
+        image: "data:image/png;base64,AA==",
+        lines: [{ text: "Title", left: 1, top: 2 }],
+        signal
+      }),
+      vision: async ({ signal }) => {
+        assert.ok(signal, "视觉请求应携带 AbortSignal");
+        return pageContext;
+      }
+    },
+    config: { baseUrl: "http://127.0.0.1:1", apiKey: "test-secret", model: "vision-translation-test" }
+  });
+  let job = started;
+  for (let attempt = 0; attempt < 80 && !["completed", "failed", "canceled"].includes(job.status); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    job = getPdfMathTranslationJob(started.jobId);
+  }
+  try {
+    assert.equal(job.status, "completed", job.error || job.progress);
+    assert.equal(job.pages[0].assist.status, "ready");
+    const captured = fs.readFileSync(capture, "utf8");
+    if (process.platform === "win32") {
+      assert.match(captured, /prompt=1/);
+    } else {
+      assert.match(captured, /--custom-system-prompt/);
+      assert.match(captured, /SCHOLARLOOP PAGE CONTEXT v1/);
+    }
+  } finally {
+    fs.rmSync(path.join(process.cwd(), "data", "pdf-translations", started.jobId), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("视觉准备阶段取消时不启动 PDFMathTranslate", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scholarloop-pdfmath-visual-cancel-"));
+  const command = path.join(dir, process.platform === "win32" ? "fake-visual-cancel.cmd" : "fake-visual-cancel");
+  const script = process.platform === "win32"
+    ? "@echo off\r\nexit /b 17\r\n"
+    : "#!/bin/sh\nexit 17\n";
+  fs.writeFileSync(command, script, { mode: 0o755 });
+  let visionStarted;
+  const startedPromise = new Promise((resolve) => { visionStarted = resolve; });
+  const started = startPdfMathTranslation({
+    data: Buffer.from("%PDF-1.7\n").toString("base64"),
+    binary: command,
+    pageCount: 1,
+    progressive: true,
+    layoutAssist: { enabled: true },
+    layoutAssistDeps: {
+      renderer: () => ({ textLayer: true, image: "data:image/png;base64,AA==", lines: [{ text: "Title" }] }),
+      vision: ({ signal }) => new Promise((_resolve, reject) => {
+        visionStarted();
+        signal.addEventListener("abort", () => reject(new Error("vision aborted")), { once: true });
+      })
+    },
+    config: { baseUrl: "http://127.0.0.1:1", apiKey: "test-secret", model: "cancel-vision-test" }
+  });
+  try {
+    await startedPromise;
+    assert.equal(getPdfMathTranslationJob(started.jobId).activePage, 1);
+    cancelPdfMathTranslation(started.jobId);
+    let job = getPdfMathTranslationJob(started.jobId);
+    for (let attempt = 0; attempt < 60 && job.status !== "canceled"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      job = getPdfMathTranslationJob(started.jobId);
+    }
+    assert.equal(job.status, "canceled", job.error || job.progress);
+    assert.equal(job.pages[0].status, "canceled");
+    assert.equal(job.pages[0].assist.status, "canceled");
+    assert.equal(job.pages[0].assist.context, null);
+    assert.equal(job.activePage, 0);
+  } finally {
+    fs.rmSync(path.join(process.cwd(), "data", "pdf-translations", started.jobId), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("视觉准备阶段抢占时让出页面且继续处理新阅读页", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scholarloop-pdfmath-visual-preempt-"));
+  const command = path.join(dir, process.platform === "win32" ? "fake-visual-preempt.cmd" : "fake-visual-preempt");
+  const script = process.platform === "win32"
+    ? ["@echo off", "set \"OUT=%~3\"", "if not exist \"%OUT%\" mkdir \"%OUT%\"", "> \"%OUT%\\source.zh.mono.pdf\" echo %%PDF-1.4", ">> \"%OUT%\\source.zh.mono.pdf\" echo %%EOF", "exit /b 0", ""].join("\r\n")
+    : "#!/bin/sh\nmkdir -p \"$3\"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > \"$3/source.zh.mono.pdf\"\n";
+  fs.writeFileSync(command, script, { mode: 0o755 });
+  let firstVisionStarted;
+  let visionCalls = 0;
+  const firstStarted = new Promise((resolve) => { firstVisionStarted = resolve; });
+  const makeContext = (page) => ({ version: "page-context-v1", page, textLayer: true, columns: 1, readingOrder: [0], regions: [{ kind: "text", order: 0, lineIndexes: [0], confidence: 1 }], notes: "" });
+  const started = startPdfMathTranslation({
+    data: Buffer.from("%PDF-1.7\n").toString("base64"),
+    binary: command,
+    pageCount: 2,
+    progressive: true,
+    priorityPage: 1,
+    layoutAssist: { enabled: true },
+    layoutAssistDeps: {
+      renderer: () => ({ textLayer: true, image: "data:image/png;base64,AA==", lines: [{ text: "Title" }] }),
+      vision: ({ page, signal }) => {
+        visionCalls += 1;
+        if (visionCalls === 1) {
+          firstVisionStarted();
+          return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("vision preempted")), { once: true }));
+        }
+        return Promise.resolve(makeContext(page));
+      }
+    },
+    config: { baseUrl: "http://127.0.0.1:1", apiKey: "test-secret", model: "preempt-vision-test" }
+  });
+  try {
+    await firstStarted;
+    setPdfMathTranslationPriority(started.jobId, 2);
+    let job = getPdfMathTranslationJob(started.jobId);
+    for (let attempt = 0; attempt < 100 && job.pages[1].status !== "completed"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      job = getPdfMathTranslationJob(started.jobId);
+    }
+    assert.equal(job.pages[0].status, "queued");
+    assert.equal(job.pages[0].assist.status, "queued");
+    assert.equal(job.pages[0].assist.context, null);
+    assert.equal(job.pages[1].status, "completed", job.error || job.progress);
+  } finally {
+    cancelPdfMathTranslation(started.jobId);
+    fs.rmSync(path.join(process.cwd(), "data", "pdf-translations", started.jobId), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("视觉辅助失败时标记本页 fallback 且不阻塞普通翻译", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scholarloop-pdfmath-visual-fallback-"));
+  const command = path.join(dir, process.platform === "win32" ? "fake-visual-fallback.cmd" : "fake-visual-fallback");
+  const script = process.platform === "win32"
+    ? [
+      "@echo off",
+      "set \"OUT=%~3\"",
+      "if not exist \"%OUT%\" mkdir \"%OUT%\"",
+      "> \"%OUT%\\source.zh.mono.pdf\" echo %%PDF-1.4",
+      ">> \"%OUT%\\source.zh.mono.pdf\" echo %%EOF",
+      "exit /b 0",
+      ""
+    ].join("\r\n")
+    : "#!/bin/sh\nmkdir -p \"$3\"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > \"$3/source.zh.mono.pdf\"\n";
+  fs.writeFileSync(command, script, { mode: 0o755 });
+  const started = startPdfMathTranslation({
+    data: Buffer.from("%PDF-1.7\n").toString("base64"),
+    binary: command,
+    pageCount: 1,
+    progressive: true,
+    layoutAssist: { enabled: true, mode: "page-context-v1", failurePolicy: "fallback" },
+    layoutAssistDeps: {
+      renderer: () => ({ textLayer: true, image: "data:image/png;base64,AA==", lines: [{ text: "Title" }] }),
+      vision: () => {
+        const error = new Error("provider secret-detail must not be persisted");
+        error.code = "VISION_UNSUPPORTED";
+        throw error;
+      }
+    },
+    config: { baseUrl: "http://127.0.0.1:1", apiKey: "test-secret", model: "test-model" }
+  });
+  let job = started;
+  for (let attempt = 0; attempt < 80 && !["completed", "failed", "canceled"].includes(job.status); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    job = getPdfMathTranslationJob(started.jobId);
+  }
+  try {
+    assert.equal(job.status, "completed", job.error || job.progress);
+    assert.equal(job.layoutAssist.enabled, true);
+    assert.equal(job.layoutAssist.status, "degraded");
+    assert.equal(job.pages[0].assist.status, "fallback");
+    assert.equal(job.pages[0].assist.errorCode, "VISION_UNSUPPORTED");
+    assert.match(job.pages[0].assist.error, /不支持图片输入/);
+    assert.ok(job.pages[0].monoFile);
+    const snapshot = fs.readFileSync(path.join(process.cwd(), "data", "pdf-translations", started.jobId, "job.json"), "utf8");
+    assert.doesNotMatch(snapshot, /test-secret|data:image|provider secret-detail/i);
+  } finally {
+    fs.rmSync(path.join(process.cwd(), "data", "pdf-translations", started.jobId), { recursive: true, force: true });
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

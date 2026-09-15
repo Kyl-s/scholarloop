@@ -47,7 +47,7 @@ import { interpretPdf } from "./pdfInterpret.js";
 import { mergeUsages, parseChatUsage } from "../src/llmUsage.js";
 import { clearPdfCache, getPdfCache, listPdfCaches, resolveLocalPdfPath, resolvePaperPdfPath, savePdfCache, savePdfSource } from "./pdfCache.js";
 import { parseReadingNotes } from "../src/readingNotes.js";
-import { fetchPdfWithOpenAccessFallback, isPdfBuffer, normalizeDoi } from "./pdfResolve.js";
+import { extractPdfText, fetchPdfWithOpenAccessFallback, isPdfBuffer, normalizeDoi } from "./pdfResolve.js";
 import { buildImportedPdfPaper, downloadPdf, guessPdfNameFromUrl, normalizeAuthorsInput } from "./pdfImportShared.js";
 import {
   cancelPdfMathTranslation,
@@ -68,10 +68,9 @@ import {
   sanitizeTranslationModelOutput
 } from "./translationQuality.js";
 import { handlePdfMathLlmProxy, setPdfMathLlmProxyPort } from "./pdfMathLlmProxy.js";
+import { extractModelText, modelResponseError } from "./modelResponse.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
-const { PDFParse } = require("pdf-parse");
 const app = express();
 const PORT = process.env.PORT || 8787;
 
@@ -89,49 +88,6 @@ app.use(
 process.on("unhandledRejection", (reason) => {
   console.error("未处理的异步错误：", reason);
 });
-
-function normalizeModelContent(value) {
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) {
-    return value
-      .map((part) => {
-        if (typeof part === "string") return part;
-        if (part && typeof part === "object") {
-          return normalizeModelContent(part.text ?? part.content ?? part.value ?? "");
-        }
-        return "";
-      })
-      .filter(Boolean)
-      .join("");
-  }
-  if (value && typeof value === "object") {
-    return normalizeModelContent(value.text ?? value.content ?? value.value ?? "");
-  }
-  return value == null ? "" : String(value);
-}
-
-function extractModelText(data) {
-  const choice = data?.choices?.[0];
-  const candidates = [choice?.message?.content, choice?.text, data?.output_text];
-  for (const candidate of candidates) {
-    const text = normalizeModelContent(candidate).trim();
-    if (text) return text;
-  }
-  return "";
-}
-
-function modelResponseError(data) {
-  const message = data?.choices?.[0]?.message;
-  const reasoning = normalizeModelContent(message?.reasoning_content ?? message?.reasoning).trim();
-  if (reasoning) return "模型只返回了思考过程，没有最终译文；请提高输出上限或更换翻译模型";
-  return "模型返回为空：接口没有返回最终译文";
-}
-
-async function extractPdfText(buffer, maxPages = 15) {
-  const parser = new PDFParse({ data: buffer });
-  const parsed = await parser.getText();
-  return String(parsed?.text || "").replace(/[ \t]+/g, " ").trim().slice(0, 30000);
-}
 
 function guessPdfMetadata(text) {
   const clean = String(text || "").replace(/\r/g, "").trim();
@@ -460,6 +416,7 @@ app.post("/api/pdf/translate-layout", async (req, res) => {
       force: Boolean(req.body?.force),
       // 续译未完成页（跳过已完成）；与 force 互斥
       continueAll: Boolean(req.body?.continueAll || req.body?.translateMode === "all-remaining"),
+      layoutAssist: req.body?.layoutAssist,
       binary: settings.pdfMathTranslateBin || ""
     });
     // 复用已完成本地任务时直接 200；新建任务仍返回 202
@@ -730,9 +687,37 @@ app.get("/api/library/:id/pdf-cache", (req, res) => {
 });
 
 // 恢复该文献已持久化的版式翻译任务（重启后可直接打开，无需重译）
+function normalizePdfMathBaseUrl(value) {
+  const input = String(value || "").trim().replace(/\/+$/, "");
+  if (!input) return "";
+  try {
+    const url = new URL(input);
+    url.protocol = url.protocol.toLowerCase();
+    url.hostname = url.hostname.toLowerCase();
+    if ((url.protocol === "https:" && url.port === "443") || (url.protocol === "http:" && url.port === "80")) url.port = "";
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return input.toLowerCase();
+  }
+}
+
+function pdfMathJobMatchesRequestedConfig(job, { model = "", baseUrl = "" } = {}) {
+  if (!model && !baseUrl) return true;
+  const identity = job?.identity;
+  if (!identity || typeof identity !== "object") return false;
+  return (!model || String(identity.model || "").trim() === model)
+    && (!baseUrl || normalizePdfMathBaseUrl(identity.baseUrl) === normalizePdfMathBaseUrl(baseUrl));
+}
+
 app.get("/api/library/:id/pdf-layout-translation", (req, res) => {
   const paper = getData().library.find((item) => item.id === req.params.id);
   if (!paper) return res.status(404).json({ error: "文献不存在" });
+  // 只接受 model/baseUrl，绝不从恢复请求读取或回显 API Key。
+  const requestedConfig = {
+    model: String(req.query?.model || "").trim().slice(0, 300),
+    baseUrl: String(req.query?.baseUrl || "").trim().slice(0, 1000)
+  };
   const cache = getPdfCache(req.params.id);
   let job = null;
   if (cache?.layoutTranslationJobId) {
@@ -745,6 +730,9 @@ app.get("/api/library/:id/pdf-layout-translation", (req, res) => {
     });
   }
   if (!job) return res.status(404).json({ error: "该文献还没有本地版式译文" });
+  if (!pdfMathJobMatchesRequestedConfig(job, requestedConfig)) {
+    return res.status(409).json({ error: "本地版式译文与当前模型配置不匹配" });
+  }
   res.json(decoratePdfMathJob(job));
 });
 
@@ -1196,7 +1184,7 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: err.message || "服务器内部错误" });
 });
 
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, "127.0.0.1", () => {
   const actualPort = server.address().port;
   setPdfMathLlmProxyPort(actualPort);
   console.log(`ScholarLoop server: http://127.0.0.1:${actualPort}`);

@@ -128,6 +128,44 @@ function layoutPageStatus(result, pageNumber) {
   return { status: page.status || "", done, running, label, page };
 }
 
+function layoutAssistStatusLabel(result, pageNumber) {
+  const page = (result?.pages || []).find((item) => Number(item.page) === Number(pageNumber));
+  const pageAssist = page?.assist;
+  const jobAssist = result?.layoutAssist;
+  const rawStatus = typeof pageAssist === "string"
+    ? pageAssist
+    : pageAssist?.status || pageAssist?.state || (typeof jobAssist === "string" ? jobAssist : jobAssist?.status || jobAssist?.state);
+  if (!rawStatus) return "";
+  const status = String(rawStatus).trim().toLowerCase();
+  const labels = {
+    queued: "视觉分析排队中",
+    running: "视觉分析中",
+    analyzing: "视觉分析中",
+    completed: "视觉分析已完成",
+    complete: "视觉分析已完成",
+    ready: "视觉分析已完成",
+    fallback: "视觉分析失败",
+    failed: "视觉分析失败"
+  };
+  const label = labels[status] || `视觉辅助：${String(rawStatus).trim()}`;
+  const detail = String(pageAssist?.error || jobAssist?.error || "").trim();
+  const stageNames = { render: "页面准备", request: "请求模型", "response-parse": "解析响应", "schema-validate": "校验结构" };
+  const stage = stageNames[pageAssist?.stage] || "";
+  if (!detail && !stage) return label;
+  return `${label}${stage ? `（${stage}）` : ""}${detail ? `：${detail}` : ""}`;
+}
+
+function normalizedPdfMathBaseUrl(value) {
+  return String(value || "").trim().replace(/\/+$/, "").toLowerCase();
+}
+
+function pdfMathResultMatchesConfig(result, config) {
+  const identity = result?.identity;
+  if (!identity || typeof identity !== "object") return false;
+  return String(identity.model || "").trim() === String(config?.model || "").trim()
+    && normalizedPdfMathBaseUrl(identity.baseUrl) === normalizedPdfMathBaseUrl(config?.baseUrl);
+}
+
 function layoutViewMatches(meta, { url, pageNum }) {
   if (!meta?.url || !url) return false;
   if (meta.url !== url) return false;
@@ -377,6 +415,11 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const [pageTranslations, setPageTranslations] = useState({});
   const [pageTextLayouts, setPageTextLayouts] = useState({});
   const [pageTranslationLayouts, setPageTranslationLayouts] = useState({});
+  const [layoutAssistEnabled, setLayoutAssistEnabled] = useState(false);
+  const pdfMathConfigKey = useMemo(
+    () => `${normalizedPdfMathBaseUrl(config?.baseUrl) || "unknown-provider"}:${String(config?.model || "").trim() || "unknown-model"}`,
+    [config?.baseUrl, config?.model]
+  );
   const [displayMode, setDisplayMode] = useState("original");
   const [selectionPopup, setSelectionPopup] = useState(null);
   const [selectionLoading, setSelectionLoading] = useState(false);
@@ -398,6 +441,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const [pdfMathState, setPdfMathState] = useState("idle");
   const [pdfMathError, setPdfMathError] = useState("");
   const [pdfMathResult, setPdfMathResult] = useState(null);
+  // PDFMath 接口未把模型信息放进公开快照，前端保留结果所属的 provider/model 命名空间。
+  const pdfMathResultConfigKeyRef = useRef("");
   const [pdfMathJobId, setPdfMathJobId] = useState("");
   const [pdfMathProgress, setPdfMathProgress] = useState("");
   const pdfMathCancelRequested = useRef(false);
@@ -459,11 +504,28 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
 
   // 版式翻译结果：上方「原文/译文/中英对照」直接切换，不走侧栏按钮
   const layoutDisplayVariant = layoutVariantForDisplayMode(displayMode);
+  const layoutAssistResultEnabled = typeof pdfMathResult?.layoutAssist?.enabled === "boolean"
+    ? pdfMathResult.layoutAssist.enabled
+    : null;
+  const hasAnyPdfMathResult = Boolean(
+    (pdfMathResult?.pages || []).some((page) => page.status === "completed" && (page.monoUrl || page.dualUrl))
+      || pdfMathResult?.monoUrl
+      || pdfMathResult?.dualUrl
+  );
+  // PDFMath 的译文必须和当前页面图片辅助模式属于同一任务，不能把另一模式的结果算作当前结果。
+  const layoutAssistResultConfigMatches = Boolean(pdfMathResultConfigKeyRef.current)
+    && pdfMathResultConfigKeyRef.current === pdfMathConfigKey;
+  const layoutAssistModeMatches = Boolean(pdfMathResult)
+    && layoutAssistResultEnabled !== null
+    && layoutAssistResultEnabled === layoutAssistEnabled
+    && layoutAssistResultConfigMatches;
+  const layoutAssistModeMismatch = hasAnyPdfMathResult && !layoutAssistModeMatches;
+  const currentModePdfMathResult = layoutAssistModeMismatch ? null : pdfMathResult;
   const layoutPageResolved = useMemo(
     () => (layoutDisplayVariant
-      ? resolveLayoutPageUrl(pdfMathResult, pageNum, layoutDisplayVariant)
+      ? resolveLayoutPageUrl(currentModePdfMathResult, pageNum, layoutDisplayVariant)
       : { url: "", page: null, variant: "", whole: false }),
-    [layoutDisplayVariant, pdfMathResult, pageNum]
+    [currentModePdfMathResult, layoutDisplayVariant, pageNum]
   );
   // 仅当缓存文档与当前页/URL 一致时才渲染版式，避免翻页串页
   const layoutViewReady = Boolean(
@@ -477,21 +539,30 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   );
   const usingLayoutPdf = layoutViewReady;
   const layoutCompletedCount = useMemo(
-    () => (pdfMathResult?.pages || []).filter((page) => page.status === "completed" && (page.monoUrl || page.dualUrl)).length,
-    [pdfMathResult]
+    () => (currentModePdfMathResult?.pages || []).filter((page) => page.status === "completed" && (page.monoUrl || page.dualUrl)).length,
+    [currentModePdfMathResult]
   );
   const layoutPageCount = useMemo(
-    () => Number(pdfMathResult?.pageCount) || (pdfMathResult?.pages || []).length || numPages || 0,
-    [pdfMathResult, numPages]
+    () => Number(currentModePdfMathResult?.pageCount) || (currentModePdfMathResult?.pages || []).length || numPages || 0,
+    [currentModePdfMathResult, numPages]
   );
   const layoutIncompleteCount = useMemo(() => {
-    const pages = pdfMathResult?.pages || [];
+    const pages = currentModePdfMathResult?.pages || [];
     if (!pages.length) return layoutPageCount > 0 && layoutCompletedCount > 0 ? Math.max(0, layoutPageCount - layoutCompletedCount) : 0;
     return pages.filter((page) => !(page.status === "completed" && (page.monoUrl || page.dualUrl))).length;
-  }, [pdfMathResult, layoutPageCount, layoutCompletedCount]);
-  const layoutAllDone = layoutPageCount > 0 && layoutCompletedCount >= layoutPageCount && layoutIncompleteCount === 0;
-  const hasAnyLayoutResult = layoutCompletedCount > 0 || Boolean(pdfMathResult?.monoUrl || pdfMathResult?.dualUrl);
-  const currentLayoutPage = useMemo(() => layoutPageStatus(pdfMathResult, pageNum), [pdfMathResult, pageNum]);
+  }, [currentModePdfMathResult, layoutPageCount, layoutCompletedCount]);
+  const layoutAllDone = layoutAssistModeMatches
+    && layoutPageCount > 0
+    && layoutCompletedCount >= layoutPageCount
+    && layoutIncompleteCount === 0;
+  const hasAnyLayoutResult = layoutCompletedCount > 0 || Boolean(currentModePdfMathResult?.monoUrl || currentModePdfMathResult?.dualUrl);
+  const currentLayoutPage = useMemo(() => layoutPageStatus(currentModePdfMathResult, pageNum), [currentModePdfMathResult, pageNum]);
+  const layoutAssistStatus = useMemo(
+    () => layoutAssistModeMismatch
+      ? "当前模式未生成译文"
+      : layoutAssistEnabled ? layoutAssistStatusLabel(currentModePdfMathResult, pageNum) : "",
+    [currentModePdfMathResult, layoutAssistEnabled, layoutAssistModeMismatch, pageNum]
+  );
 
   const persistInterpretation = useCallback(async ({ result, meta, followups }) => {
     const payload = createSavedInterpretation({ result, meta, followups });
@@ -648,10 +719,12 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     if (!paperId) return;
     try {
       await api.clearPdfCache(paperId);
+      pdfCacheRef.current = null;
       setTextByPage({});
       setOcrPageTexts({});
       setParagraphTranslations({});
       setPageTranslations({});
+      setLayoutAssistEnabled(false);
       setPageTextLayouts({});
       setPageTranslationLayouts({});
       setSelectionTranslations({});
@@ -659,7 +732,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       setDisplayMode("original");
       setPdfMathState("idle");
       setPdfMathError("");
-      setPdfMathResult(null);
+      setPdfMathResultForCurrentConfig(null);
       setPdfMathJobId("");
       setPdfMathProgress("");
       setPdfCacheStatus("idle");
@@ -678,8 +751,11 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     const hasCompletedPage = (job.pages || []).some((page) => page.status === "completed" && (page.monoUrl || page.dualUrl));
     const hasWholeFile = Boolean(job.monoUrl || job.dualUrl);
     if (!hasCompletedPage && !hasWholeFile && job.status !== "completed") return false;
+    // 旧快照没有 identity 时只允许查看，不能把它当成当前配置的成品。
+    const matchesConfig = pdfMathResultMatchesConfig(job, config);
+    setLayoutAssistEnabled(matchesConfig && job?.layoutAssist?.enabled === true);
     setPdfMathJobId(job.jobId);
-    setPdfMathResult(job);
+    setPdfMathResultForCurrentConfig(job, matchesConfig);
     setPdfMathProgress(job.progress || "已从本地恢复版式译文");
     setPdfMathError(job.status === "failed" && !hasCompletedPage ? (job.error || "版式翻译失败") : "");
     if (["queued", "running", "canceling"].includes(job.status)) {
@@ -704,7 +780,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
           /* 再试 paper 级索引 */
         }
       }
-      const job = await api.getPdfLayoutTranslation(paperId);
+      const job = await api.getPdfLayoutTranslation(paperId, config);
       if (applyRestoredPdfMathJob(job)) return job;
     } catch {
       /* 无本地版式译文时静默 */
@@ -745,6 +821,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     setOcrPageTexts({});
     setParagraphTranslations({});
     setPageTranslations({});
+    setLayoutAssistEnabled(false);
     setPageTextLayouts({});
     setPageTranslationLayouts({});
     setDisplayMode("original");
@@ -769,6 +846,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     setNotesSaveStatus("idle");
 
     let cache = null;
+    pdfCacheRef.current = null;
     const shouldUseCache = source.useCache !== false;
     const requestedUrl = String(source.url || "").trim();
     if (paperId && shouldUseCache && !isTranslatedVariant) {
@@ -779,6 +857,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       }
     }
     if (paperId && !isTranslatedVariant) setPdfCacheStatus("loading");
+    pdfCacheRef.current = cache;
 
     const cachedPdfUrl = shouldUseCache ? String(cache?.pdfUrl || "").trim() : "";
     const sourceUrl = cachedPdfUrl || requestedUrl;
@@ -789,6 +868,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     setParagraphTranslations(cache?.paragraphTranslations || {});
     setPageTranslations(compatibleTextCache ? (cache?.pageTranslations || {}) : {});
     setPageTranslationLayouts(compatibleTextCache ? (cache?.pageTranslationLayouts || {}) : {});
+    setLayoutAssistEnabled(false);
     setSelectionTranslations(cache?.selectionTranslations || {});
     setOcrSelectionCache(cache?.ocrSelectionCache || {});
     setDisplayMode(compatibleTextCache ? cachedDisplayMode(cache) : "original");
@@ -967,7 +1047,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     setActivePdfVariant("original");
     setPdfMathState("idle");
     setPdfMathError("");
-    setPdfMathResult(null);
+    setPdfMathResultForCurrentConfig(null);
     setPdfMathJobId("");
     setPdfMathProgress("");
     setDoc(null);
@@ -975,6 +1055,10 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     setOcrPageTexts({});
     setParagraphTranslations({});
     setPageTranslations({});
+    setVisualPageTranslationLayouts({});
+    setVisualLayoutError("");
+    setVisualLayoutEnabled(false);
+    setLayoutAssistEnabled(false);
     setDisplayMode("original");
     setSelectionPopup(null);
     setSelectionTranslations({});
@@ -1426,7 +1510,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     void api.prioritizePdfMathTranslate(pdfMathJobId, pageNum)
       .then((job) => {
         if (cancelled || !job) return;
-        setPdfMathResult(job);
+        setPdfMathResultForCurrentConfig(job);
+        if (typeof job?.layoutAssist?.enabled === "boolean") setLayoutAssistEnabled(job.layoutAssist.enabled);
         if (job.progress) setPdfMathProgress(job.progress);
       })
       .catch(() => {
@@ -1936,7 +2021,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     if (!resuming) pdfMathFirstPageOpened.current = false;
     setPdfMathState("working");
     setPdfMathError("");
-    if (force) setPdfMathResult(null);
+    if (force) setPdfMathResultForCurrentConfig(null);
     setPdfMathProgress(
       force
         ? "正在重新翻译全书…"
@@ -1955,11 +2040,13 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         progressive: true,
         priorityPage,
         paperId: paperId || "",
-        jobId: (!force && pdfMathJobId) ? pdfMathJobId : "",
+        jobId: (!force && layoutAssistModeMatches && pdfMathJobId) ? pdfMathJobId : "",
         force: Boolean(force),
         // 主路径始终续译全部未完成页，避免「译两页就停」让人摸不着头脑
-        continueAll: !force
+        continueAll: !force,
+        layoutAssist: { enabled: Boolean(layoutAssistEnabled) }
       });
+      if (typeof started?.layoutAssist?.enabled === "boolean") setLayoutAssistEnabled(started.layoutAssist.enabled);
       setPdfMathJobId(started.jobId || "");
       if (paperId && started.jobId) {
         void persistPdfCache({ layoutTranslationJobId: started.jobId });
@@ -1974,7 +2061,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       };
       let job = started;
       if (!["queued", "running", "canceling"].includes(job.status)) {
-        setPdfMathResult(job);
+        setPdfMathResultForCurrentConfig(job);
+        if (typeof job?.layoutAssist?.enabled === "boolean") setLayoutAssistEnabled(job.layoutAssist.enabled);
         showFirstReadyPdfMathPage(job);
         setPdfMathProgress(job.progress || "已从本地恢复版式译文");
         const hasCompletedPage = (job.pages || []).some((page) => page.status === "completed" && (page.monoUrl || page.dualUrl));
@@ -1995,9 +2083,11 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
             paperId: paperId || "",
             jobId: started.jobId || pdfMathJobId || "",
             force: false,
-            continueAll: true
+            continueAll: true,
+            layoutAssist: { enabled: Boolean(layoutAssistEnabled) }
           });
           job = resumed;
+          if (typeof resumed?.layoutAssist?.enabled === "boolean") setLayoutAssistEnabled(resumed.layoutAssist.enabled);
           setPdfMathJobId(resumed.jobId || started.jobId || "");
         } else if (hasCompletedPage || job.monoUrl || job.dualUrl) {
           setPdfMathState("ready");
@@ -2007,13 +2097,15 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         }
       }
       while (["queued", "running", "canceling"].includes(job.status)) {
-        setPdfMathResult(job);
+        setPdfMathResultForCurrentConfig(job);
+        if (typeof job?.layoutAssist?.enabled === "boolean") setLayoutAssistEnabled(job.layoutAssist.enabled);
         showFirstReadyPdfMathPage(job);
         setPdfMathProgress(job.progress || "正在翻译…");
         await wait(1000);
         job = await api.pdfMathTranslateJob(job.jobId || started.jobId);
       }
-      setPdfMathResult(job);
+      setPdfMathResultForCurrentConfig(job);
+      if (typeof job?.layoutAssist?.enabled === "boolean") setLayoutAssistEnabled(job.layoutAssist.enabled);
       showFirstReadyPdfMathPage(job);
       setPdfMathProgress(job.progress || "");
       if (job.status === "canceled" || pdfMathCancelRequested.current) {
@@ -2032,7 +2124,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       if (job.status !== "completed" && !hasCompletedPage && !job.monoUrl && !job.dualUrl) {
         throw new Error(job.error || "PDF 排版翻译没有生成译文 PDF");
       }
-      setPdfMathResult(job);
+      setPdfMathResultForCurrentConfig(job);
       setPdfMathState("ready");
       if (paperId && job.jobId) {
         void persistPdfCache({ layoutTranslationJobId: job.jobId });
@@ -2062,6 +2154,15 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     if (pdfMathState === "working") {
       return { kind: "stop", label: "停止", disabled: false, force: false };
     }
+    if (layoutAssistModeMismatch) {
+      return {
+        kind: "start",
+        label: "开始当前模式翻译",
+        disabled: false,
+        // 另一模式已有结果时必须开新任务，不能续用旧任务冒充当前模式。
+        force: true
+      };
+    }
     if (layoutAllDone) {
       return { kind: "done", label: "已全部完成", disabled: true, force: false };
     }
@@ -2081,6 +2182,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     config,
     pdfSourceBase64,
     pdfMathState,
+    layoutAssistModeMismatch,
     layoutAllDone,
     hasAnyLayoutResult,
     layoutIncompleteCount,
@@ -2097,6 +2199,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       if (currentLayoutPage.done) return `第 ${pageNum} 页已完成 · 后台 ${done}/${total || "—"}`;
       return pdfMathProgress || `翻译中 · ${done}/${total || "—"}`;
     }
+    if (layoutAssistModeMismatch) return "当前模式未生成译文";
     if (layoutAllDone) return `全部完成 · ${done}/${total || done} 页`;
     if (hasAnyLayoutResult) {
       if (currentLayoutPage.done) return `第 ${pageNum} 页已完成 · 全书 ${done}/${total || "—"}`;
@@ -2113,6 +2216,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     layoutPageCount,
     numPages,
     pdfMathProgress,
+    layoutAssistModeMismatch,
     layoutAllDone,
     hasAnyLayoutResult,
     pdfMathError
@@ -2200,8 +2304,21 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     });
   };
 
+  const handleLayoutAssistChange = (enabled) => {
+    setLayoutAssistEnabled(enabled);
+    // 切换模式后先回到原文，避免短暂显示另一模式的 PDFMath 译文。
+    if (hasAnyPdfMathResult && (layoutAssistResultEnabled === null || layoutAssistResultEnabled !== enabled)) {
+      setDisplayMode("original");
+      setLayoutViewError("");
+    }
+  };
+
   const handleDisplayModeChange = (mode) => {
     setLayoutViewError("");
+    if (mode !== "original" && layoutAssistModeMismatch) {
+      setDisplayMode("original");
+      return;
+    }
     // 再次点击「译文/中英对照」时强制重新绑定，避免卡在英文原文
     if (mode !== "original") {
       setLayoutReloadToken((token) => token + 1);
@@ -2613,7 +2730,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                     <span>
                       {currentLayoutPage.running || (pdfMathState === "working" && !currentLayoutPage.done)
                         ? `第 ${pageNum} 页版式译文生成中，当前先显示原文（未完成前不会显示「就绪」）`
-                        : hasAnyLayoutResult
+                        : layoutAssistModeMismatch
+                          ? "当前模式未生成译文，请在右侧开始当前模式翻译"
+                          : hasAnyLayoutResult
                           ? `第 ${pageNum} 页尚无版式译文，当前显示原文`
                           : "请先在右侧开始版式翻译"}
                     </span>
@@ -2705,9 +2824,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                   <div className="pdf-empty-translation-overlay">
                     <Languages size={22} />
                     <strong>本页还没有译文</strong>
-                    <span>{hasAnyLayoutResult || pdfMathState === "working" ? "请等待本页版式翻译完成，或用上方切换原文。" : "请先开始版式翻译，或使用侧栏文字翻译。"}</span>
+                    <span>{layoutAssistModeMismatch ? "当前模式未生成译文，请先在右侧开始当前模式翻译。" : hasAnyLayoutResult || pdfMathState === "working" ? "请等待本页版式翻译完成，或用上方切换原文。" : "请先开始版式翻译，或使用侧栏文字翻译。"}</span>
                     {pdfMathState !== "working" && !hasAnyLayoutResult ? (
-                      <button type="button" onClick={() => translateWithPdfMath({ force: false })} disabled={!pdfSourceBase64 || !config || !pdfMathStatus.available}>
+                      <button type="button" onClick={() => translateWithPdfMath({ force: layoutAssistModeMismatch })} disabled={!pdfSourceBase64 || !config || !pdfMathStatus.available}>
                         开始翻译
                       </button>
                     ) : null}
@@ -2841,7 +2960,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                       <p>保留原排版生成中文。一点开始/继续，已译过的页自动跳过；翻页会优先译你正在看的页。</p>
                     </div>
                     <em className={
-                      layoutAllDone ? "ready"
+                      layoutAssistModeMismatch ? "mismatch"
+                        : layoutAllDone ? "ready"
                         : pdfMathState === "working" ? "busy"
                           : pdfMathStatus.available ? "ready" : "missing"
                     }>
@@ -2849,8 +2969,10 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                         ? "检测中"
                         : !pdfMathStatus.available
                           ? "未安装"
-                          : layoutAllDone
-                            ? "已完成"
+                          : layoutAssistModeMismatch
+                            ? "需开始当前模式"
+                            : layoutAllDone
+                              ? "已完成"
                             : pdfMathState === "working"
                               ? "翻译中"
                               : hasAnyLayoutResult
@@ -2859,7 +2981,30 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                     </em>
                   </div>
 
-                  <div className={`pdf-layout-status-card${pdfMathState === "working" ? " is-working" : ""}${layoutAllDone ? " is-done" : ""}`} role="status">
+                  <div className={`pdf-layout-assist${layoutAssistEnabled ? " is-enabled" : ""}`}>
+                    <label className="pdf-layout-assist-toggle">
+                      <input
+                        type="checkbox"
+                        checked={layoutAssistEnabled}
+                        onChange={(event) => handleLayoutAssistChange(event.target.checked)}
+                        disabled={!config || !doc || Boolean(imageSource) || pdfMathState === "working"}
+                      />
+                      <Sparkles size={14} />
+                      <span>页面图片辅助翻译</span>
+                    </label>
+                    <p>仅辅助文本层 PDF 的术语、图注与上下文理解，不直接重建排版。</p>
+                    <p>会发送页面图片，增加耗时与模型用量。<span>模型：{config?.model || "未配置"}</span></p>
+                    <div className="pdf-layout-assist-status" role="status" aria-live="polite">
+                      {pdfMathState === "working" && layoutAssistEnabled ? <Loader2 size={12} className="spin" /> : <Sparkles size={12} />}
+                      <span>
+                        {layoutAssistStatus || (layoutAssistEnabled
+                          ? (pdfMathState === "working" ? "已请求页面图片辅助" : "页面图片辅助已启用")
+                          : "未启用页面图片辅助")}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className={`pdf-layout-status-card${pdfMathState === "working" ? " is-working" : ""}${layoutAllDone ? " is-done" : ""}${layoutAssistModeMismatch ? " is-mismatch" : ""}`} role="status">
                     <div className="pdf-layout-status-row">
                       <strong>{layoutStatusSummary}</strong>
                       {(layoutPageCount || numPages) ? (
@@ -2902,13 +3047,13 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                       <button
                         type="button"
                         className={`pdf-layout-primary-btn${layoutPrimaryAction.kind === "done" ? " is-done" : ""}`}
-                        onClick={() => translateWithPdfMath({ force: false })}
+                        onClick={() => translateWithPdfMath({ force: layoutPrimaryAction.force })}
                         disabled={layoutPrimaryAction.disabled || !pdfMathStatus.available}
                         title={
                           layoutPrimaryAction.kind === "continue"
                             ? "接着译没做完的页，已完成的不会重来"
                             : layoutPrimaryAction.kind === "start"
-                              ? "从当前页优先，依次译完全部未完成页"
+                              ? (layoutPrimaryAction.force ? "为当前模式启动新的 PDFMath 版式任务" : "从当前页优先，依次译完全部未完成页")
                               : undefined
                         }
                       >
@@ -2919,7 +3064,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                       </button>
                     )}
 
-                    {(hasAnyLayoutResult || layoutAllDone) && pdfMathState !== "working" ? (
+                    {(hasAnyPdfMathResult || layoutAllDone) && pdfMathState !== "working" ? (
                       <details className="pdf-layout-more">
                         <summary>更多</summary>
                         <button
@@ -2948,15 +3093,21 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                   ) : null}
                   {pdfMathError ? <div className="pdf-ocr-error" role="alert">{pdfMathError}</div> : null}
 
-                  {hasAnyLayoutResult ? (
-                    <div className="pdf-layout-ready-hint" role="status">
+                  {hasAnyPdfMathResult ? (
+                    <div className={`pdf-layout-ready-hint${layoutAssistModeMismatch ? " is-mismatch" : ""}`} role="status">
                       <div className="pdf-layout-ready-hint-main">
                         <strong>
-                          {layoutAllDone
+                          {layoutAssistModeMismatch
+                            ? "当前模式未生成译文"
+                            : layoutAllDone
                             ? "全书译文已就绪"
                             : `已完成 ${layoutCompletedCount}${layoutPageCount ? ` / ${layoutPageCount}` : ""} 页`}
                         </strong>
-                        <span>上方工具栏切换 <em>原文 · 译文 · 中英对照</em></span>
+                        <span>
+                          {layoutAssistModeMismatch
+                            ? `已有${layoutAssistResultEnabled ? "页面图片辅助" : "普通"}模式译文，请点击“${layoutPrimaryAction.label}”开始当前模式。`
+                            : <>上方工具栏切换 <em>原文 · 译文 · 中英对照</em></>}
+                        </span>
                       </div>
                       <div className="pdf-layout-ready-modes">
                         <button
@@ -2970,7 +3121,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                           type="button"
                           className={displayMode === "translated" ? "active" : ""}
                           onClick={() => handleDisplayModeChange("translated")}
-                          disabled={!currentLayoutPage.done && !resolveLayoutPageUrl(pdfMathResult, pageNum, "mono").url}
+                          disabled={layoutAssistModeMismatch || (!currentLayoutPage.done && !resolveLayoutPageUrl(currentModePdfMathResult, pageNum, "mono").url)}
                           title={currentLayoutPage.done ? "显示本页译文" : "本页尚未译完"}
                         >
                           译文{currentLayoutPage.done ? "" : "·未就绪"}
@@ -2979,7 +3130,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                           type="button"
                           className={displayMode === "bilingual" ? "active" : ""}
                           onClick={() => handleDisplayModeChange("bilingual")}
-                          disabled={!currentLayoutPage.done && !resolveLayoutPageUrl(pdfMathResult, pageNum, "dual").url}
+                          disabled={layoutAssistModeMismatch || (!currentLayoutPage.done && !resolveLayoutPageUrl(currentModePdfMathResult, pageNum, "dual").url)}
                           title={currentLayoutPage.done ? "显示中英对照" : "本页尚未译完"}
                         >
                           中英对照{currentLayoutPage.done ? "" : "·未就绪"}

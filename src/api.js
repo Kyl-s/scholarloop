@@ -58,10 +58,6 @@ export const api = {
    method: "POST",
    body: JSON.stringify(body)
  }), body?.config),
-  translateVisualLayout: async (body) => trackUsage("translate", await request("/api/translate/visual-layout", {
-    method: "POST",
-    body: JSON.stringify(body)
-  }), body?.config),
   interpretPdf: async (body) => trackUsage(body?.question ? "followup" : "interpret", await request("/api/pdf/interpret", {
     method: "POST",
     body: JSON.stringify(body)
@@ -103,7 +99,15 @@ export const api = {
     body: JSON.stringify(body)
   }),
   pdfMathTranslateJob: (jobId) => request(`/api/pdf/translate-layout/${encodeURIComponent(jobId)}`),
-  getPdfLayoutTranslation: (id) => request(`/api/library/${encodeURIComponent(id)}/pdf-layout-translation`),
+  getPdfLayoutTranslation: (id, config = {}) => {
+    const query = new URLSearchParams();
+    const model = String(config?.model || "").trim();
+    const baseUrl = String(config?.baseUrl || "").trim();
+    if (model) query.set("model", model);
+    if (baseUrl) query.set("baseUrl", baseUrl);
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return request(`/api/library/${encodeURIComponent(id)}/pdf-layout-translation${suffix}`);
+  },
   cancelPdfMathTranslate: (jobId) => request(`/api/pdf/translate-layout/${encodeURIComponent(jobId)}/cancel`, {
     method: "POST"
   }),
