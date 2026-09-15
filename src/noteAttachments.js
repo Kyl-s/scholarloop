@@ -19,6 +19,23 @@ export function stripNoteAttachments(text) {
   return String(text || "").replace(TOKEN_RE, "").replace(/[ \t]+\n/g, "\n").trim();
 }
 
+export function noteAttachmentTokens(text) {
+  return parseNoteAttachments(text).map((item) => item.raw);
+}
+
+export function mergeNoteAttachments(text, tokens = []) {
+  const unique = [];
+  const seen = new Set();
+  for (const token of [...tokens, ...noteAttachmentTokens(text)]) {
+    const value = String(token || "").trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    unique.push(value);
+  }
+  const body = stripNoteAttachments(text);
+  return [unique.join("\n"), body].filter(Boolean).join("\n");
+}
+
 export function insertAtCursor(value, token, start, end) {
   const text = String(value || "");
   const from = Number.isInteger(start) ? start : text.length;

@@ -1,14 +1,70 @@
-function escapeHtml(text) {
-  return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+import katex from "katex";
+import "katex/dist/katex.min.css";
+
+function mathNode(source, displayMode, key) {
+  try {
+    const html = katex.renderToString(String(source || "").trim(), {
+      displayMode,
+      output: "htmlAndMathml",
+      throwOnError: false,
+      strict: "ignore",
+      trust: false
+    });
+    return <span key={key} className={displayMode ? "md-math md-math-block" : "md-math"} dangerouslySetInnerHTML={{ __html: html }} />;
+  } catch {
+    return <code key={key} className="md-math-fallback">{String(source || "")}</code>;
+  }
+}
+
+function findInlineMath(text, start) {
+  const source = String(text || "");
+  const candidates = [
+    { open: "\\(", close: "\\)", displayMode: false },
+    { open: "\\[", close: "\\]", displayMode: true }
+  ];
+  let best = null;
+  for (const candidate of candidates) {
+    const at = source.indexOf(candidate.open, start);
+    if (at < 0 || (best && at >= best.at)) continue;
+    const end = source.indexOf(candidate.close, at + candidate.open.length);
+    if (end >= 0) best = { ...candidate, at, end };
+  }
+  for (let at = source.indexOf("$", start); at >= 0; at = source.indexOf("$", at + 1)) {
+    if (source[at + 1] === "$" || source[at - 1] === "\\") continue;
+    const end = source.indexOf("$", at + 1);
+    if (end < 0 || source[end - 1] === "\\") continue;
+    if (!best || at < best.at) best = { open: "$", close: "$", displayMode: false, at, end };
+    break;
+  }
+  return best;
 }
 
 function inlineMd(text) {
-  const escaped = escapeHtml(text);
-  const parts = escaped.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  const source = String(text || "");
+  const nodes = [];
+  let cursor = 0;
+  let key = 0;
+  while (cursor < source.length) {
+    const math = findInlineMath(source, cursor);
+    if (!math) {
+      nodes.push(...renderInlineTokens(source.slice(cursor), key));
+      break;
+    }
+    if (math.at > cursor) nodes.push(...renderInlineTokens(source.slice(cursor, math.at), key));
+    nodes.push(mathNode(source.slice(math.at + math.open.length, math.end), math.displayMode, `math-${key}`));
+    key += 1;
+    cursor = math.end + math.close.length;
+  }
+  if (!source && !nodes.length) return [<span key="empty" />];
+  return nodes;
+}
+
+function renderInlineTokens(escaped, keyOffset = 0) {
+  const parts = String(escaped).split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
   return parts.map((part, i) => {
-    if (part.startsWith("**") && part.endsWith("**")) return <strong key={i}>{part.slice(2, -2)}</strong>;
-    if (part.startsWith("`") && part.endsWith("`")) return <code key={i} className="md-inline-code">{part.slice(1, -1)}</code>;
-    return <span key={i}>{part}</span>;
+    if (part.startsWith("**") && part.endsWith("**")) return <strong key={`b-${keyOffset}-${i}`}>{part.slice(2, -2)}</strong>;
+    if (part.startsWith("`") && part.endsWith("`")) return <code key={`c-${keyOffset}-${i}`} className="md-inline-code">{part.slice(1, -1)}</code>;
+    return <span key={`t-${keyOffset}-${i}`}>{part}</span>;
   });
 }
 
@@ -18,6 +74,7 @@ export function renderMarkdown(text) {
   let list = [];
   let inCode = false;
   let codeLines = [];
+  let mathBlock = null;
   let para = [];
 
   const flushList = (key) => {
@@ -42,7 +99,7 @@ export function renderMarkdown(text) {
   lines.forEach((line, i) => {
     if (line.trim().startsWith("```")) {
       if (inCode) {
-        nodes.push(<pre key={`c${i}`} className="md-code"><code>{escapeHtml(codeLines.join("\n"))}</code></pre>);
+        nodes.push(<pre key={`c${i}`} className="md-code"><code>{codeLines.join("\n")}</code></pre>);
         codeLines = [];
         inCode = false;
       } else {
@@ -57,6 +114,31 @@ export function renderMarkdown(text) {
       return;
     }
     const trimmed = line.trim();
+    if (mathBlock) {
+      if (trimmed === mathBlock.close) {
+        nodes.push(mathNode(mathBlock.lines.join("\n"), true, `math-block-${i}`));
+        mathBlock = null;
+      } else {
+        mathBlock.lines.push(line);
+      }
+      return;
+    }
+    if (trimmed === "$$" || trimmed === "\\[") {
+      flushPara(`p${i}`);
+      flushList(`l${i}`);
+      mathBlock = { close: trimmed === "$$" ? "$$" : "\\]", lines: [] };
+      return;
+    }
+    if ((trimmed.startsWith("$$") && trimmed.endsWith("$$") && trimmed.length > 4)
+      || (trimmed.startsWith("\\[") && trimmed.endsWith("\\]") && trimmed.length > 4)) {
+      const isBracket = trimmed.startsWith("\\[");
+      const openLength = isBracket ? 2 : 2;
+      const closeLength = 2;
+      flushPara(`p${i}`);
+      flushList(`l${i}`);
+      nodes.push(mathNode(trimmed.slice(openLength, -closeLength), true, `math-block-${i}`));
+      return;
+    }
     if (!trimmed) {
       flushPara(`p${i}`);
       flushList(`l${i}`);
@@ -87,6 +169,6 @@ export function renderMarkdown(text) {
   });
   flushPara("end");
   flushList("end");
-  if (inCode) nodes.push(<pre key="endcode" className="md-code"><code>{escapeHtml(codeLines.join("\n"))}</code></pre>);
+  if (inCode) nodes.push(<pre key="endcode" className="md-code"><code>{codeLines.join("\n")}</code></pre>);
   return nodes;
 }

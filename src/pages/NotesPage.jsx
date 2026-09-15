@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus, Save, Search, StickyNote, Trash2, X } from "lucide-react";
 import { api } from "../api.js";
-import { fileToBase64, insertAtCursor, pastedFiles } from "../noteAttachments.js";
+import { fileToBase64, mergeNoteAttachments, noteAttachmentTokens, pastedFiles, stripNoteAttachments } from "../noteAttachments.js";
 import { useData } from "../store.jsx";
 import NoteAttachBar from "../components/NoteAttachBar.jsx";
 import NoteAttachmentThumbs from "../components/NoteAttachmentThumbs.jsx";
@@ -54,25 +54,33 @@ export default function NotesPage({ onReadPdf }) {
   const openCreate = () => {
     setTab("free");
     setError("");
-    setDraft({ ...EMPTY_NOTE });
+    setDraft({ ...EMPTY_NOTE, attachments: [] });
   };
 
   const openEdit = (note) => {
     setTab("free");
     setError("");
-    setDraft({ id: note.id, title: note.title || "", content: note.content || "" });
+    setDraft({
+      id: note.id,
+      title: note.title || "",
+      content: stripNoteAttachments(note.content || ""),
+      attachments: noteAttachmentTokens(note.content || "")
+    });
   };
+
+  const draftContentForSave = (note) => mergeNoteAttachments(note?.content || "", note?.attachments || []);
 
   const saveDraft = async (event) => {
     event.preventDefault();
-    if (!String(draft?.title || "").trim() && !String(draft?.content || "").trim()) {
+    const content = draftContentForSave(draft);
+    if (!String(draft?.title || "").trim() && !String(content || "").trim()) {
       setError("请填写手记标题或内容");
       return;
     }
     setSaving(true);
     setError("");
     try {
-      const payload = { title: draft.title.trim(), content: draft.content };
+      const payload = { title: draft.title.trim(), content };
       if (draft.id) await updateNote(draft.id, payload);
       else await createNote(payload);
       setDraft(null);
@@ -86,17 +94,16 @@ export default function NotesPage({ onReadPdf }) {
   const insertAttachment = (token) => {
     setDraft((current) => {
       if (!current) return current;
-      const el = contentRef.current;
-      const value = current.content || "";
-      const start = el ? el.selectionStart : value.length;
-      const end = el ? el.selectionEnd : value.length;
-      const { next, caret } = insertAtCursor(value, token, start, end);
+      const tokens = noteAttachmentTokens(token);
+      if (!tokens.length) return current;
+      const attachments = [...(current.attachments || [])];
+      for (const item of tokens) {
+        if (!attachments.includes(item)) attachments.push(item);
+      }
       requestAnimationFrame(() => {
-        if (!el) return;
-        el.focus();
-        el.selectionStart = el.selectionEnd = caret;
+        contentRef.current?.focus();
       });
-      return { ...current, content: next };
+      return { ...current, attachments };
     });
   };
 
@@ -201,7 +208,7 @@ export default function NotesPage({ onReadPdf }) {
                   />
                 </label>
                 <label className="memory-field">
-                  <span>正文</span>
+                  <span>正文（附件会显示在正文下方）</span>
                   <textarea
                     ref={contentRef}
                     rows={12}
@@ -212,7 +219,7 @@ export default function NotesPage({ onReadPdf }) {
                   />
                 </label>
                 <NoteAttachBar onInsert={insertAttachment} onError={setError} />
-                <NoteAttachmentThumbs text={draft.content} />
+                <NoteAttachmentThumbs text={draftContentForSave(draft)} />
                 <div className="standalone-note-editor-actions">
                   {draft.id ? (
                     <Button type="button" variant="ghost" size="sm" icon={Trash2} onClick={removeDraftNote}>删除</Button>
