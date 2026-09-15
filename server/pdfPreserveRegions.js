@@ -221,12 +221,22 @@ function pythonCandidates() {
   ].filter((item) => item.cmd);
 }
 
+function buildPreservePythonEnv(extra = {}) {
+  // Python 在 Windows 控制台默认编码下无法把中文路径中的文本写入 JSON stdout。
+  // 用户已指定的值优先，避免覆盖嵌入式 Python 或调用方的编码配置。
+  return {
+    ...process.env,
+    ...extra,
+    PYTHONIOENCODING: extra.PYTHONIOENCODING || process.env.PYTHONIOENCODING || "utf-8",
+    PYTHONUTF8: extra.PYTHONUTF8 || process.env.PYTHONUTF8 || "1"
+  };
+}
+
 export function resolvePreservePython() {
   if (cachedPython !== undefined) return cachedPython;
   for (const item of pythonCandidates()) {
     const args = [...(item.env.extra || []), "-c", "import fitz; print('ok')"];
-    const env = { ...process.env };
-    if (item.env.PYTHONPATH) env.PYTHONPATH = item.env.PYTHONPATH;
+    const env = buildPreservePythonEnv(item.env.PYTHONPATH ? { PYTHONPATH: item.env.PYTHONPATH } : {});
     const result = spawnSync(item.cmd, args, { encoding: "utf8", env, timeout: 15000, windowsHide: true });
     if (result.status === 0 && String(result.stdout || "").includes("ok")) {
       cachedPython = { cmd: item.cmd, extra: item.env.extra || [], env: item.env.PYTHONPATH ? { PYTHONPATH: item.env.PYTHONPATH } : {} };
@@ -243,7 +253,7 @@ function runPreservePython(argv, { input } = {}) {
   const result = spawnSync(py.cmd, [...py.extra, STAMP_SCRIPT, ...argv], {
     encoding: "utf8",
     input,
-    env: { ...process.env, ...py.env },
+    env: buildPreservePythonEnv(py.env),
     timeout: 60000,
     windowsHide: true,
     maxBuffer: 8 * 1024 * 1024
