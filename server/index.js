@@ -51,12 +51,15 @@ import { extractPdfText, fetchPdfWithOpenAccessFallback, isPdfBuffer, normalizeD
 import { buildImportedPdfPaper, downloadPdf, guessPdfNameFromUrl, normalizeAuthorsInput } from "./pdfImportShared.js";
 import {
   cancelPdfMathTranslation,
+  clearPdfMathTranslationsForPaper,
+  createPdfMathTranslationIdentity,
   getPdfMathTranslateFile,
   getPdfMathTranslationForPaper,
   getPdfMathTranslationJob,
   getPdfMathInstallState,
   getPdfMathTranslateStatus,
   installPdfMathTranslate,
+  setPdfMathPaperDeleting,
   setPdfMathTranslationPriority,
   startPdfMathTranslation
 } from "./pdfMathTranslate.js";
@@ -73,6 +76,21 @@ import { extractModelText, modelResponseError } from "./modelResponse.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 8787;
+const latestPaperSourceWrites = new Map();
+const latestPdfCacheWrites = new Map();
+const latestPdfMathPriorities = new Map();
+
+function acceptsLatestWrite(map, paperId, key, sequence) {
+  const writeKey = String(key || "").trim();
+  const writeSequence = Number(sequence);
+  if (!writeKey || !Number.isFinite(writeSequence)) return true;
+  // 同一论文的写入必须跨 Reader 实例做 latest-wins，不能把客户端 key 当隔离域。
+  const mapKey = paperId;
+  const latest = Number(map.get(mapKey));
+  if (Number.isFinite(latest) && writeSequence < latest) return false;
+  map.set(mapKey, writeSequence);
+  return true;
+}
 
 // PDF.js 5+ loads OpenJPEG/JBIG2/QCMS decoders from this directory at runtime.
 // Keep the URL stable for both the desktop build and the Vite development proxy.
@@ -365,6 +383,16 @@ app.post(
 app.get("/api/pdf/translate-layout/:job", (req, res) => {
   const job = getPdfMathTranslationJob(req.params.job);
   if (!job) return res.status(404).json({ error: "排版翻译任务不存在或已失效" });
+  if (req.query?.validateEngine === "true") {
+    const settings = getSettings();
+    const currentEngine = createPdfMathTranslationIdentity({
+      config: settings,
+      binary: settings.pdfMathTranslateBin || ""
+    }).identity.engine;
+    if (JSON.stringify(job.identity?.engine || null) !== JSON.stringify(currentEngine)) {
+      return res.status(409).json({ error: "本地版式译文与当前翻译引擎不匹配" });
+    }
+  }
   res.json(decoratePdfMathJob(job));
 });
 
@@ -375,6 +403,17 @@ app.post("/api/pdf/translate-layout/:job/cancel", (req, res) => {
 });
 
 app.post("/api/pdf/translate-layout/:job/priority", (req, res) => {
+  const prioritySeq = Number(req.body?.prioritySeq);
+  const priorityKey = String(req.params.job || "");
+  if (Number.isFinite(prioritySeq)) {
+    const latest = Number(latestPdfMathPriorities.get(priorityKey));
+    if (Number.isFinite(latest) && prioritySeq < latest) {
+      const current = getPdfMathTranslationJob(req.params.job);
+      if (!current) return res.status(404).json({ error: "排版翻译任务不存在或已失效" });
+      return res.json(decoratePdfMathJob(current));
+    }
+    latestPdfMathPriorities.set(priorityKey, prioritySeq);
+  }
   const page = Number(req.body?.page || req.body?.priorityPage || 1);
   const job = setPdfMathTranslationPriority(req.params.job, page, {
     continueAll: Boolean(req.body?.continueAll || req.body?.translateMode === "all-remaining")
@@ -417,6 +456,7 @@ app.post("/api/pdf/translate-layout", async (req, res) => {
       // 续译未完成页（跳过已完成）；与 force 互斥
       continueAll: Boolean(req.body?.continueAll || req.body?.translateMode === "all-remaining"),
       layoutAssist: req.body?.layoutAssist,
+      configFingerprint: String(req.body?.configFingerprint || "").trim(),
       binary: settings.pdfMathTranslateBin || ""
     });
     // 复用已完成本地任务时直接 200；新建任务仍返回 202
@@ -702,31 +742,65 @@ function normalizePdfMathBaseUrl(value) {
   }
 }
 
-function pdfMathJobMatchesRequestedConfig(job, { model = "", baseUrl = "" } = {}) {
-  if (!model && !baseUrl) return true;
-  const identity = job?.identity;
-  if (!identity || typeof identity !== "object") return false;
+function pdfMathJobMatchesRequestedConfig(job, { model = "", baseUrl = "", sourceSha256 = "", layoutAssist, identityHash = "", configFingerprint = "", engine = null } = {}) {
+  const identity = job?.identity && typeof job.identity === "object" ? job.identity : {};
+  if ((model || baseUrl || identityHash) && !job?.identity) return false;
   return (!model || String(identity.model || "").trim() === model)
-    && (!baseUrl || normalizePdfMathBaseUrl(identity.baseUrl) === normalizePdfMathBaseUrl(baseUrl));
+    && (!baseUrl || normalizePdfMathBaseUrl(identity.baseUrl) === normalizePdfMathBaseUrl(baseUrl))
+    && (!sourceSha256 || String(job.sourceSha256 || "").trim() === sourceSha256)
+    && (layoutAssist === undefined || job.layoutAssist?.enabled === layoutAssist)
+    && (!identityHash || String(job.identityHash || "").trim() === identityHash)
+    && (!configFingerprint || String(identity.configFingerprint || "").trim() === configFingerprint)
+    && (!engine || JSON.stringify(identity.engine || null) === JSON.stringify(engine));
 }
 
 app.get("/api/library/:id/pdf-layout-translation", (req, res) => {
   const paper = getData().library.find((item) => item.id === req.params.id);
   if (!paper) return res.status(404).json({ error: "文献不存在" });
-  // 只接受 model/baseUrl，绝不从恢复请求读取或回显 API Key。
+  // 只接受非敏感任务身份字段，绝不从恢复请求读取或回显 API Key。
   const requestedConfig = {
     model: String(req.query?.model || "").trim().slice(0, 300),
-    baseUrl: String(req.query?.baseUrl || "").trim().slice(0, 1000)
+    baseUrl: String(req.query?.baseUrl || "").trim().slice(0, 1000),
+    sourceSha256: String(req.query?.sourceSha256 || "").trim().slice(0, 128),
+    identityHash: String(req.query?.identityHash || "").trim().slice(0, 128),
+    configFingerprint: String(req.query?.configFingerprint || "").trim().slice(0, 128),
+    layoutAssist: typeof req.query?.layoutAssist === "string" && req.query.layoutAssist !== ""
+      ? req.query.layoutAssist === "true"
+      : undefined
   };
+  requestedConfig.engine = createPdfMathTranslationIdentity({
+    config: { ...getSettings(), model: requestedConfig.model, baseUrl: requestedConfig.baseUrl },
+    sourceSha256: requestedConfig.sourceSha256,
+    layoutAssist: requestedConfig.layoutAssist,
+    binary: getSettings().pdfMathTranslateBin || ""
+  }).identity.engine;
+  if (!requestedConfig.model || !requestedConfig.baseUrl || !requestedConfig.sourceSha256 || requestedConfig.layoutAssist === undefined) {
+    return res.status(400).json({ error: "恢复版式译文需要当前模型、接口地址、模式和 PDF 指纹" });
+  }
   const cache = getPdfCache(req.params.id);
   let job = null;
-  if (cache?.layoutTranslationJobId) {
-    job = getPdfMathTranslationJob(cache.layoutTranslationJobId);
+  const preferredMode = requestedConfig.layoutAssist === true ? "assisted" : "normal";
+  const preferredCacheJobId = cache?.layoutTranslationJobs?.[preferredMode]?.jobId || "";
+  const cacheJobIds = [preferredCacheJobId, cache?.layoutTranslationJobId].filter(Boolean);
+  for (const jobId of [...new Set(cacheJobIds)]) {
+    const candidate = getPdfMathTranslationJob(jobId);
+    if (candidate
+      && candidate.paperId === req.params.id
+      && pdfMathJobMatchesRequestedConfig(candidate, requestedConfig)) {
+      job = candidate;
+      break;
+    }
   }
   if (!job) {
     job = getPdfMathTranslationForPaper(req.params.id, {
       sourceLang: req.query?.sourceLang || "",
-      targetLang: req.query?.targetLang || ""
+      targetLang: req.query?.targetLang || "",
+      sourceSha256: requestedConfig.sourceSha256,
+      layoutAssist: requestedConfig.layoutAssist,
+      identityHash: requestedConfig.identityHash,
+      configFingerprint: requestedConfig.configFingerprint,
+      model: requestedConfig.model,
+      baseUrl: requestedConfig.baseUrl
     });
   }
   if (!job) return res.status(404).json({ error: "该文献还没有本地版式译文" });
@@ -739,6 +813,9 @@ app.get("/api/library/:id/pdf-layout-translation", (req, res) => {
 app.put("/api/library/:id/pdf-cache", (req, res) => {
   const paper = getData().library.find((item) => item.id === req.params.id);
   if (!paper) return res.status(404).json({ error: "文献不存在" });
+  if (!acceptsLatestWrite(latestPdfCacheWrites, req.params.id, req.body?.cacheWriteKey, req.body?.cacheWriteSeq)) {
+    return res.status(409).json({ error: "已忽略过期的 PDF 缓存保存请求" });
+  }
   try {
     res.json({ cache: savePdfCache(req.params.id, req.body || {}) });
   } catch (err) {
@@ -746,11 +823,19 @@ app.put("/api/library/:id/pdf-cache", (req, res) => {
   }
 });
 
-app.delete("/api/library/:id/pdf-cache", (req, res) => {
+app.delete("/api/library/:id/pdf-cache", async (req, res) => {
   const paper = getData().library.find((item) => item.id === req.params.id);
   if (!paper) return res.status(404).json({ error: "文献不存在" });
-  clearPdfCache(req.params.id);
-  res.json({ ok: true });
+  if (!acceptsLatestWrite(latestPdfCacheWrites, req.params.id, req.query?.cacheWriteKey, req.query?.cacheWriteSeq)) {
+    return res.status(409).json({ error: "已忽略过期的 PDF 缓存清理请求" });
+  }
+  try {
+    clearPdfCache(req.params.id);
+    await clearPdfMathTranslationsForPaper(req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: `清除版式翻译缓存失败：${err.message}` });
+  }
 });
 
 app.post("/api/library/:id/pdf-source", (req, res) => {
@@ -758,6 +843,9 @@ app.post("/api/library/:id/pdf-source", (req, res) => {
   if (!paper) return res.status(404).json({ error: "文献不存在" });
   const encoded = String(req.body?.data || "").trim();
   if (!encoded) return res.status(400).json({ error: "PDF 数据不能为空" });
+  if (!acceptsLatestWrite(latestPaperSourceWrites, req.params.id, req.body?.sourceWriteKey, req.body?.sourceWriteSeq)) {
+    return res.status(409).json({ error: "已忽略过期的 PDF 保存请求" });
+  }
   try {
     const source = savePdfSource(Buffer.from(encoded, "base64"), req.body?.sourceUrl || "");
     const updated = updatePaper(req.params.id, {
@@ -821,9 +909,17 @@ app.put("/api/library/*", (req, res) => {
   res.json(paper);
 });
 
-app.delete("/api/library/*", (req, res) => {
-  removePaper(req.params[0]);
-  res.json({ ok: true });
+app.delete("/api/library/*", async (req, res) => {
+  setPdfMathPaperDeleting(req.params[0], true);
+  try {
+    await clearPdfMathTranslationsForPaper(req.params[0]);
+    removePaper(req.params[0]);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: `删除文献失败：${err.message}` });
+  } finally {
+    setPdfMathPaperDeleting(req.params[0], false);
+  }
 });
 
 app.post("/api/import", async (req, res) => {

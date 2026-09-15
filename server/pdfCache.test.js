@@ -42,3 +42,40 @@ test("drops obsolete visual layout cache data", () => {
   }, "paper-visual");
   assert.equal(cache.visualPageTranslationLayouts, undefined);
 });
+
+test("保留普通和页面图片辅助两套版式任务缓存", () => {
+  const normal = normalizePdfCache({
+    layoutTranslationJobs: {
+      normal: {
+        jobId: "normal-job",
+        sourceSha256: "source-a",
+        identityHash: "identity-normal",
+        model: "model-a",
+        baseUrl: "https://example.test/v1"
+      }
+    },
+    layoutAssistEnabled: false
+  }, "paper-layout");
+  const merged = mergePdfCache(normal, {
+    layoutTranslationJobs: {
+      assisted: {
+        jobId: "assisted-job",
+        sourceSha256: "source-a",
+        identityHash: "identity-assisted",
+        model: "model-a",
+        baseUrl: "https://example.test/v1"
+      }
+    },
+    layoutAssistEnabled: true
+  }, "paper-layout");
+
+  assert.equal(merged.layoutTranslationJobs.normal.jobId, "normal-job");
+  assert.equal(merged.layoutTranslationJobs.assisted.jobId, "assisted-job");
+  assert.equal(merged.layoutAssistEnabled, true);
+});
+
+test("旧版单任务指针仍可读取", () => {
+  const cache = normalizePdfCache({ layoutTranslationJobId: "legacy-job" }, "paper-legacy");
+  assert.equal(cache.layoutTranslationJobId, "legacy-job");
+  assert.deepEqual(cache.layoutTranslationJobs, {});
+});

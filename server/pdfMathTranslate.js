@@ -29,6 +29,9 @@ const PAPER_INDEX_DIR = path.join(JOBS_DIR, "by-paper");
 const WINDOWS_COMMAND_NAMES = ["pdf2zh.exe", "pdf2zh.cmd", "pdf2zh"];
 const POSIX_COMMAND_NAMES = ["pdf2zh"];
 const PDF_MATH_JOBS = new Map();
+const CLEARED_PAPERS = new Set();
+const PAPER_GENERATIONS = new Map();
+const DELETING_PAPERS = new Set();
 const PDF_MATH_RELEASES_API = "https://api.github.com/repos/PDFMathTranslate/PDFMathTranslate-next/releases/latest";
 const PDF_MATH_INSTALL_DIR = path.join(ROOT, "tools", "pdf2zh");
 const PDF_MATH_INSTALL_TMP = path.join(ROOT, "tmp", "pdf2zh-install");
@@ -88,6 +91,68 @@ function paperIndexFile(paperId) {
   return safe ? path.join(PAPER_INDEX_DIR, `${safe}.json`) : "";
 }
 
+function readPaperIndex(paperId) {
+  const file = paperIndexFile(paperId);
+  if (!file || !existsFile(file)) return null;
+  try {
+    const value = JSON.parse(fs.readFileSync(file, "utf8"));
+    return value && typeof value === "object" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function paperIndexJobIds(index) {
+  const ids = [];
+  if (index?.jobId) ids.push(String(index.jobId));
+  for (const item of Array.isArray(index?.jobs) ? index.jobs : []) {
+    if (item?.jobId) ids.push(String(item.jobId));
+  }
+  return [...new Set(ids)];
+}
+
+function discoverPaperJobIds(paperId) {
+  if (!fs.existsSync(JOBS_DIR)) return [];
+  try {
+    return fs.readdirSync(JOBS_DIR, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name !== "by-paper")
+      .map((entry) => {
+        const id = entry.name;
+        const file = jobSnapshotPath(id);
+        if (!existsFile(file)) return "";
+        try {
+          const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+          return raw?.paperId === paperId && raw?.jobId === id ? id : "";
+        } catch {
+          return "";
+        }
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function paperJobIds(paperId, index) {
+  return [...new Set([...paperIndexJobIds(index), ...discoverPaperJobIds(paperId)])];
+}
+
+function currentPaperGeneration(paperId, index = readPaperIndex(paperId)) {
+  const id = cleanPaperId(paperId);
+  if (!id) return 0;
+  let generation = Number(PAPER_GENERATIONS.get(id) || 0);
+  for (const jobId of paperJobIds(id, index)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(jobSnapshotPath(jobId), "utf8"));
+      if (cleanPaperId(raw?.paperId) === id) generation = Math.max(generation, Number(raw.paperGeneration) || 0);
+    } catch {
+      // 忽略损坏或已删除的任务快照
+    }
+  }
+  PAPER_GENERATIONS.set(id, generation);
+  return generation;
+}
+
 function jobSnapshotPath(jobId) {
   return path.join(JOBS_DIR, String(jobId || ""), "job.json");
 }
@@ -115,6 +180,7 @@ function serializableJob(job) {
     sourceLang: job.sourceLang || "en",
     targetLang: job.targetLang || "zh",
     sourceSha256: job.sourceSha256 || "",
+    paperGeneration: Number(job.paperGeneration) || 0,
     layoutAssist: serializeLayoutAssist(job),
     identity: job.identity || null,
     identityHash: job.identityHash || ""
@@ -241,21 +307,42 @@ function finalizeInterruptedJob(job) {
 
 function persistJob(job) {
   if (!job?.jobId) return;
+  const paperId = cleanPaperId(job.paperId);
+  if (paperId && CLEARED_PAPERS.has(paperId)) return;
+  if (paperId && Number(job.paperGeneration || 0) !== currentPaperGeneration(paperId)) return;
   try {
     ensureDirectory(path.join(JOBS_DIR, job.jobId));
     writeJsonAtomic(jobSnapshotPath(job.jobId), serializableJob(job));
-    const paperId = cleanPaperId(job.paperId);
     if (paperId) {
-      writeJsonAtomic(paperIndexFile(paperId), {
+      const previous = readPaperIndex(paperId);
+      const current = {
         paperId,
         jobId: job.jobId,
         status: job.status,
         sourceLang: job.sourceLang || "en",
         targetLang: job.targetLang || "zh",
         sourceSha256: job.sourceSha256 || "",
+        paperGeneration: Number(job.paperGeneration) || 0,
         identity: job.identity || null,
         identityHash: job.identityHash || "",
+        layoutAssist: job.layoutAssist || { enabled: false },
         updatedAt: job.updatedAt || Date.now()
+      };
+      const entries = new Map();
+      for (const id of paperIndexJobIds(previous)) {
+        const entry = (previous?.jobs || []).find((item) => item?.jobId === id)
+          || (previous?.jobId === id ? previous : null);
+        if (entry?.jobId) entries.set(entry.jobId, entry);
+      }
+      entries.set(job.jobId, current);
+      const jobs = [...entries.values()]
+        .sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0))
+        .slice(0, 32);
+      writeJsonAtomic(paperIndexFile(paperId), {
+        paperId,
+        // 保留 jobId 作为旧客户端的最新任务兼容字段
+        jobId: job.jobId,
+        jobs
       });
     }
   } catch {
@@ -309,18 +396,41 @@ function resolveJob(jobId) {
   return PDF_MATH_JOBS.get(id) || loadJobFromDisk(id);
 }
 
-export function getPdfMathTranslationForPaper(paperId, { sourceLang = "", targetLang = "" } = {}) {
+export function getPdfMathTranslationForPaper(paperId, {
+  sourceLang = "",
+  targetLang = "",
+  sourceSha256 = "",
+  layoutAssist,
+  identityHash = "",
+  configFingerprint = "",
+  model = "",
+  baseUrl = ""
+} = {}) {
   const id = cleanPaperId(paperId);
   if (!id) return null;
   const indexPath = paperIndexFile(id);
-  if (!existsFile(indexPath)) return null;
+  if (!existsFile(indexPath) && !discoverPaperJobIds(id).length) return null;
   try {
-    const index = JSON.parse(fs.readFileSync(indexPath, "utf8"));
-    const job = resolveJob(index?.jobId);
-    if (!job) return null;
-    if (sourceLang && job.sourceLang && job.sourceLang !== normalizeLanguage(sourceLang, job.sourceLang)) return null;
-    if (targetLang && job.targetLang && job.targetLang !== normalizeLanguage(targetLang, job.targetLang)) return null;
-    return publicPdfMathJob(job);
+    const index = readPaperIndex(id);
+    const requestedSource = sourceSha256 ? String(sourceSha256).trim() : "";
+    const requestedIdentity = identityHash ? String(identityHash).trim() : "";
+    const requestedModel = String(model || "").trim();
+    const requestedBaseUrl = String(baseUrl || "").trim();
+    const jobs = paperJobIds(id, index)
+      .map((jobId) => resolveJob(jobId))
+      .filter(Boolean)
+      .filter((job) => cleanPaperId(job.paperId) === id)
+      .filter((job) => Number(job.paperGeneration || 0) === currentPaperGeneration(id, index))
+      .filter((job) => !sourceLang || !job.sourceLang || job.sourceLang === normalizeLanguage(sourceLang, job.sourceLang))
+      .filter((job) => !targetLang || !job.targetLang || job.targetLang === normalizeLanguage(targetLang, job.targetLang))
+      .filter((job) => !requestedSource || job.sourceSha256 === requestedSource)
+      .filter((job) => layoutAssist === undefined || job.layoutAssist?.enabled === Boolean(layoutAssist))
+      .filter((job) => !requestedIdentity || job.identityHash === requestedIdentity)
+      .filter((job) => !configFingerprint || job.identity?.configFingerprint === configFingerprint)
+      .filter((job) => !requestedModel || String(job.identity?.model || "").trim() === requestedModel)
+      .filter((job) => !requestedBaseUrl || normalizeBaseUrl(job.identity?.baseUrl) === normalizeBaseUrl(requestedBaseUrl))
+      .sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0));
+    return jobs[0] ? publicPdfMathJob(jobs[0]) : null;
   } catch {
     return null;
   }
@@ -561,6 +671,25 @@ function normalizeProvider(config = {}) {
   return String(config.provider || config.providerName || config.name || "").trim().toLowerCase();
 }
 
+function pdfMathConfigFingerprint(config = {}) {
+  const value = {
+    provider: normalizeProvider(config),
+    baseUrl: normalizeBaseUrl(config.baseUrl),
+    model: String(config.model || "").trim(),
+    systemPrompt: String(config.pdfMathSystemPrompt || "").trim(),
+    fontFamily: String(config.pdfMathFontFamily || "").trim(),
+    noDual: config.pdfMathNoDual === true,
+    noGlossary: config.pdfMathNoGlossary === true,
+    disableRichText: config.pdfMathDisableRichText === true,
+    sendTemperature: config.pdfMathSendTemperature === true,
+    qps: config.pdfMathQps ?? "",
+    workers: config.pdfMathWorkers ?? "",
+    pageWorkers: config.pdfMathPageWorkers ?? "",
+    binary: String(config.pdfMathBinary || "").trim()
+  };
+  return sha256Buffer(Buffer.from(JSON.stringify(value), "utf8"));
+}
+
 function executableIdentity(resolved) {
   const command = String(resolved?.command || "").trim();
   let stat = null;
@@ -580,7 +709,7 @@ function executableIdentity(resolved) {
   };
 }
 
-export function createPdfMathTranslationIdentity({ config = {}, sourceLang = "en", targetLang = "zh", sourceSha256 = "", layoutAssist, binary = "", resolved } = {}) {
+export function createPdfMathTranslationIdentity({ config = {}, sourceLang = "en", targetLang = "zh", sourceSha256 = "", layoutAssist, binary = "", resolved, configFingerprint = "" } = {}) {
   const actualResolved = resolved === undefined ? resolvePdfMathTranslateCommand(binary) : resolved;
   const baseSystemPrompt = String(config.pdfMathSystemPrompt || ACADEMIC_ZH_SYSTEM_PROMPT).trim();
   const speed = getPdfMathSpeedOptions(config);
@@ -606,6 +735,7 @@ export function createPdfMathTranslationIdentity({ config = {}, sourceLang = "en
     },
     engine: executableIdentity(actualResolved)
   };
+  identity.configFingerprint = String(configFingerprint || pdfMathConfigFingerprint(config)).trim();
   return {
     identity,
     identityHash: sha256Buffer(Buffer.from(JSON.stringify(identity), "utf8"))
@@ -951,7 +1081,7 @@ function publicPdfMathJob(job) {
   };
 }
 
-function preparePdfMathTranslation({ data, config = {}, sourceLang = "en", targetLang = "zh", binary = "", paperId = "", layoutAssist, layoutAssistDeps = {} } = {}) {
+function preparePdfMathTranslation({ data, config = {}, sourceLang = "en", targetLang = "zh", binary = "", paperId = "", layoutAssist, layoutAssistDeps = {}, configFingerprint = "" } = {}) {
   const buffer = Buffer.from(String(data || ""), "base64");
   if (!isPdfBuffer(buffer)) throw new Error("只能对 PDF 文件使用排版翻译");
 
@@ -977,7 +1107,8 @@ function preparePdfMathTranslation({ data, config = {}, sourceLang = "en", targe
     targetLang: to,
     sourceSha256,
     layoutAssist: normalizedLayoutAssist,
-    resolved
+    resolved,
+    configFingerprint
   });
   const pageRenderer = layoutAssistDeps.renderer || layoutAssistDeps.renderPage || renderPdfPage;
   const pageCounter = layoutAssistDeps.getPageCount || getPdfPageCount;
@@ -1738,15 +1869,23 @@ async function executePdfMathTranslation(job, prepared) {
 function findReusableJob({ paperId, sourceSha256, sourceLang, targetLang, layoutAssist, identity, force = false } = {}) {
   if (force || !paperId) return null;
   const indexPath = paperIndexFile(paperId);
-  if (!existsFile(indexPath)) return null;
+  if (!existsFile(indexPath) && !discoverPaperJobIds(paperId).length) return null;
   try {
-    const index = JSON.parse(fs.readFileSync(indexPath, "utf8"));
-    const job = resolveJob(index?.jobId);
+    const index = readPaperIndex(paperId);
+    const jobs = paperJobIds(paperId, index)
+      .map((jobId) => resolveJob(jobId))
+      .filter(Boolean)
+      .filter((job) => cleanPaperId(job.paperId) === cleanPaperId(paperId))
+      .filter((job) => Number(job.paperGeneration || 0) === currentPaperGeneration(cleanPaperId(paperId)))
+      .filter((job) => !job.sourceLang || job.sourceLang === sourceLang)
+      .filter((job) => !job.targetLang || job.targetLang === targetLang)
+      // 可续译任务必须有并且匹配当前 PDF 指纹，旧无指纹快照只能查看。
+      .filter((job) => !sourceSha256 || job.sourceSha256 === sourceSha256)
+      .filter((job) => job.layoutAssist?.enabled === Boolean(layoutAssist?.enabled))
+      .filter((job) => jobIdentityMatches(job, identity))
+      .sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0));
+    const job = jobs[0];
     if (!job) return null;
-    if (job.sourceLang && job.sourceLang !== sourceLang) return null;
-    if (job.targetLang && job.targetLang !== targetLang) return null;
-    if (sourceSha256 && job.sourceSha256 && job.sourceSha256 !== sourceSha256) return null;
-    if (!jobIdentityMatches(job, identity)) return null;
     if (["queued", "running", "canceling"].includes(job.status)) return { job, mode: "active" };
     if (jobAllPagesCompleted(job)) return { job, mode: "complete" };
     // 部分完成：复用已完成页，继续翻译剩余页
@@ -1767,7 +1906,8 @@ function resumePdfMathTranslation(job, args = {}) {
     targetLang: job.targetLang || normalizeLanguage(args.targetLang, "zh"),
     sourceSha256: job.sourceSha256 || "",
     layoutAssist,
-    resolved
+    resolved,
+    configFingerprint: args.configFingerprint || ""
   });
   if (!jobIdentityMatches(job, identityInfo)) throw new Error("任务翻译配置已变化，请新建任务");
   const prepared = {
@@ -1838,6 +1978,10 @@ function resumePdfMathTranslation(job, args = {}) {
 
 export function startPdfMathTranslation(args = {}) {
   const paperId = cleanPaperId(args.paperId);
+  if (paperId && DELETING_PAPERS.has(paperId)) throw new Error("文献正在删除，暂不能启动版式翻译");
+  const paperGeneration = currentPaperGeneration(paperId) + (paperId && CLEARED_PAPERS.has(paperId) ? 1 : 0);
+  if (paperId) PAPER_GENERATIONS.set(paperId, paperGeneration);
+  if (paperId) CLEARED_PAPERS.delete(paperId);
   const from = normalizeLanguage(args.sourceLang, "en");
   const to = normalizeLanguage(args.targetLang, "zh");
   const layoutAssist = normalizeLayoutAssist(args.layoutAssist);
@@ -1855,13 +1999,18 @@ export function startPdfMathTranslation(args = {}) {
     targetLang: to,
     sourceSha256: requestedSourceSha256,
     layoutAssist,
-    binary: args.binary || ""
+    binary: args.binary || "",
+    configFingerprint: args.configFingerprint || ""
   });
 
   // 前端带着已有 jobId 续译：不依赖 paperId，已完成页直接跳过
   if (!args.force && args.jobId) {
     const existing = resolveJob(args.jobId);
-    if (existing && jobIdentityMatches(existing, requestedIdentity)) {
+    const samePaper = paperId
+      ? cleanPaperId(existing?.paperId) === paperId
+      : !cleanPaperId(existing?.paperId);
+    const sameGeneration = Number(existing?.paperGeneration || 0) === paperGeneration;
+    if (existing && samePaper && sameGeneration && jobIdentityMatches(existing, requestedIdentity)) {
       hydratePagesFromOutputDir(existing);
       recountCompletedPages(existing);
       if (["queued", "running", "canceling"].includes(existing.status)) {
@@ -1914,7 +2063,7 @@ export function startPdfMathTranslation(args = {}) {
     }
   }
 
-  const prepared = preparePdfMathTranslation({ ...args, paperId, layoutAssist });
+  const prepared = preparePdfMathTranslation({ ...args, paperId, layoutAssist, configFingerprint: args.configFingerprint || "" });
   prepared.priorityPage = Number(args.priorityPage) || 1;
   prepared.continueAll = continueAll;
   prepared.translateMode = continueAll ? "all-remaining" : "reading-window";
@@ -1952,6 +2101,7 @@ export function startPdfMathTranslation(args = {}) {
     sourceLang: prepared.sourceLang,
     targetLang: prepared.targetLang,
     sourceSha256: prepared.sourceSha256,
+    paperGeneration,
     layoutAssist,
     identity: prepared.identity,
     identityHash: prepared.identityHash
@@ -1969,6 +2119,53 @@ export function getPdfMathTranslationJob(jobId) {
 /** 仅测试用：从内存卸下任务，验证重启后可从 job.json 恢复 */
 export function unloadPdfMathTranslationJob(jobId) {
   PDF_MATH_JOBS.delete(String(jobId || ""));
+}
+
+export function setPdfMathPaperDeleting(paperId, deleting = true) {
+  const id = cleanPaperId(paperId);
+  if (!id) return;
+  if (deleting) DELETING_PAPERS.add(id);
+  else DELETING_PAPERS.delete(id);
+}
+
+export async function clearPdfMathTranslationsForPaper(paperId) {
+  const id = cleanPaperId(paperId);
+  if (!id) return;
+  const clearGeneration = currentPaperGeneration(id) + 1;
+  PAPER_GENERATIONS.set(id, clearGeneration);
+  // 先立墓碑，避免被取消任务的 finally 再写回 job.json 或 paper 索引。
+  CLEARED_PAPERS.add(id);
+  const index = readPaperIndex(id);
+  const jobIds = new Set(paperJobIds(id, index));
+  for (const job of PDF_MATH_JOBS.values()) {
+    if (cleanPaperId(job.paperId) !== id) continue;
+    jobIds.add(job.jobId);
+    if (!["completed", "failed", "canceled"].includes(job.status)) cancelPdfMathTranslation(job.jobId);
+  }
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const active = [...jobIds].some((jobId) => {
+      const job = resolveJob(jobId);
+      return job && !["completed", "failed", "canceled"].includes(job.status);
+    });
+    if (!active) break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  if ([...jobIds].some((jobId) => {
+    const job = resolveJob(jobId);
+    return job && !["completed", "failed", "canceled"].includes(job.status);
+  })) {
+    throw new Error("版式翻译任务仍在停止，暂未删除缓存");
+  }
+  const generationChanged = currentPaperGeneration(id) !== clearGeneration;
+  for (const jobId of jobIds) {
+    if (!/^[a-f0-9-]{20,}$/i.test(jobId)) continue;
+    PDF_MATH_JOBS.delete(jobId);
+    fs.rmSync(path.join(JOBS_DIR, jobId), { recursive: true, force: true });
+  }
+  // 新任务若在清理期间启动，只删除本轮旧任务，保留新任务索引。
+  if (generationChanged) return;
+  const indexFile = paperIndexFile(id);
+  if (indexFile && fs.existsSync(indexFile)) fs.rmSync(indexFile, { force: true });
 }
 
 export function cancelPdfMathTranslation(jobId) {

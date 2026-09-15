@@ -9,6 +9,7 @@ import {
   buildPdfMathWorkWindow,
   buildPdfMathTranslateInvocation,
   cancelPdfMathTranslation,
+  clearPdfMathTranslationsForPaper,
   findPdfMathTranslateOutputs,
   getPdfMathTranslationForPaper,
   getPdfMathTranslationJob,
@@ -493,6 +494,7 @@ test("persists layout translation job and restores after memory clear", async ()
   fs.writeFileSync(command, script, { mode: 0o755 });
   const paperId = "manual:persist-layout-test";
   let differentModelJob = null;
+  let assistedJob = null;
   const started = startPdfMathTranslation({
     data: Buffer.from("%PDF-1.7\n").toString("base64"),
     binary: command,
@@ -537,6 +539,78 @@ test("persists layout translation job and restores after memory clear", async ()
     assert.equal(reused.jobId, started.jobId);
     assert.equal(reused.status, "completed");
 
+    // 普通与页面图片辅助模式必须各自复用自己的任务，不能互相覆盖索引。
+    assistedJob = startPdfMathTranslation({
+      data: Buffer.from("%PDF-1.7\n").toString("base64"),
+      binary: command,
+      pageCount: 1,
+      progressive: true,
+      paperId,
+      layoutAssist: { enabled: true },
+      layoutAssistDeps: {
+        renderer: async (_input, page) => ({
+          page,
+          textLayer: true,
+          image: "data:image/png;base64,AA==",
+          lines: [{ text: "Title", left: 1, top: 2 }]
+        }),
+        vision: async () => ({
+          version: "page-context-v1",
+          page: 1,
+          textLayer: true,
+          columns: 1,
+          readingOrder: [0],
+          regions: [{ kind: "text", order: 0, lineIndexes: [0], confidence: 1 }],
+          notes: ""
+        })
+      },
+      config: { baseUrl: "http://127.0.0.1:1", apiKey: "test-secret", model: "test-model" }
+    });
+    let assistedStatus = getPdfMathTranslationJob(assistedJob.jobId);
+    for (let attempt = 0; attempt < 100 && !["completed", "failed", "canceled"].includes(assistedStatus.status); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      assistedStatus = getPdfMathTranslationJob(assistedJob.jobId);
+    }
+    assert.equal(assistedStatus.status, "completed", assistedStatus.error || assistedStatus.progress);
+    assert.notEqual(assistedJob.jobId, started.jobId);
+
+    const normalAfterAssisted = startPdfMathTranslation({
+      data: Buffer.from("%PDF-1.7\n").toString("base64"),
+      binary: command,
+      pageCount: 1,
+      progressive: false,
+      paperId,
+      config: { baseUrl: "http://127.0.0.1:1", apiKey: "test-secret", model: "test-model" }
+    });
+    assert.equal(normalAfterAssisted.jobId, started.jobId);
+    assert.equal(normalAfterAssisted.layoutAssist.enabled, false);
+    const assistedByPaper = getPdfMathTranslationForPaper(paperId, {
+      sourceSha256: started.sourceSha256,
+      layoutAssist: true,
+      model: "test-model",
+      baseUrl: "http://127.0.0.1:1"
+    });
+    assert.equal(assistedByPaper?.jobId, assistedJob.jobId);
+    assert.equal(getPdfMathTranslationForPaper(paperId, {
+      sourceSha256: "different-source",
+      layoutAssist: true,
+      model: "test-model",
+      baseUrl: "http://127.0.0.1:1"
+    }), null);
+
+    // 兼容旧版只保存最新 jobId 的索引：扫描同 paper 的 job.json 后仍能找回辅助任务。
+    const paperIndex = path.join(process.cwd(), "data", "pdf-translations", "by-paper", `${encodeURIComponent(paperId)}.json`);
+    fs.writeFileSync(paperIndex, JSON.stringify({ paperId, jobId: assistedJob.jobId }));
+    unloadPdfMathTranslationJob(started.jobId);
+    unloadPdfMathTranslationJob(assistedJob.jobId);
+    const restoredLegacyAssisted = getPdfMathTranslationForPaper(paperId, {
+      sourceSha256: started.sourceSha256,
+      layoutAssist: true,
+      model: "test-model",
+      baseUrl: "http://127.0.0.1:1"
+    });
+    assert.equal(restoredLegacyAssisted?.jobId, assistedJob.jobId);
+
     // 同一 paper / PDF 但模型变化时必须创建新的任务身份，不能复用旧产物。
     differentModelJob = startPdfMathTranslation({
       data: Buffer.from("%PDF-1.7\n").toString("base64"),
@@ -555,8 +629,11 @@ test("persists layout translation job and restores after memory clear", async ()
       differentStatus = getPdfMathTranslationJob(differentModelJob.jobId);
     }
     assert.equal(differentStatus.status, "completed", differentStatus.error || differentStatus.progress);
+    await clearPdfMathTranslationsForPaper(paperId);
+    assert.equal(getPdfMathTranslationForPaper(paperId), null);
   } finally {
     fs.rmSync(path.join(process.cwd(), "data", "pdf-translations", started.jobId), { recursive: true, force: true });
+    if (assistedJob) fs.rmSync(path.join(process.cwd(), "data", "pdf-translations", assistedJob.jobId), { recursive: true, force: true });
     if (differentModelJob) fs.rmSync(path.join(process.cwd(), "data", "pdf-translations", differentModelJob.jobId), { recursive: true, force: true });
     fs.rmSync(path.join(process.cwd(), "data", "pdf-translations", "by-paper", `${encodeURIComponent(paperId)}.json`), { force: true });
     fs.rmSync(dir, { recursive: true, force: true });

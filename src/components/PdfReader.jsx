@@ -156,7 +156,18 @@ function layoutAssistStatusLabel(result, pageNumber) {
 }
 
 function normalizedPdfMathBaseUrl(value) {
-  return String(value || "").trim().replace(/\/+$/, "").toLowerCase();
+  const input = String(value || "").trim().replace(/\/+$/, "");
+  if (!input) return "";
+  try {
+    const url = new URL(input);
+    url.protocol = url.protocol.toLowerCase();
+    url.hostname = url.hostname.toLowerCase();
+    if ((url.protocol === "https:" && url.port === "443") || (url.protocol === "http:" && url.port === "80")) url.port = "";
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return input.toLowerCase();
+  }
 }
 
 function pdfMathResultMatchesConfig(result, config) {
@@ -164,6 +175,51 @@ function pdfMathResultMatchesConfig(result, config) {
   if (!identity || typeof identity !== "object") return false;
   return String(identity.model || "").trim() === String(config?.model || "").trim()
     && normalizedPdfMathBaseUrl(identity.baseUrl) === normalizedPdfMathBaseUrl(config?.baseUrl);
+}
+
+function layoutTranslationModeKey(enabled) {
+  return enabled ? "assisted" : "normal";
+}
+
+function layoutTranslationCacheEntry(job) {
+  if (!job?.jobId) return null;
+  return {
+    jobId: String(job.jobId),
+    sourceSha256: String(job.sourceSha256 || ""),
+    identityHash: String(job.identityHash || ""),
+    model: String(job.identity?.model || ""),
+    baseUrl: String(job.identity?.baseUrl || ""),
+    updatedAt: Number(job.updatedAt) || Date.now()
+  };
+}
+
+async function sha256ArrayBuffer(value) {
+  if (!globalThis.crypto?.subtle) return "";
+  try {
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", value);
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return "";
+  }
+}
+
+async function pdfMathConfigFingerprint(config = {}) {
+  const value = {
+    provider: String(config.provider || config.providerName || config.name || "").trim().toLowerCase(),
+    baseUrl: normalizedPdfMathBaseUrl(config.baseUrl),
+    model: String(config.model || "").trim(),
+    systemPrompt: String(config.pdfMathSystemPrompt || "").trim(),
+    fontFamily: String(config.pdfMathFontFamily || "").trim(),
+    noDual: config.pdfMathNoDual === true,
+    noGlossary: config.pdfMathNoGlossary === true,
+    disableRichText: config.pdfMathDisableRichText === true,
+    sendTemperature: config.pdfMathSendTemperature === true,
+    qps: config.pdfMathQps ?? "",
+    workers: config.pdfMathWorkers ?? "",
+    pageWorkers: config.pdfMathPageWorkers ?? "",
+    binary: String(config.pdfMathBinary || "").trim()
+  };
+  return sha256ArrayBuffer(new TextEncoder().encode(JSON.stringify(value)));
 }
 
 function layoutViewMatches(meta, { url, pageNum }) {
@@ -416,6 +472,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const [pageTextLayouts, setPageTextLayouts] = useState({});
   const [pageTranslationLayouts, setPageTranslationLayouts] = useState({});
   const [layoutAssistEnabled, setLayoutAssistEnabled] = useState(false);
+  const layoutAssistEnabledRef = useRef(false);
   const pdfMathConfigKey = useMemo(
     () => `${normalizedPdfMathBaseUrl(config?.baseUrl) || "unknown-provider"}:${String(config?.model || "").trim() || "unknown-model"}`,
     [config?.baseUrl, config?.model]
@@ -435,18 +492,26 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const [pdfCacheStatus, setPdfCacheStatus] = useState("idle");
   const [pdfCacheError, setPdfCacheError] = useState("");
   const [pdfSourceBase64, setPdfSourceBase64] = useState("");
+  const pdfSourceSha256Ref = useRef("");
+  const pdfSourceWriteKeyRef = useRef(`reader-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const pdfCacheWriteKeyRef = useRef(`cache-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   const [originalPdfSource, setOriginalPdfSource] = useState(null);
   const [activePdfVariant, setActivePdfVariant] = useState("original");
   const [pdfMathStatus, setPdfMathStatus] = useState({ loading: true, available: false, command: "", installHint: "" });
   const [pdfMathState, setPdfMathState] = useState("idle");
   const [pdfMathError, setPdfMathError] = useState("");
   const [pdfMathResult, setPdfMathResult] = useState(null);
+  const [layoutTranslationJobs, setLayoutTranslationJobs] = useState({ normal: null, assisted: null });
   // PDFMath 接口未把模型信息放进公开快照，前端保留结果所属的 provider/model 命名空间。
   const pdfMathResultConfigKeyRef = useRef("");
   const [pdfMathJobId, setPdfMathJobId] = useState("");
   const [pdfMathProgress, setPdfMathProgress] = useState("");
   const pdfMathCancelRequested = useRef(false);
   const pdfMathFirstPageOpened = useRef(false);
+  const layoutRestoreSeqRef = useRef(0);
+  const sourceLoadSeqRef = useRef(0);
+  const pdfCacheGenerationRef = useRef(0);
+  const pdfCacheGenerationWriteSeqRef = useRef(new Map());
   /** 版式译文 PDF 缓存：url → pdfjs document，避免每次切换重下 */
   const layoutDocCacheRef = useRef(new Map());
   const layoutViewMetaRef = useRef(null);
@@ -488,6 +553,17 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const setPdfMathResultForCurrentConfig = (result, matchesConfig = pdfMathResultMatchesConfig(result, config)) => {
     pdfMathResultConfigKeyRef.current = result ? (matchesConfig ? pdfMathConfigKey : "__mismatch__") : "";
     setPdfMathResult(result);
+  };
+
+  const rememberLayoutTranslationJob = (job, { activeMode } = {}) => {
+    const entry = layoutTranslationCacheEntry(job);
+    if (!entry) return;
+    const mode = layoutTranslationModeKey(job.layoutAssist?.enabled === true);
+    setLayoutTranslationJobs((previous) => ({ ...previous, [mode]: entry }));
+    const patch = { layoutTranslationJobs: { [mode]: entry } };
+    const currentMode = activeMode === undefined ? layoutAssistEnabledRef.current : Boolean(activeMode);
+    if (activeMode !== undefined || currentMode === (mode === "assisted")) patch.layoutAssistEnabled = currentMode;
+    void persistPdfCache(patch);
   };
 
   const proxy = settings?.proxy || "";
@@ -608,14 +684,22 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     }
   }, [notesStorageKey]);
 
-  const persistPdfCache = (patch) => {
+  const persistPdfCache = (patch, expectedGeneration = pdfCacheGenerationRef.current) => {
     if (!paperId || !patch || typeof patch !== "object") return Promise.resolve(null);
+    const generation = expectedGeneration;
+    const writeSequence = Number(pdfCacheGenerationWriteSeqRef.current.get(generation)) || Date.now();
     setPdfCacheStatus("saving");
     setPdfCacheError("");
     const task = pdfCacheSaveQueueRef.current
       .catch(() => null)
       .then(async () => {
-        const response = await api.savePdfCache(paperId, patch);
+        if (generation !== pdfCacheGenerationRef.current) return null;
+        const response = await api.savePdfCache(paperId, {
+          ...patch,
+          cacheWriteKey: pdfCacheWriteKeyRef.current,
+          cacheWriteSeq: writeSequence
+        });
+        if (response?.cache) pdfCacheRef.current = response.cache;
         setPdfCacheStatus("saved");
         return response?.cache || null;
       })
@@ -634,8 +718,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       setNotesSaveStatus("local");
       return Promise.resolve();
     }
+    const cacheGeneration = pdfCacheGenerationRef.current;
     setNotesSaveStatus("saving");
-    return persistPdfCache({ readingNotes: text }).then((cache) => {
+    return persistPdfCache({ readingNotes: text }, cacheGeneration).then((cache) => {
       setNotesSaveStatus(cache ? "saved" : "error");
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps -- persistPdfCache 依赖 paperId，与闭包一致
@@ -718,13 +803,27 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const clearPdfCache = async () => {
     if (!paperId) return;
     try {
-      await api.clearPdfCache(paperId);
+      pdfCacheGenerationRef.current += 1;
+      pdfCacheGenerationWriteSeqRef.current.set(pdfCacheGenerationRef.current, Date.now());
+      ++sourceLoadSeqRef.current;
+      layoutRestoreSeqRef.current += 1;
+      if (notesSaveTimerRef.current) {
+        window.clearTimeout(notesSaveTimerRef.current);
+        notesSaveTimerRef.current = null;
+      }
+      await pdfCacheSaveQueueRef.current.catch(() => null);
+      await api.clearPdfCache(paperId, {
+        cacheWriteKey: pdfCacheWriteKeyRef.current,
+        cacheWriteSeq: pdfCacheGenerationWriteSeqRef.current.get(pdfCacheGenerationRef.current)
+      });
       pdfCacheRef.current = null;
       setTextByPage({});
       setOcrPageTexts({});
       setParagraphTranslations({});
       setPageTranslations({});
+      layoutAssistEnabledRef.current = false;
       setLayoutAssistEnabled(false);
+      setLayoutTranslationJobs({ normal: null, assisted: null });
       setPageTextLayouts({});
       setPageTranslationLayouts({});
       setSelectionTranslations({});
@@ -746,16 +845,33 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     }
   };
 
-  const applyRestoredPdfMathJob = (job) => {
+  const applyRestoredPdfMathJob = (job, {
+    expectedAssistEnabled = layoutAssistEnabled,
+    sourceSha256 = "",
+    identityHash = "",
+    configFingerprint = "",
+    allowModeDiscovery = false,
+    restoreSeq = 0
+  } = {}) => {
     if (!job?.jobId) return false;
+    if (restoreSeq && restoreSeq !== layoutRestoreSeqRef.current) return false;
+    if (!job.paperId || String(job.paperId) !== String(paperId)) return false;
     const hasCompletedPage = (job.pages || []).some((page) => page.status === "completed" && (page.monoUrl || page.dualUrl));
     const hasWholeFile = Boolean(job.monoUrl || job.dualUrl);
     if (!hasCompletedPage && !hasWholeFile && job.status !== "completed") return false;
     // 旧快照没有 identity 时只允许查看，不能把它当成当前配置的成品。
     const matchesConfig = pdfMathResultMatchesConfig(job, config);
-    setLayoutAssistEnabled(matchesConfig && job?.layoutAssist?.enabled === true);
+    const matchesMode = allowModeDiscovery || job?.layoutAssist?.enabled === Boolean(expectedAssistEnabled);
+    const matchesSource = Boolean(sourceSha256) && String(job.sourceSha256 || "") === String(sourceSha256);
+    const matchesIdentity = !identityHash || String(job.identityHash || "") === String(identityHash);
+    const matchesFingerprint = !configFingerprint || String(job.identity?.configFingerprint || "") === configFingerprint;
+    if (!matchesConfig || !matchesMode || !matchesSource || !matchesIdentity || !matchesFingerprint) return false;
+    const resolvedAssistEnabled = allowModeDiscovery ? job.layoutAssist?.enabled === true : Boolean(expectedAssistEnabled);
+    layoutAssistEnabledRef.current = resolvedAssistEnabled;
+    setLayoutAssistEnabled(resolvedAssistEnabled);
     setPdfMathJobId(job.jobId);
-    setPdfMathResultForCurrentConfig(job, matchesConfig);
+    setPdfMathResultForCurrentConfig(job, true);
+    rememberLayoutTranslationJob(job, { activeMode: resolvedAssistEnabled });
     setPdfMathProgress(job.progress || "已从本地恢复版式译文");
     setPdfMathError(job.status === "failed" && !hasCompletedPage ? (job.error || "版式翻译失败") : "");
     if (["queued", "running", "canceling"].includes(job.status)) {
@@ -769,19 +885,30 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     return true;
   };
 
-  const restorePdfMathFromLocal = async (preferredJobId = "") => {
+  const restorePdfMathFromLocal = async (preferredJobId = "", options = {}) => {
     if (!paperId) return null;
+    const restoreSeq = Number(options.restoreSeq) || ++layoutRestoreSeqRef.current;
+    const expectedAssistEnabled = Boolean(options.expectedAssistEnabled ?? layoutAssistEnabled);
+    const sourceSha256 = String(options.sourceSha256 || "");
+    const identityHash = String(options.identityHash || "");
+    const configFingerprint = String(options.configFingerprint || await pdfMathConfigFingerprint(config));
     try {
       if (preferredJobId) {
         try {
-          const job = await api.pdfMathTranslateJob(preferredJobId);
-          if (applyRestoredPdfMathJob(job)) return job;
+          const job = await api.pdfMathTranslateJob(preferredJobId, { validateEngine: true });
+          if (applyRestoredPdfMathJob(job, { expectedAssistEnabled, sourceSha256, identityHash, configFingerprint, allowModeDiscovery: options.allowModeDiscovery, restoreSeq })) return job;
         } catch {
           /* 再试 paper 级索引 */
         }
       }
-      const job = await api.getPdfLayoutTranslation(paperId, config);
-      if (applyRestoredPdfMathJob(job)) return job;
+      const job = await api.getPdfLayoutTranslation(paperId, config, {
+        layoutAssist: expectedAssistEnabled,
+        sourceSha256,
+        identityHash,
+        configFingerprint,
+        restoreSeq
+      });
+      if (applyRestoredPdfMathJob(job, { expectedAssistEnabled, sourceSha256, identityHash, configFingerprint, restoreSeq })) return job;
     } catch {
       /* 无本地版式译文时静默 */
     }
@@ -789,6 +916,13 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   };
 
   const loadSource = async (source) => {
+    pdfCacheGenerationRef.current += 1;
+    pdfCacheGenerationWriteSeqRef.current.set(pdfCacheGenerationRef.current, Date.now());
+    const cacheGeneration = pdfCacheGenerationRef.current;
+    const sourceLoadSeq = ++sourceLoadSeqRef.current;
+    const sourceWriteSeq = Date.now();
+    const restoreSeq = ++layoutRestoreSeqRef.current;
+    pdfSourceSha256Ref.current = "";
     const sourceVariant = source.variant === "dual" || source.variant === "mono" ? source.variant : "original";
     const isTranslatedVariant = sourceVariant !== "original";
     const preservePdfMathResult = Boolean(source.preservePdfMathResult);
@@ -856,6 +990,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         if (!/404|文献不存在/.test(err.message || "")) setPdfCacheError(`读取阅读缓存失败：${err.message}`);
       }
     }
+    if (sourceLoadSeq !== sourceLoadSeqRef.current) return;
     if (paperId && !isTranslatedVariant) setPdfCacheStatus("loading");
     pdfCacheRef.current = cache;
 
@@ -868,7 +1003,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     setParagraphTranslations(cache?.paragraphTranslations || {});
     setPageTranslations(compatibleTextCache ? (cache?.pageTranslations || {}) : {});
     setPageTranslationLayouts(compatibleTextCache ? (cache?.pageTranslationLayouts || {}) : {});
-    setLayoutAssistEnabled(false);
+    setLayoutTranslationJobs(cache?.layoutTranslationJobs || { normal: null, assisted: null });
+    layoutAssistEnabledRef.current = cache?.layoutAssistEnabled === true;
+    setLayoutAssistEnabled(layoutAssistEnabledRef.current);
     setSelectionTranslations(cache?.selectionTranslations || {});
     setOcrSelectionCache(cache?.ocrSelectionCache || {});
     setDisplayMode(compatibleTextCache ? cachedDisplayMode(cache) : "original");
@@ -945,6 +1082,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
           }
         }
       }
+      if (sourceLoadSeq !== sourceLoadSeqRef.current) return;
       const bytes = new Uint8Array(data);
       const magic = String.fromCharCode(...bytes.slice(0, 5));
       if (bytes.length < 5 || magic !== "%PDF-") {
@@ -960,8 +1098,16 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
 
       if (paperId && !isTranslatedVariant && !cachedPdfUrl && /^https?:\/\//i.test(requestedUrl) && sourceBase64) {
         try {
-          savedSource = await api.savePaperPdf(paperId, { data: sourceBase64, sourceUrl: requestedUrl });
+          if (sourceLoadSeq !== sourceLoadSeqRef.current) return;
+          savedSource = await api.savePaperPdf(paperId, {
+            data: sourceBase64,
+            sourceUrl: requestedUrl,
+            sourceWriteKey: pdfSourceWriteKeyRef.current,
+            sourceWriteSeq
+          });
+          if (sourceLoadSeq !== sourceLoadSeqRef.current) return;
         } catch (err) {
+          if (sourceLoadSeq !== sourceLoadSeqRef.current) return;
           setPdfCacheStatus("error");
           setPdfCacheError(`PDF 已打开，但本地保存失败：${err.message}`);
         }
@@ -973,6 +1119,10 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         // Without this resource path, text/vector layers render but JP2 images disappear.
         wasmUrl: PDFJS_WASM_URL
       }).promise;
+      if (sourceLoadSeq !== sourceLoadSeqRef.current) {
+        pdf.destroy();
+        return;
+      }
       setDoc(pdf);
       setNumPages(pdf.numPages);
       const startPage = Number(initialPage) > 0 ? Math.min(Number(initialPage), pdf.numPages) : 1;
@@ -993,6 +1143,10 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
           const content = await page.getTextContent();
           texts[i] = extractReadablePdfText(content.items).replace(/[ \t]+/g, " ").trim();
         }
+      }
+      if (sourceLoadSeq !== sourceLoadSeqRef.current) {
+        pdf.destroy();
+        return;
       }
       setTextByPage(texts);
 
@@ -1016,17 +1170,35 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
           || (cachePatch.pdfUrl && cachePatch.pdfUrl !== cache.pdfUrl)
           || (cachePatch.sourceSha256 && cachePatch.sourceSha256 !== cache.sourceSha256)
           || (cachePatch.bytes && cachePatch.bytes !== cache.bytes);
-        const savedCache = cacheNeedsSave ? await persistPdfCache(cachePatch) : cache;
+        const savedCache = cacheNeedsSave ? await persistPdfCache(cachePatch, cacheGeneration) : cache;
+        if (sourceLoadSeq !== sourceLoadSeqRef.current) {
+          pdf.destroy();
+          return;
+        }
         if (cache && !savedSource && savedCache) setPdfCacheStatus("restored");
         // 恢复本地已完成的版式翻译，避免每次打开重新翻译
         if (!isTranslatedVariant && !preservePdfMathResult) {
-          const restored = await restorePdfMathFromLocal(cache?.layoutTranslationJobId || savedCache?.layoutTranslationJobId || "");
-          if (restored?.jobId && restored.jobId !== cache?.layoutTranslationJobId) {
-            void persistPdfCache({ layoutTranslationJobId: restored.jobId });
-          }
+          const assistEnabled = cache?.layoutAssistEnabled === true;
+          const mode = layoutTranslationModeKey(assistEnabled);
+          const cachedJob = savedCache?.layoutTranslationJobs?.[mode] || cache?.layoutTranslationJobs?.[mode];
+          const computedSourceSha256 = await sha256ArrayBuffer(data);
+          pdfSourceSha256Ref.current = computedSourceSha256;
+          const sourceSha256 = computedSourceSha256;
+          const legacyJobId = cache?.layoutTranslationJobId || savedCache?.layoutTranslationJobId || "";
+          await restorePdfMathFromLocal(
+            cachedJob?.jobId || legacyJobId,
+            {
+              expectedAssistEnabled: assistEnabled,
+              sourceSha256,
+              identityHash: cachedJob?.identityHash || "",
+              restoreSeq,
+              allowModeDiscovery: !cachedJob && Boolean(legacyJobId) && (Number(cache?.layoutTranslationJobsVersion) || 0) < 1
+            }
+          );
         }
       }
     } catch (err) {
+      if (sourceLoadSeq !== sourceLoadSeqRef.current) return;
       const msg = err.message || "PDF 加载失败";
       const info = classifyPdfError(err, { url: requestedUrl || sourceUrl });
       setError(msg);
@@ -1039,7 +1211,12 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   };
 
   const loadImageFile = (file) => {
+    pdfCacheGenerationRef.current += 1;
+    pdfCacheGenerationWriteSeqRef.current.set(pdfCacheGenerationRef.current, Date.now());
+    const sourceLoadSeq = ++sourceLoadSeqRef.current;
+    ++layoutRestoreSeqRef.current;
     setLoading(true);
+    pdfSourceSha256Ref.current = "";
     setError("");
     setErrorIsAuth(false);
     setPdfSourceBase64("");
@@ -1058,7 +1235,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     setVisualPageTranslationLayouts({});
     setVisualLayoutError("");
     setVisualLayoutEnabled(false);
+    layoutAssistEnabledRef.current = false;
     setLayoutAssistEnabled(false);
+    setLayoutTranslationJobs({ normal: null, assisted: null });
     setDisplayMode("original");
     setSelectionPopup(null);
     setSelectionTranslations({});
@@ -1072,12 +1251,14 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     imageUrlRef.current = src;
     const image = new Image();
     image.onload = () => {
+      if (sourceLoadSeq !== sourceLoadSeqRef.current) return;
       setImageSource({ src, name: file.name || "图片" });
       setNumPages(1);
       setPageNum(1);
       setLoading(false);
     };
     image.onerror = () => {
+      if (sourceLoadSeq !== sourceLoadSeqRef.current) return;
       URL.revokeObjectURL(src);
       if (imageUrlRef.current === src) imageUrlRef.current = null;
       setError("图片加载失败");
@@ -1507,9 +1688,12 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     if (pdfMathState !== "working" || !pdfMathJobId || !pageNum) return undefined;
     // 本页版式已就绪时仍同步优先页，便于后台预取下一页，但不会触发重译
     let cancelled = false;
-    void api.prioritizePdfMathTranslate(pdfMathJobId, pageNum)
+    const sourceLoadSeq = sourceLoadSeqRef.current;
+    const requestedJobId = pdfMathJobId;
+    const prioritySeq = Date.now();
+    void api.prioritizePdfMathTranslate(pdfMathJobId, pageNum, { prioritySeq })
       .then((job) => {
-        if (cancelled || !job) return;
+        if (cancelled || !job || sourceLoadSeq !== sourceLoadSeqRef.current || requestedJobId !== pdfMathJobId) return;
         setPdfMathResultForCurrentConfig(job);
         if (typeof job?.layoutAssist?.enabled === "boolean") setLayoutAssistEnabled(job.layoutAssist.enabled);
         if (job.progress) setPdfMathProgress(job.progress);
@@ -1574,6 +1758,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const recognizePageText = async (targetPage = pageNum) => {
     if (ocrPageTexts[targetPage]) return ocrPageTexts[targetPage];
     if (!hasPageSource || ocrBusy) return "";
+    const cacheGeneration = pdfCacheGenerationRef.current;
     setOcrBusy(true);
     setOcrError("");
     setOcrProgress("正在加载 OCR 引擎…");
@@ -1582,7 +1767,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       const result = await recognizeOcrImage(canvas, (message) => setOcrProgress(ocrProgressLabel(message)));
       if (!result.text) throw new Error("这一页没有识别到可翻译文字，请尝试放大或框选文字更清晰的区域");
       setOcrPageTexts((prev) => ({ ...prev, [targetPage]: result.text }));
-      void persistPdfCache({ ocrPageTexts: { [targetPage]: result.text } });
+      void persistPdfCache({ ocrPageTexts: { [targetPage]: result.text } }, cacheGeneration);
       return result.text;
     } catch (err) {
       setOcrError(`OCR 识别失败：${err.message || "未知错误"}`);
@@ -1599,7 +1784,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     return restoreProtectedText(result.text, protectedText.tokens);
   };
 
-  const addOcrSelectionTranslation = (popup, translation) => {
+  const addOcrSelectionTranslation = (popup, translation, cacheGeneration = pdfCacheGenerationRef.current) => {
     const item = {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       cacheKey: popup.regionKey,
@@ -1624,7 +1809,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     void persistPdfCache({
       ocrSelectionCache: { [popup.regionKey]: nextOcrCache[popup.regionKey] },
       selectionTranslations: { [pageNum]: nextSelectionTranslations[pageNum] }
-    });
+    }, cacheGeneration);
     setSelectionPopup(null);
     setOcrSelectionBox(null);
   };
@@ -1632,14 +1817,15 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const translateOcrSelection = async (popup, text = popup?.text) => {
     if (!popup?.text || !config || selectionLoading) return;
     const cached = ocrSelectionCache[popup.regionKey];
+    const cacheGeneration = pdfCacheGenerationRef.current;
     if (cached?.translation) {
-      addOcrSelectionTranslation(popup, cached.translation);
+      addOcrSelectionTranslation(popup, cached.translation, cacheGeneration);
       return;
     }
     setSelectionLoading(true);
     try {
       const translation = await translateOcrText(text, "selection");
-      addOcrSelectionTranslation(popup, translation);
+      addOcrSelectionTranslation(popup, translation, cacheGeneration);
     } catch (err) {
       setSelectionPopup((prev) => prev ? { ...prev, error: `翻译失败：${err.message}` } : prev);
     } finally {
@@ -1839,6 +2025,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       await translateOcrSelection(selectionPopup);
       return;
     }
+    const cacheGeneration = pdfCacheGenerationRef.current;
     setSelectionLoading(true);
     try {
       const result = await api.translate({ text: selectionPopup.text, config, mode: "selection" });
@@ -1854,7 +2041,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         [pageNum]: [...(selectionTranslations[pageNum] || []), item]
       };
       setSelectionTranslations(nextSelectionTranslations);
-      void persistPdfCache({ selectionTranslations: { [pageNum]: nextSelectionTranslations[pageNum] } });
+      void persistPdfCache({ selectionTranslations: { [pageNum]: nextSelectionTranslations[pageNum] } }, cacheGeneration);
       setSelectionPopup(null);
       window.getSelection?.()?.removeAllRanges?.();
     } catch (err) {
@@ -1877,11 +2064,12 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     const text = paragraphs[index];
     if (!text || !config) return;
     const key = `${pageNum}:${index}`;
+    const cacheGeneration = pdfCacheGenerationRef.current;
     setTranslatingParagraphs((prev) => ({ ...prev, [key]: true }));
     try {
       const result = await api.translate({ text, config, mode: "paragraph" });
       setParagraphTranslations((prev) => ({ ...prev, [key]: result.text }));
-      void persistPdfCache({ paragraphTranslations: { [key]: result.text } });
+      void persistPdfCache({ paragraphTranslations: { [key]: result.text } }, cacheGeneration);
       setDisplayMode("bilingual");
     } catch (err) {
       setParagraphTranslations((prev) => ({ ...prev, [key]: `翻译失败：${err.message}` }));
@@ -1922,6 +2110,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       setDisplayMode("translated");
       return;
     }
+    const cacheGeneration = pdfCacheGenerationRef.current;
     setTranslatingPage(pageNum);
     try {
       const text = pageText || await recognizePageText(pageNum);
@@ -1940,7 +2129,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         pageTranslations: { [pageNum]: translated.text }
       };
       if (translated.lines) cachePatch.pageTranslationLayouts = { [pageNum]: translated.lines };
-      void persistPdfCache(cachePatch);
+      void persistPdfCache(cachePatch, cacheGeneration);
       setDisplayMode("translated");
     } catch (err) {
       setPageTranslations((prev) => ({ ...prev, [pageNum]: `翻译失败：${err.message}` }));
@@ -1951,6 +2140,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
 
   const translateFull = async () => {
     if (!hasPageSource || !config || translatingAll) return;
+    const cacheGeneration = pdfCacheGenerationRef.current;
     setTranslatingAll(true);
     setDisplayMode("translated");
     // 阅读顺序：当前页 → 向后 → 再补前面；一页一页串行全力
@@ -1989,7 +2179,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
             pageTranslations: { [i]: translated.text }
           };
           if (translated.lines) cachePatch.pageTranslationLayouts = { [i]: translated.lines };
-          void persistPdfCache(cachePatch);
+          void persistPdfCache(cachePatch, cacheGeneration);
         }
       } catch (err) {
         setPageTranslations((prev) => ({ ...prev, [i]: `翻译失败：${err.message}` }));
@@ -2010,6 +2200,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const translateWithPdfMath = async ({ force = false } = {}) => {
     if (!pdfSourceBase64 || !config || !pdfMathStatus.available) return;
     if (pdfMathState === "working") return;
+    const sourceLoadSeq = sourceLoadSeqRef.current;
+    const isCurrentSource = () => sourceLoadSeq === sourceLoadSeqRef.current;
     if (!force && layoutAllDone) {
       setPdfMathProgress(`全部 ${layoutCompletedCount} 页已完成`);
       setPdfMathState("ready");
@@ -2031,6 +2223,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     );
     const priorityPage = pageNum || 1;
     try {
+      const configFingerprint = await pdfMathConfigFingerprint(config);
       const started = await api.pdfMathTranslate({
         data: pdfSourceBase64,
         config,
@@ -2044,14 +2237,15 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         force: Boolean(force),
         // 主路径始终续译全部未完成页，避免「译两页就停」让人摸不着头脑
         continueAll: !force,
-        layoutAssist: { enabled: Boolean(layoutAssistEnabled) }
+        layoutAssist: { enabled: Boolean(layoutAssistEnabled) },
+        configFingerprint
       });
+      if (!isCurrentSource()) return;
       if (typeof started?.layoutAssist?.enabled === "boolean") setLayoutAssistEnabled(started.layoutAssist.enabled);
       setPdfMathJobId(started.jobId || "");
-      if (paperId && started.jobId) {
-        void persistPdfCache({ layoutTranslationJobId: started.jobId });
-      }
+      if (paperId && started.jobId) rememberLayoutTranslationJob(started);
       const showFirstReadyPdfMathPage = (candidate) => {
+        if (!isCurrentSource()) return;
         const completed = (candidate.pages || []).filter((page) => page.status === "completed" && (page.dualUrl || page.monoUrl));
         if (!completed.length || pdfMathFirstPageOpened.current) return;
         const preferred = completed.find((page) => page.page === priorityPage) || completed[0];
@@ -2084,8 +2278,10 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
             jobId: started.jobId || pdfMathJobId || "",
             force: false,
             continueAll: true,
-            layoutAssist: { enabled: Boolean(layoutAssistEnabled) }
+            layoutAssist: { enabled: Boolean(layoutAssistEnabled) },
+            configFingerprint
           });
+          if (!isCurrentSource()) return;
           job = resumed;
           if (typeof resumed?.layoutAssist?.enabled === "boolean") setLayoutAssistEnabled(resumed.layoutAssist.enabled);
           setPdfMathJobId(resumed.jobId || started.jobId || "");
@@ -2097,13 +2293,16 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         }
       }
       while (["queued", "running", "canceling"].includes(job.status)) {
+        if (!isCurrentSource()) return;
         setPdfMathResultForCurrentConfig(job);
         if (typeof job?.layoutAssist?.enabled === "boolean") setLayoutAssistEnabled(job.layoutAssist.enabled);
         showFirstReadyPdfMathPage(job);
         setPdfMathProgress(job.progress || "正在翻译…");
         await wait(1000);
         job = await api.pdfMathTranslateJob(job.jobId || started.jobId);
+        if (!isCurrentSource()) return;
       }
+      if (!isCurrentSource()) return;
       setPdfMathResultForCurrentConfig(job);
       if (typeof job?.layoutAssist?.enabled === "boolean") setLayoutAssistEnabled(job.layoutAssist.enabled);
       showFirstReadyPdfMathPage(job);
@@ -2126,10 +2325,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       }
       setPdfMathResultForCurrentConfig(job);
       setPdfMathState("ready");
-      if (paperId && job.jobId) {
-        void persistPdfCache({ layoutTranslationJobId: job.jobId });
-      }
+      if (paperId && job.jobId) rememberLayoutTranslationJob(job);
     } catch (err) {
+      if (!isCurrentSource()) return;
       if (pdfMathCancelRequested.current) {
         setPdfMathState(hasAnyLayoutResult ? "ready" : "idle");
         setPdfMathError("");
@@ -2157,10 +2355,10 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     if (layoutAssistModeMismatch) {
       return {
         kind: "start",
-        label: "开始当前模式翻译",
+        label: "恢复或开始当前模式翻译",
         disabled: false,
-        // 另一模式已有结果时必须开新任务，不能续用旧任务冒充当前模式。
-        force: true
+        // 先尝试恢复当前模式的历史任务；没有匹配缓存时再新建任务。
+        force: false
       };
     }
     if (layoutAllDone) {
@@ -2304,21 +2502,25 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     });
   };
 
-  const handleLayoutAssistChange = (enabled) => {
+  const handleLayoutAssistChange = async (enabled) => {
+    layoutAssistEnabledRef.current = enabled;
     setLayoutAssistEnabled(enabled);
     // 切换模式后先回到原文，避免短暂显示另一模式的 PDFMath 译文。
     if (hasAnyPdfMathResult && (layoutAssistResultEnabled === null || layoutAssistResultEnabled !== enabled)) {
       setDisplayMode("original");
       setLayoutViewError("");
     }
+    const mode = layoutTranslationModeKey(enabled);
+    const cachedJob = layoutTranslationJobs[mode];
+    await restorePdfMathFromLocal(cachedJob?.jobId || "", {
+      expectedAssistEnabled: enabled,
+      sourceSha256: pdfSourceSha256Ref.current,
+      identityHash: cachedJob?.identityHash || ""
+    });
   };
 
   const handleDisplayModeChange = (mode) => {
     setLayoutViewError("");
-    if (mode !== "original" && layoutAssistModeMismatch) {
-      setDisplayMode("original");
-      return;
-    }
     // 再次点击「译文/中英对照」时强制重新绑定，避免卡在英文原文
     if (mode !== "original") {
       setLayoutReloadToken((token) => token + 1);
@@ -3121,7 +3323,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                           type="button"
                           className={displayMode === "translated" ? "active" : ""}
                           onClick={() => handleDisplayModeChange("translated")}
-                          disabled={layoutAssistModeMismatch || (!currentLayoutPage.done && !resolveLayoutPageUrl(currentModePdfMathResult, pageNum, "mono").url)}
+                          disabled={!currentLayoutPage.done && !resolveLayoutPageUrl(currentModePdfMathResult, pageNum, "mono").url}
                           title={currentLayoutPage.done ? "显示本页译文" : "本页尚未译完"}
                         >
                           译文{currentLayoutPage.done ? "" : "·未就绪"}
@@ -3130,7 +3332,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                           type="button"
                           className={displayMode === "bilingual" ? "active" : ""}
                           onClick={() => handleDisplayModeChange("bilingual")}
-                          disabled={layoutAssistModeMismatch || (!currentLayoutPage.done && !resolveLayoutPageUrl(currentModePdfMathResult, pageNum, "dual").url)}
+                          disabled={!currentLayoutPage.done && !resolveLayoutPageUrl(currentModePdfMathResult, pageNum, "dual").url}
                           title={currentLayoutPage.done ? "显示中英对照" : "本页尚未译完"}
                         >
                           中英对照{currentLayoutPage.done ? "" : "·未就绪"}

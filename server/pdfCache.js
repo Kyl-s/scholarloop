@@ -45,6 +45,25 @@ function cleanNestedMap(value) {
   );
 }
 
+function cleanLayoutTranslationJobs(value) {
+  const source = asRecord(value);
+  const normalized = {};
+  for (const mode of ["normal", "assisted"]) {
+    const entry = asRecord(source[mode]);
+    const jobId = cleanText(entry.jobId, 80);
+    if (!jobId) continue;
+    normalized[mode] = {
+      jobId,
+      sourceSha256: cleanText(entry.sourceSha256, 128),
+      identityHash: cleanText(entry.identityHash, 128),
+      model: cleanText(entry.model, 300),
+      baseUrl: cleanText(entry.baseUrl, 2000),
+      updatedAt: Number(entry.updatedAt) || 0
+    };
+  }
+  return normalized;
+}
+
 export function normalizePdfCache(value, paperId = "") {
   const source = asRecord(value);
   const normalized = {
@@ -65,6 +84,12 @@ export function normalizePdfCache(value, paperId = "") {
     ocrSelectionCache: cleanNestedMap(source.ocrSelectionCache),
     // 版式翻译任务 ID：重启后通过 job.json 恢复，避免每次重新翻译
     layoutTranslationJobId: cleanText(source.layoutTranslationJobId, 80),
+    // 按页面图片辅助模式分别保留任务，避免切换模式后丢失旧任务索引
+    layoutTranslationJobs: cleanLayoutTranslationJobs(source.layoutTranslationJobs),
+    layoutTranslationJobsVersion: Number.isFinite(Number(source.layoutTranslationJobsVersion))
+      ? Math.max(0, Number(source.layoutTranslationJobsVersion))
+      : (source.layoutTranslationJobs ? 1 : 0),
+    layoutAssistEnabled: source.layoutAssistEnabled === true,
     // 阅读随记：想到什么写什么，随 PDF 缓存持久化
     readingNotes: cleanText(source.readingNotes, 200000),
     savedAt: cleanText(source.savedAt, 80) || new Date().toISOString()
@@ -115,6 +140,14 @@ export function mergePdfCache(current, patch, paperId = "") {
     savedAt: new Date().toISOString()
   };
   for (const field of MAP_FIELDS) merged[field] = mergeMap(base[field], next[field]);
+  merged.layoutTranslationJobs = {
+    ...cleanLayoutTranslationJobs(base.layoutTranslationJobs),
+    ...cleanLayoutTranslationJobs(next.layoutTranslationJobs)
+  };
+  merged.layoutTranslationJobsVersion = Math.max(
+    Number(base.layoutTranslationJobsVersion) || 0,
+    next.layoutTranslationJobs ? 1 : 0
+  );
   return normalizePdfCache(merged, paperId || base.paperId);
 }
 

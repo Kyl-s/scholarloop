@@ -82,7 +82,13 @@ export const api = {
     method: "PUT",
     body: JSON.stringify(body)
   }),
-  clearPdfCache: (id) => request(`/api/library/${encodeURIComponent(id)}/pdf-cache`, { method: "DELETE" }),
+  clearPdfCache: (id, options = {}) => {
+    const query = new URLSearchParams();
+    if (options.cacheWriteKey) query.set("cacheWriteKey", String(options.cacheWriteKey));
+    if (Number.isFinite(Number(options.cacheWriteSeq))) query.set("cacheWriteSeq", String(options.cacheWriteSeq));
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return request(`/api/library/${encodeURIComponent(id)}/pdf-cache${suffix}`, { method: "DELETE" });
+  },
   savePaperPdf: (id, body) => request(`/api/library/${encodeURIComponent(id)}/pdf-source`, {
     method: "POST",
     body: JSON.stringify(body)
@@ -98,13 +104,22 @@ export const api = {
     method: "POST",
     body: JSON.stringify(body)
   }),
-  pdfMathTranslateJob: (jobId) => request(`/api/pdf/translate-layout/${encodeURIComponent(jobId)}`),
-  getPdfLayoutTranslation: (id, config = {}) => {
+  pdfMathTranslateJob: (jobId, options = {}) => {
+    const suffix = options.validateEngine ? "?validateEngine=true" : "";
+    return request(`/api/pdf/translate-layout/${encodeURIComponent(jobId)}${suffix}`);
+  },
+  getPdfLayoutTranslation: (id, config = {}, options = {}) => {
     const query = new URLSearchParams();
     const model = String(config?.model || "").trim();
     const baseUrl = String(config?.baseUrl || "").trim();
     if (model) query.set("model", model);
     if (baseUrl) query.set("baseUrl", baseUrl);
+    if (options.sourceLang) query.set("sourceLang", String(options.sourceLang));
+    if (options.targetLang) query.set("targetLang", String(options.targetLang));
+    if (options.sourceSha256) query.set("sourceSha256", String(options.sourceSha256));
+    if (typeof options.layoutAssist === "boolean") query.set("layoutAssist", String(options.layoutAssist));
+    if (options.identityHash) query.set("identityHash", String(options.identityHash));
+    if (options.configFingerprint) query.set("configFingerprint", String(options.configFingerprint));
     const suffix = query.toString() ? `?${query.toString()}` : "";
     return request(`/api/library/${encodeURIComponent(id)}/pdf-layout-translation${suffix}`);
   },
@@ -113,7 +128,7 @@ export const api = {
   }),
   prioritizePdfMathTranslate: (jobId, page, options = {}) => request(`/api/pdf/translate-layout/${encodeURIComponent(jobId)}/priority`, {
     method: "POST",
-    body: JSON.stringify({ page, continueAll: Boolean(options.continueAll) })
+    body: JSON.stringify({ page, continueAll: Boolean(options.continueAll), prioritySeq: options.prioritySeq })
   }),
   importPdf: (body) => request("/api/import/pdf", {
     method: "POST",
