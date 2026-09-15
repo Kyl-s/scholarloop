@@ -314,7 +314,7 @@ app.post("/api/search/plan", async (req, res) => {
     });
     res.json(plan);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: searchErrorMessage(err, req.body?.config) });
   }
 });
 
