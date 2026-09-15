@@ -177,7 +177,11 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
         results: data.papers,
         status: data.sourceStatus || [],
         queries: data.queries || [],
-        resultFilter: "all"
+        resultFilter: "all",
+        browserOpen,
+        browserTabs,
+        activeBrowserTabId,
+        page
       };
       setResults(session.results);
       setStatus(session.status);
@@ -200,13 +204,17 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
         results: [],
         status: [],
         queries: [],
-        resultFilter: "all"
+        resultFilter: "all",
+        browserOpen,
+        browserTabs,
+        activeBrowserTabId,
+        page
       });
     } finally {
       setLoading(false);
       setAiPlanning(false);
     }
-  }, [query, sources, fromYear, toYear, sort, aiSearch, aiInstruction, path?.field, path?.goal, onSessionChange]);
+  }, [query, sources, fromYear, toYear, sort, aiSearch, aiInstruction, path?.field, path?.goal, browserOpen, browserTabs, activeBrowserTabId, page, onSessionChange]);
 
   const restoreSession = (session) => {
     if (!session) return;
@@ -224,6 +232,24 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
     setAiInstruction(session.aiInstruction || "");
     setAiPlan(session.aiPlan || null);
     setResultFilter(session.resultFilter || "all");
+    setPage(Number(session.page) > 0 ? Number(session.page) : 1);
+
+    // Keep the embedded browser alongside the search session so sidebar navigation
+    // does not reset the visible tabs or the active institutional page.
+    if (Array.isArray(session.browserTabs)) {
+      const restoredTabs = session.browserTabs.map((candidate) => candidate?.blank
+        ? createBlankBrowserTab(candidate)
+        : createBrowserTab(candidate)).filter(Boolean);
+      setBrowserTabs(restoredTabs);
+      const requestedTabId = String(session.activeBrowserTabId || "");
+      setActiveBrowserTabId(restoredTabs.some((tab) => tab.id === requestedTabId)
+        ? requestedTabId
+        : (restoredTabs[0]?.id || ""));
+      setBrowserOpen(Boolean(session.browserOpen));
+      setTabLoading({});
+      setTabErrors({});
+      setTabTitles({});
+    }
   };
 
   useEffect(() => {
@@ -271,9 +297,13 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
       aiSearch,
       aiInstruction,
       aiPlan,
-      resultFilter
+      resultFilter,
+      browserOpen,
+      browserTabs,
+      activeBrowserTabId,
+      page
     });
-  }, [hydrated, query, activeQuery, sources, fromYear, toYear, sort, results, status, queries, showFilters, aiSearch, aiInstruction, aiPlan, resultFilter, onSessionChange]);
+  }, [hydrated, query, activeQuery, sources, fromYear, toYear, sort, results, status, queries, showFilters, aiSearch, aiInstruction, aiPlan, resultFilter, page, browserOpen, browserTabs, activeBrowserTabId, onSessionChange]);
 
   const clearSession = () => {
     setQuery("");
@@ -699,19 +729,15 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
                     )}
                   </div>
                 ) : null}
-                <webview
-                  ref={webviewRef}
-                  src={browserUrl}
-                  allowpopups
-                  partition="persist:scholarloop"
-                  useragent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                  webpreferences="contextIsolation=yes, nodeIntegration=no"
-                  className="browser-webview"
-                  style={{ width: "100%", height: "100%" }}
-                />
               </>
             ) : (
-              <div className="browser-web-fallback">
+              activeBrowserTab?.blank ? (
+                <div className="browser-new-tab-page">
+                  <Globe2 size={28} />
+                  <strong>新标签页</strong>
+                  <span>在上方地址栏输入网址并回车，或从快速访问中选择一个站点。</span>
+                </div>
+              ) : <div className="browser-web-fallback">
                 <Globe2 size={22} />
                 <strong>网页版无法内嵌显示论文网站</strong>
                 <p>多数论文网站禁止 iframe，请用系统浏览器打开并登录。</p>
