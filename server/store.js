@@ -45,6 +45,10 @@ const defaultData = () => ({
       name: "",
       type: "webvpn",
       portalUrl: ""
+    },
+    paperSources: {
+      ieee: { enabled: true, apiKey: "" },
+      wos: { enabled: true, apiKey: "", database: "WOS" }
     }
   },
   searchCache: {}
@@ -75,6 +79,18 @@ export function loadData() {
         institutionAccess: {
           ...defaultData().settings.institutionAccess,
           ...(raw.settings?.institutionAccess || {})
+        },
+        paperSources: {
+          ...defaultData().settings.paperSources,
+          ...(raw.settings?.paperSources || {}),
+          ieee: {
+            ...defaultData().settings.paperSources.ieee,
+            ...(raw.settings?.paperSources?.ieee || {})
+          },
+          wos: {
+            ...defaultData().settings.paperSources.wos,
+            ...(raw.settings?.paperSources?.wos || {})
+          }
         }
       }
     };
@@ -330,7 +346,24 @@ export function setSearchCache(key, value) {
 
 export function updateSettings(patch = {}) {
   const current = getData();
-  current.settings = { ...current.settings, ...patch };
+  const sourcePatch = patch.paperSources && typeof patch.paperSources === "object" ? patch.paperSources : null;
+  const next = { ...current.settings, ...patch };
+  if (sourcePatch) {
+    next.paperSources = {
+      ...current.settings.paperSources,
+      ...sourcePatch,
+      ieee: { ...(current.settings.paperSources?.ieee || {}), ...(sourcePatch.ieee || {}) },
+      wos: { ...(current.settings.paperSources?.wos || {}), ...(sourcePatch.wos || {}) }
+    };
+    for (const id of ["ieee", "wos"]) {
+      const incoming = sourcePatch[id];
+      if (incoming && Object.prototype.hasOwnProperty.call(incoming, "apiKey") && incoming.apiKey === "") {
+        next.paperSources[id].apiKey = current.settings.paperSources?.[id]?.apiKey || "";
+      }
+      if (incoming?.apiKey === null) next.paperSources[id].apiKey = "";
+    }
+  }
+  current.settings = next;
   save();
   return current.settings;
 }
@@ -437,6 +470,7 @@ export function upsertJournal(journal) {
     corrections: journal.corrections || [],
     insights: journal.insights || [],
     nextSteps: journal.nextSteps || [],
+    source: journal.source || null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
@@ -528,9 +562,25 @@ export function removeNote(id) {
 
 export function importAll(payload) {
   if (!payload || typeof payload !== "object") throw new Error("导入数据格式不正确");
+  const defaults = defaultData();
+  const existingSources = data?.settings?.paperSources || {};
+  const importedSettings = { ...defaults.settings, ...(payload.settings || {}) };
+  importedSettings.paperSources = {
+    ...defaults.settings.paperSources,
+    ...(payload.settings?.paperSources || {})
+  };
+  for (const id of ["ieee", "wos"]) {
+    importedSettings.paperSources[id] = {
+      ...defaults.settings.paperSources[id],
+      ...(payload.settings?.paperSources?.[id] || {})
+    };
+    // API credentials are local runtime state and never come from backups.
+    importedSettings.paperSources[id].apiKey = existingSources[id]?.apiKey || "";
+  }
   data = {
-    ...defaultData(),
+    ...defaults,
     ...payload,
+    settings: importedSettings,
     memories: normalizeMemoryList(payload.memories),
     notes: normalizeNoteList(payload.notes)
   };

@@ -1,6 +1,7 @@
 import { XMLParser } from "fast-xml-parser";
 import { getSearchCache, setSearchCache } from "./store.js";
 import { getProxyUrl, fetchWithFallback } from "./proxy.js";
+import { asDirectPdfUrl, preferPdfUrl } from "../src/pdfSource.js";
 
 const TIMEOUT = 15000;
 const AGENT = "ScholarLoop/0.1 (research desktop app; mailto:local@scholarloop.app)";
@@ -40,6 +41,49 @@ async function fetchText(url, options = {}) {
 }
 
 const SEARCH_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
+
+export const PAPER_SOURCE_IDS = ["arxiv", "openalex", "semanticscholar", "pubmed", "crossref", "cnki", "ieee", "wos"];
+
+export const PAPER_SOURCE_PORTALS = {
+  ieee: {
+    id: "ieee",
+    label: "IEEE Xplore",
+    home: "https://ieeexplore.ieee.org",
+    apiHome: "https://ieeexploreapi.ieee.org/api/v1/search/articles",
+    desc: "IEEE 期刊、会议与标准论文"
+  },
+  wos: {
+    id: "wos",
+    label: "Web of Science",
+    home: "https://www.webofscience.com",
+    apiHome: "https://api.clarivate.com/apis/wos-starter/v1/documents",
+    desc: "Clarivate Web of Science 引文索引"
+  }
+};
+
+/** 防止上游错误页把请求凭据原样带回客户端。 */
+export function redactSensitiveError(value, secrets = []) {
+  let text = String(value || "连接失败");
+  for (const secret of secrets) {
+    const key = String(secret || "").trim();
+    if (key) text = text.split(key).join("[已隐藏]");
+  }
+  return text
+    .replace(/(Bearer\s+)[^\s,;]+/gi, "$1[已隐藏]")
+    .replace(/((?:api[_ -]?key|token|secret|密钥)\s*[:=：]\s*)[^\r\n]+/gi, "$1[已隐藏]")
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[已隐藏 API Key]");
+}
+
+export function getPaperSourceInfo(settings = {}) {
+  const credentials = settings?.paperSources || {};
+  return Object.values(PAPER_SOURCE_PORTALS).map((source) => ({
+    ...source,
+    configured: Boolean(String(credentials[source.id]?.apiKey || "").trim()),
+    enabled: credentials[source.id]?.enabled !== false,
+    authRequired: true,
+    fallback: "portal"
+  }));
+}
 
 function readSearchCache(key) {
   const entry = getSearchCache()[key];
@@ -397,20 +441,53 @@ function paperId(source, doi, title) {
   return `${source}:${normId(title) || Math.random().toString(36).slice(2, 10)}`;
 }
 
+
+function normalizeDoi(value) {
+  const doi = String(value || "")
+    .trim()
+    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "")
+    .replace(/^doi:\s*/i, "")
+    .replace(/[\s.]+$/, "");
+  return doi || null;
+}
+
+function listValue(value) {
+  if (Array.isArray(value)) return value;
+  if (value == null) return [];
+  return [value];
+}
+
+function authorName(value) {
+  if (typeof value === "string") return value.trim();
+  if (!value || typeof value !== "object") return "";
+  return String(value.full_name || value.fullName || value.displayName || value.name || value.wosStandard || value.preferredName || "").trim();
+}
+
+function stringValue(value) {
+  if (typeof value === "string" || typeof value === "number") return String(value).trim();
+  if (Array.isArray(value)) return value.map(stringValue).find(Boolean) || "";
+  if (!value || typeof value !== "object") return "";
+  for (const candidate of [value.value, value.text, value.content, value.title, value.name]) {
+    const parsed = stringValue(candidate);
+    if (parsed) return parsed;
+  }
+  return "";
+}
 function toPaper({ source, sourceLabel, sourceId, doi, title, year, authors, venue, abstract, url, pdfUrl, keywords, citations, relevance, type, tldr }) {
+  const normalizedDoi = normalizeDoi(doi);
   return {
-    id: paperId(source, doi, title),
+    id: paperId(source, normalizedDoi, title),
     source,
     sourceLabel,
     sourceId,
-    doi: doi || null,
+    doi: normalizedDoi,
     title: String(title || "").trim().replace(/\s+/g, " "),
     year: year || null,
     authors: Array.isArray(authors) ? authors.filter(Boolean).slice(0, 20) : [],
     venue: venue || "",
     abstract: String(abstract || "").trim(),
     url: url || "",
-    pdfUrl: pdfUrl || "",
+    pdfUrl: asDirectPdfUrl(pdfUrl),
     keywords: Array.isArray(keywords) ? keywords.filter(Boolean).slice(0, 12) : [],
     citations: Number(citations) || 0,
     relevance: Number(relevance) || 0,
@@ -418,6 +495,32 @@ function toPaper({ source, sourceLabel, sourceId, doi, title, year, authors, ven
     tldr: tldr || "",
     lang: /[\u3400-\u9fff]/.test(String(title || "") + String(abstract || "")) ? "zh" : "en"
   };
+}
+
+function longerText(current, incoming) {
+  const a = String(current || "").trim();
+  const b = String(incoming || "").trim();
+  return b.length > a.length ? b : a;
+}
+
+export function mergePaperRecord(existing, incoming) {
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+  existing.sources = [...new Set([
+    ...(existing.sources || [existing.source]),
+    ...(incoming.sources || [incoming.source])
+  ].filter(Boolean))];
+  existing.pdfUrl = preferPdfUrl(existing.pdfUrl, incoming.pdfUrl);
+  existing.url = existing.url || incoming.url || "";
+  existing.abstract = longerText(existing.abstract, incoming.abstract);
+  existing.tldr = longerText(existing.tldr, incoming.tldr);
+  existing.venue = existing.venue || incoming.venue || "";
+  existing.doi = existing.doi || incoming.doi || null;
+  existing.year = existing.year || incoming.year || null;
+  if ((!existing.authors || !existing.authors.length) && incoming.authors?.length) existing.authors = incoming.authors;
+  existing.citations = Math.max(Number(existing.citations) || 0, Number(incoming.citations) || 0);
+  existing.keywords = [...new Set([...(existing.keywords || []), ...(incoming.keywords || [])])].slice(0, 12);
+  return existing;
 }
 
 async function searchArxiv(q, limit) {
@@ -485,7 +588,7 @@ async function searchOpenAlex(q, limit, fromYear, toYear) {
       venue: w.primary_location?.source?.display_name || "",
       abstract,
       url: w.primary_location?.landing_page_url || (w.doi ? w.doi : ""),
-      pdfUrl: w.primary_location?.pdf_url || w.open_access?.oa_url || "",
+      pdfUrl: asDirectPdfUrl(w.primary_location?.pdf_url) || asDirectPdfUrl(w.open_access?.oa_url),
       keywords: (w.concepts || []).slice(0, 10).map((c) => c.display_name),
       citations: w.cited_by_count,
       relevance: maxRelevance ? (Number(w.relevance_score) || 0) / maxRelevance : 0,
@@ -590,7 +693,7 @@ async function searchCrossref(q, limit, fromYear, toYear) {
       venue: (w["container-title"] || [""])[0],
       abstract: stripTags(w.abstract || ""),
       url: w.URL || `https://doi.org/${w.DOI}`,
-      pdfUrl: link?.URL || "",
+      pdfUrl: asDirectPdfUrl(link?.URL),
       keywords: [],
       citations: w["is-referenced-by-count"] || 0,
       relevance: 0.5,
@@ -600,14 +703,113 @@ async function searchCrossref(q, limit, fromYear, toYear) {
   });
 }
 
-async function runSources(q, sources, perSource, fromYear, toYear) {
+export function normalizeIeeeArticle(a = {}) {
+  const articleId = a.article_number || a.publication_number || a.document_id || a.doi || a.title;
+  const authorBlock = a.authors?.authors?.author || a.authors?.author || a.authors || a.author;
+  const terms = [a.author_terms, a.ieee_terms, a.index_terms]
+    .flatMap((value) => listValue(value))
+    .map((value) => typeof value === "string" ? value : value?.term || value?.value || "")
+    .filter(Boolean);
+  const type = String(a.content_type || a.contentType || "").toLowerCase();
+  return toPaper({
+    source: "ieee",
+    sourceLabel: "IEEE Xplore",
+    sourceId: articleId,
+    doi: a.doi || a.DOI || null,
+    title: stringValue(a.title),
+    year: Number(a.publication_year || a.publicationYear || a.year) || null,
+    authors: listValue(authorBlock).map(authorName).filter(Boolean),
+    venue: stringValue(a.publication_title || a.publicationTitle || a.conference_name || a.conferenceName),
+    abstract: stringValue(a.abstract || a.article_abstract),
+    url: a.html_url || a.htmlUrl || a.abstract_url || a.abstractUrl || (articleId ? `https://ieeexplore.ieee.org/document/${articleId}` : ""),
+    pdfUrl: asDirectPdfUrl(a.pdf_url || a.pdfUrl),
+    keywords: terms,
+    citations: Number(a.citing_paper_count || a.citingPaperCount || a.citations) || 0,
+    relevance: Number(a.relevance) || 0.8,
+    type: type.includes("conference") ? "conference" : "article"
+  });
+}
+
+async function searchIeee(q, limit, fromYear, toYear, credentials = {}) {
+  const apiKey = String(credentials.apiKey || "").trim();
+  if (!apiKey) throw new Error("IEEE Xplore 未配置 API Key；可从搜索页打开门户");
+  const params = new URLSearchParams({ querytext: q, max_records: String(Math.min(limit, 200)), start_record: "1" });
+  const json = await fetchJson(`https://ieeexploreapi.ieee.org/api/v1/search/articles?${params}`, { headers: { apikey: apiKey } });
+  const articles = Array.isArray(json?.articles) ? json.articles : [];
+  return articles.map(normalizeIeeeArticle).filter((paper) => (!fromYear || !paper.year || Number(paper.year) >= Number(fromYear)) && (!toYear || !paper.year || Number(paper.year) <= Number(toYear)));
+}
+
+function wosIdentifier(record, type) {
+  const identifiers = record?.identifiers || record?.identifier || [];
+  const match = listValue(identifiers).find((item) => String(item?.type || item?.name || "").toLowerCase() === type);
+  return match?.value || match?.id || (type === "doi" ? record?.doi || record?.DOI || identifiers?.doi || identifiers?.DOI : "") || null;
+}
+
+export function normalizeWosHit(hit = {}) {
+  const record = hit?.source?.record || hit?.record || hit;
+  const title = stringValue(record.title) || stringValue(record.titles?.title) || stringValue(hit.title);
+  const authorBlock = record.names?.authors?.author || record.authors?.author || record.authors || hit.names?.authors?.author || hit.authors;
+  const links = listValue(record.links || hit.links);
+  const recordLink = links.find((link) => String(link?.type || link?.name || "").toLowerCase().includes("record"));
+  const published = record.published || record.publicationDate || record.pub_info?.pubyear || record.year || hit.published || hit.year;
+  const source = record.source || hit.source;
+  const abstract = record.abstract?.value || record.abstract?.text || record.abstract || hit.abstract;
+  const keywords = record.keywords?.keyword || record.keywords || hit.keywords || [];
+  const articleId = record.uid || hit.uid || wosIdentifier(record, "uid") || title;
+  const doi = normalizeDoi(wosIdentifier(record, "doi"));
+  return toPaper({
+    source: "wos",
+    sourceLabel: "Web of Science",
+    sourceId: articleId,
+    doi,
+    title,
+    year: Number(String(published || "").match(/\d{4}/)?.[0]) || null,
+    authors: listValue(authorBlock).map(authorName).filter(Boolean),
+    venue: stringValue(typeof source === "string" ? source : source?.title || source?.sourceTitle || record.sourceTitle || hit.sourceTitle),
+    abstract: stringValue(abstract),
+    url: recordLink?.url || recordLink?.value || record.url || hit.url || (doi ? `https://doi.org/${doi}` : ""),
+    pdfUrl: "",
+    keywords: listValue(keywords).map(stringValue).filter(Boolean),
+    citations: Number(record.citations?.count || record.timesCited || hit.citations || hit.timesCited) || 0,
+    relevance: Number(hit.relevance || record.relevance) || 0.75,
+    type: String(record.types?.[0] || record.type || hit.type || "article").toLowerCase().includes("review") ? "review" : "article"
+  });
+}
+
+async function searchWos(q, limit, fromYear, toYear, credentials = {}) {
+  const apiKey = String(credentials.apiKey || "").trim();
+  if (!apiKey) throw new Error("Web of Science 未配置 API Key；可从搜索页打开门户");
+  const params = new URLSearchParams({ db: String(credentials.database || "WOS"), q, limit: String(Math.min(limit, 50)), firstRecord: "1" });
+  const json = await fetchJson(`https://api.clarivate.com/apis/wos-starter/v1/documents?${params}`, { headers: { "X-ApiKey": apiKey, Accept: "application/json" } });
+  const records = Array.isArray(json?.hits) ? json.hits : Array.isArray(json?.hits?.hit) ? json.hits.hit : Array.isArray(json?.documents) ? json.documents : Array.isArray(json?.data) ? json.data : [];
+  return records.map(normalizeWosHit).filter((paper) => (!fromYear || !paper.year || Number(paper.year) >= Number(fromYear)) && (!toYear || !paper.year || Number(paper.year) <= Number(toYear)));
+}
+export async function checkPaperSource(id, credentials = {}) {
+  const source = PAPER_SOURCE_PORTALS[id];
+  if (!source) return { id, ok: false, configured: false, error: "不支持的数据源" };
+  const apiKey = String(credentials.apiKey || "").trim();
+  if (credentials.enabled === false) return { id, ok: false, configured: Boolean(apiKey), enabled: false, portal: source.home, error: "该来源已在设置中停用" };
+  if (!apiKey) return { id, ok: false, configured: false, enabled: true, portal: source.home, error: `${source.label} 未配置 API Key；可从搜索页打开门户` };
+  try {
+    const papers = id === "ieee"
+      ? await searchIeee("scholarloop connection test", 1, "", "", credentials)
+      : await searchWos("TS=(scholarloop connection test)", 1, "", "", credentials);
+    return { id, ok: true, configured: true, enabled: true, portal: source.home, count: papers.length };
+  } catch (err) {
+    const detail = redactSensitiveError(err?.message || "连接失败", [apiKey]).slice(0, 240);
+    return { id, ok: false, configured: true, enabled: true, portal: source.home, error: detail };
+  }
+}
+async function runSources(q, sources, perSource, fromYear, toYear, sourceCredentials = {}) {
   const jobs = {
     arxiv: () => searchArxiv(q, perSource),
     openalex: () => searchOpenAlex(q, perSource, fromYear, toYear),
     semanticscholar: () => searchSemanticScholar(q, perSource),
     pubmed: () => searchPubMed(q, perSource, fromYear, toYear),
     crossref: () => searchCrossref(q, perSource, fromYear, toYear),
-    cnki: () => searchCnki(q, perSource, fromYear, toYear)
+    cnki: () => searchCnki(q, perSource, fromYear, toYear),
+    ieee: () => searchIeee(q, perSource, fromYear, toYear, sourceCredentials.ieee),
+    wos: () => searchWos(q, perSource, fromYear, toYear, sourceCredentials.wos)
   };
   const settled = await Promise.allSettled(sources.map((s) => jobs[s]()));
   const papers = [];
@@ -619,8 +821,14 @@ async function runSources(q, sources, perSource, fromYear, toYear) {
     }
     for (const paper of res.value) {
       const key = paper.doi || normId(paper.title);
-      if (!key || seen.has(key)) continue;
+      if (!key) continue;
+      const existing = papers.find((item) => (item.doi || normId(item.title)) === key);
+      if (existing) {
+        mergePaperRecord(existing, paper);
+        continue;
+      }
       seen.add(key);
+      paper.sources = [paper.source];
       papers.push(paper);
     }
   });
@@ -629,8 +837,9 @@ async function runSources(q, sources, perSource, fromYear, toYear) {
 
 export async function searchPapers(q, opts = {}) {
   const limit = Math.max(5, Math.min(100, Number(opts.limit) || 30));
-  const sources = (opts.sources || ["arxiv", "openalex", "semanticscholar", "pubmed", "crossref", "cnki"])
-    .filter((s) => ["arxiv", "openalex", "semanticscholar", "pubmed", "crossref", "cnki"].includes(s));
+  const selectedSources = [...new Set((opts.sources || ["arxiv", "openalex", "semanticscholar", "pubmed", "crossref", "cnki"]).filter((s) => PAPER_SOURCE_IDS.includes(s)))];
+  const sourceCredentials = opts.sourceCredentials || {};
+  const sources = selectedSources.filter((s) => !["ieee", "wos"].includes(s) || sourceCredentials[s]?.enabled !== false);
   const perSource = Math.max(5, Math.min(16, Math.ceil((limit + 5) / Math.max(1, sources.length)) + 2));
   let queries = Array.isArray(opts.queries) && opts.queries.length
     ? [...new Set(opts.queries.map((x) => String(x).trim()).filter(Boolean))].slice(0, 6)
@@ -638,8 +847,8 @@ export async function searchPapers(q, opts = {}) {
   if (!queries.length) queries = [q];
   const merged = [];
   const seen = new Set();
-  const status = sources.map((s) => ({ id: s, ok: false, count: 0, error: null }));
-  const statusIndex = new Map(sources.map((s, i) => [s, i]));
+  const status = selectedSources.map((s) => ({ id: s, ok: false, count: 0, error: sourceCredentials[s]?.enabled === false ? "该来源已在设置中停用" : null, access: ["ieee", "wos"].includes(s) ? "api-key" : "public", portal: PAPER_SOURCE_PORTALS[s]?.home || "", configured: !["ieee", "wos"].includes(s) || Boolean(sourceCredentials[s]?.apiKey), enabled: sourceCredentials[s]?.enabled !== false }));
+  const statusIndex = new Map(selectedSources.map((s, i) => [s, i]));
   const cjkQueries = queries.filter(hasCjk);
   const latinQueries = queries.filter((query) => !hasCjk(query));
 
@@ -652,20 +861,29 @@ export async function searchPapers(q, opts = {}) {
     });
     if (!querySources.length) return;
 
-    const { papers, settled } = await runSources(query, querySources, perSource, opts.fromYear, opts.toYear);
+    const { papers, settled } = await runSources(query, querySources, perSource, opts.fromYear, opts.toYear, sourceCredentials);
     settled.forEach((res, i) => {
       const st = status[statusIndex.get(querySources[i])];
       if (res.status === "fulfilled") {
         st.ok = true;
         st.count += (res.value || []).length;
       } else if (!st.error) {
-        st.error = String(res.reason?.message || res.reason);
+        st.error = redactSensitiveError(res.reason?.message || res.reason, [
+          sourceCredentials?.[querySources[i]]?.apiKey,
+          opts.config?.apiKey
+        ]);
       }
     });
     for (const paper of papers) {
       const key = paper.doi || normId(paper.title);
-      if (!key || seen.has(key)) continue;
+      if (!key) continue;
+      const existing = merged.find((item) => (item.doi || normId(item.title)) === key);
+      if (existing) {
+        mergePaperRecord(existing, paper);
+        continue;
+      }
       seen.add(key);
+      paper.sources = [...new Set(paper.sources || [paper.source])];
       merged.push(paper);
     }
   });

@@ -226,16 +226,19 @@ if (!gotLock) {
       mainWindow.setMenuBarVisibility(false);
       mainWindow.loadURL(`http://127.0.0.1:${port}/`);
 
+      // 所有机构页面的弹窗都交由主渲染进程创建内嵌标签页，避免产生未受控原生窗口。
+      const forwardInstitutionPopup = (url) => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        mainWindow.webContents.send("institution-popup", url);
+      };
+
       // <webview> uses a separate guest WebContents, so the main window's
       // handler below does not receive target="_blank" requests from it.
       mainWindow.webContents.on("did-attach-webview", (_event, guestContents) => {
         // 给 webview 实际使用的 session 挂 PDF 下载接管（内部按 session 去重，不会重复触发）
         attachPdfDownloadHandler(guestContents.session);
         guestContents.setWindowOpenHandler(createInstitutionPopupHandler({
-          notify: (url) => {
-            if (!mainWindow || mainWindow.isDestroyed()) return;
-            mainWindow.webContents.send("institution-popup", url);
-          }
+          notify: forwardInstitutionPopup
         }));
         guestContents.on("will-navigate", (event, url) => {
           if (!safeHttpUrl(url)) event.preventDefault();
@@ -243,9 +246,7 @@ if (!gotLock) {
       });
 
       mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-        if (url.startsWith("http://") || url.startsWith("https://")) {
-          shell.openExternal(url);
-        }
+        if (safeHttpUrl(url)) shell.openExternal(url);
         return { action: "deny" };
       });
 
@@ -487,17 +488,8 @@ if (!gotLock) {
         });
         institutionWindow.setMenuBarVisibility(false);
         institutionWindow.webContents.setUserAgent(browserUserAgent);
-        institutionWindow.webContents.setWindowOpenHandler(() => ({
-          action: "allow",
-          overrideBrowserWindowOptions: {
-            autoHideMenuBar: true,
-            webPreferences: {
-              partition: "persist:scholarloop",
-              contextIsolation: true,
-              sandbox: true,
-              nodeIntegration: false
-            }
-          }
+        institutionWindow.webContents.setWindowOpenHandler(createInstitutionPopupHandler({
+          notify: forwardInstitutionPopup
         }));
         institutionWindow.on("closed", () => {
           institutionWindow = null;

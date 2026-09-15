@@ -1399,11 +1399,22 @@ code {
 
 .browser-tabs {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
-  padding: 10px 12px;
+  padding: 8px 12px;
+  overflow-x: auto;
   border-bottom: 1px solid var(--line);
   background: var(--surface-2);
+}
+
+.browser-tabs-count {
+  flex: 0 0 auto;
+  margin-right: 2px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  white-space: nowrap;
 }
 
 .browser-tabs button {
@@ -1423,6 +1434,39 @@ code {
   border-color: #b9c9f7;
   background: var(--accent-soft);
   font-weight: 600;
+}
+
+.browser-new-tab {
+  flex: 0 0 auto;
+  border-style: dashed !important;
+  color: var(--accent) !important;
+  background: transparent !important;
+}
+
+.browser-new-tab:hover {
+  border-color: var(--accent) !important;
+  background: var(--accent-soft) !important;
+}
+
+.browser-tabs button > span:first-child {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 7px;
+  border-radius: 4px;
+  color: var(--muted);
+}
+
+.browser-tab-close:hover {
+  color: var(--red);
+  background: rgba(190, 65, 74, 0.1);
 }
 
 .browser-toolbar {
@@ -1470,10 +1514,35 @@ code {
 }
 
 .browser-webview {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   border: 0;
   display: flex;
+}
+
+.browser-new-tab-page {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--muted);
+  background: linear-gradient(145deg, #f8faff, #eef3fb);
+  text-align: center;
+}
+
+.browser-new-tab-page strong {
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.browser-new-tab-page span {
+  max-width: 360px;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .browser-state {
@@ -3661,6 +3730,14 @@ code {
   padding: 8px 14px;
   font-size: 12.5px;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pdf-open-external:disabled {
+  opacity: 0.72;
+  cursor: wait;
 }
 
 .pdf-error-actions {
@@ -8346,6 +8423,26 @@ code {
 
 .journal-list-panel {
   padding: 22px 24px;
+}
+
+.journal-list-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.journal-source-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 7px;
+  color: var(--accent);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.journal-source-link:hover {
+  text-decoration: underline;
 }
 
 .journal-list {

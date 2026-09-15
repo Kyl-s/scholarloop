@@ -1,8 +1,28 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fetchPdfWithOpenAccessFallback } from "./pdfResolve.js";
+import { extractPdfText, fetchPdfWithOpenAccessFallback, pdfTextParseOptions } from "./pdfResolve.js";
 
 const pdf = Buffer.from("%PDF-1.7\nScholarLoop test\n%%EOF", "latin1");
+
+test("extractPdfText limits pdf-parse to the requested first pages", async () => {
+  const calls = [];
+  let destroyed = false;
+  class FakePDFParse {
+    async getText(options) {
+      calls.push(options);
+      return { text: "first\tpage" };
+    }
+    async destroy() {
+      destroyed = true;
+    }
+  }
+
+  const text = await extractPdfText(pdf, 2, { PDFParseClass: FakePDFParse });
+  assert.deepEqual(calls, [{ first: 2 }]);
+  assert.equal(text, "first page");
+  assert.equal(destroyed, true);
+  assert.deepEqual(pdfTextParseOptions(), { first: 15 });
+});
 
 test("falls back from a blocked publisher URL to the DOI-matched Europe PMC PDF", async () => {
   const calls = [];

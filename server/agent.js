@@ -16,6 +16,7 @@ import {
   completePathTask,
   getData,
   getMemories,
+  getSettings,
   setPath,
   splitPathTask,
   updatePathTaskStatus
@@ -65,7 +66,7 @@ const TOOLS = [
           query: { type: "string", description: "检索关键词或研究方向，例如 transformer attention 或 大语言模型 推理" },
           sources: {
             type: "array",
-            items: { type: "string", enum: ["arxiv", "openalex", "semanticscholar", "pubmed", "crossref", "cnki"] },
+            items: { type: "string", enum: ["arxiv", "openalex", "semanticscholar", "pubmed", "crossref", "cnki", "ieee", "wos"] },
             description: "可选数据源，默认全部"
           },
           fromYear: { type: "string", description: "起始年份，如 2020" },
@@ -187,6 +188,7 @@ function summarizePapers(result) {
       venue: p.venue,
       authors: (p.authors || []).slice(0, 6),
       source: p.sourceLabel,
+      sources: Array.isArray(p.sources) ? p.sources : [p.source],
       citations: p.citations,
       url: p.url,
       pdfUrl: p.pdfUrl,
@@ -227,7 +229,8 @@ async function runTool(name, args) {
             fromYear: args.fromYear || "",
             toYear: args.toYear || "",
             sort: args.sort || "relevance",
-            limit: Number(args.limit) || 10
+            limit: Number(args.limit) || 10,
+            sourceCredentials: getSettings().paperSources || {}
           })
         );
       case "plan_study":

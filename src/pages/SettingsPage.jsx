@@ -13,6 +13,8 @@ export default function SettingsPage({ onNavigate }) {
   const [pdfMathStatus, setPdfMathStatus] = useState({ loading: true, available: false, command: "", installHint: "", install: null });
   const [pdfMathInstalling, setPdfMathInstalling] = useState(false);
   const [institutionDraft, setInstitutionDraft] = useState({ enabled: false, name: "", type: "webvpn", portalUrl: "" });
+  const [paperSourceDraft, setPaperSourceDraft] = useState({ ieee: { enabled: true, apiKey: "" }, wos: { enabled: true, apiKey: "", database: "WOS" } });
+  const [paperSourceChecks, setPaperSourceChecks] = useState({});
 
   const refreshPdfMathStatus = async () => {
     setPdfMathStatus((previous) => ({ ...previous, loading: true }));
@@ -20,6 +22,24 @@ export default function SettingsPage({ onNavigate }) {
       setPdfMathStatus({ loading: false, ...(await api.pdfMathTranslateStatus()) });
     } catch (err) {
       setPdfMathStatus({ loading: false, available: false, command: "", installHint: err.message || "排版翻译引擎状态读取失败", install: null });
+    }
+  };
+
+  useEffect(() => {
+    setPaperSourceDraft({ ieee: { enabled: true, apiKey: "", ...(settings?.paperSources?.ieee || {}) }, wos: { enabled: true, apiKey: "", database: "WOS", ...(settings?.paperSources?.wos || {}) } });
+  }, [settings?.paperSources]);
+
+  const savePaperSources = async () => {
+    await updateSettings({ paperSources: paperSourceDraft });
+    setMsg("IEEE / Web of Science 配置已保存到本机");
+  };
+  const checkPaperSource = async (id) => {
+    setPaperSourceChecks((current) => ({ ...current, [id]: { loading: true, message: "" } }));
+    try {
+      const result = await api.checkPaperSource(id);
+      setPaperSourceChecks((current) => ({ ...current, [id]: { loading: false, ok: result.ok, message: result.ok ? `连接正常（返回 ${result.count || 0} 条）` : (result.error || "连接失败") } }));
+    } catch (err) {
+      setPaperSourceChecks((current) => ({ ...current, [id]: { loading: false, ok: false, message: err.message || "连接失败" } }));
     }
   };
 
@@ -122,7 +142,7 @@ export default function SettingsPage({ onNavigate }) {
                   <strong>{s.label}</strong>
                   <span>{s.desc}</span>
                 </div>
-                <Badge tone="ok">可用</Badge>
+                <Badge tone={s.authRequired && !s.configured ? "neutral" : "ok"}>{s.authRequired && !s.configured ? "需授权" : "可用"}</Badge>
               </div>
             ))}
           </div>
@@ -130,6 +150,14 @@ export default function SettingsPage({ onNavigate }) {
             <Info size={15} />
             <p>知网已直接接入聚合搜索；万方、百度学术等暂以门户跳转与手动导入（DOI / BibTeX / 手动录入）补全。</p>
           </div>
+        </section>
+
+        <section className="panel settings-panel source-auth-panel">
+          <div className="settings-head"><KeyRound size={17} /> IEEE / Web of Science 授权</div>
+          <p className="settings-note-text">仅在本机保存 API Key，用于官方 API 聚合；未填写时仍可从论文搜索页打开门户登录。</p>
+          <label className="proxy-field"><span><strong>IEEE Xplore API Key</strong><em>需 IEEE 审核通过；留空则仅门户访问。</em></span><input type="password" value={paperSourceDraft.ieee.apiKey} onChange={(e) => setPaperSourceDraft((v) => ({ ...v, ieee: { ...v.ieee, apiKey: e.target.value } }))} placeholder="已配置则留空以保留；输入新 Key 覆盖" /><Button size="sm" variant="secondary" onClick={() => checkPaperSource("ieee")} disabled={paperSourceChecks.ieee?.loading}>{paperSourceChecks.ieee?.loading ? "检测中…" : "检测连接"}</Button>{paperSourceChecks.ieee?.message ? <em className={paperSourceChecks.ieee.ok ? "source-check-ok" : "source-check-error"}>{paperSourceChecks.ieee.message}</em> : null}</label>
+          <label className="proxy-field"><span><strong>Web of Science API Key</strong><em>需 Clarivate / 机构授权；留空则仅门户访问。</em></span><input type="password" value={paperSourceDraft.wos.apiKey} onChange={(e) => setPaperSourceDraft((v) => ({ ...v, wos: { ...v.wos, apiKey: e.target.value } }))} placeholder="已配置则留空以保留；输入新 Key 覆盖" /><Button size="sm" variant="secondary" onClick={() => checkPaperSource("wos")} disabled={paperSourceChecks.wos?.loading}>{paperSourceChecks.wos?.loading ? "检测中…" : "检测连接"}</Button>{paperSourceChecks.wos?.message ? <em className={paperSourceChecks.wos.ok ? "source-check-ok" : "source-check-error"}>{paperSourceChecks.wos.message}</em> : null}</label>
+          <div className="institution-actions"><Button variant="secondary" icon={ShieldCheck} onClick={savePaperSources}>保存本机配置</Button></div>
         </section>
 
         <section className="panel settings-panel pdfmath-settings-panel">

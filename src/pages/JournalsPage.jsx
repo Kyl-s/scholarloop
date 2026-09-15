@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Brain, Trash2, ChevronDown, MessageSquareText, Sparkles, ArrowLeft, ListChecks, Check, Lightbulb, Target, Download, Maximize2, ZoomIn, ZoomOut, RotateCcw, X } from "lucide-react";
+import { Brain, Trash2, ChevronDown, MessageSquareText, Sparkles, ArrowLeft, ListChecks, Check, Lightbulb, Target, Download, Maximize2, ZoomIn, ZoomOut, RotateCcw, X, Link as LinkIcon, Loader2, ExternalLink } from "lucide-react";
+import { api } from "../api.js";
+import { useAgentConfig } from "../agentConfig.js";
 import { useData } from "../store.jsx";
-import { Badge, Button, EmptyState, SectionHead } from "../components/ui.jsx";
+import { Badge, Button, EmptyState, Field, Modal, SectionHead } from "../components/ui.jsx";
 import { renderMarkdown } from "../components/markdown.jsx";
 
 const MM_COLORS = ["#2456e6", "#4b7bec", "#18a187", "#e2a13b"];
@@ -222,6 +224,7 @@ function exportJournalMarkdown(journal) {
     "",
     `- 时间：${formatDate(journal.createdAt)}`,
     `- 交流轮数：${journal.turnCount || 0}`,
+    ...(journal.source?.url ? [`- 来源：${journal.source.url}`] : []),
     "",
     "## 核心理解",
     journal.core || "",
@@ -252,9 +255,14 @@ function exportMindmapSvg(title) {
 }
 
 export default function JournalsPage() {
-  const { journals, deleteJournal } = useData();
+  const { journals, deleteJournal, refresh } = useData();
+  const config = useAgentConfig();
   const [openId, setOpenId] = useState(null);
   const [mindOpen, setMindOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importUrl, setImportUrl] = useState("");
+  const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState("");
   const open = journals.find((j) => j.id === openId) || null;
 
   useEffect(() => {
@@ -265,6 +273,35 @@ export default function JournalsPage() {
     if (!window.confirm("确定删除这份思考记录吗？删除后无法恢复。")) return;
     await deleteJournal(id);
     if (id === openId) setOpenId(null);
+  };
+
+  const openImport = () => {
+    setImportError("");
+    setImportOpen(true);
+  };
+
+  const closeImport = () => {
+    if (importBusy) return;
+    setImportOpen(false);
+    setImportError("");
+  };
+
+  const submitImport = async (event) => {
+    event.preventDefault();
+    if (importBusy) return;
+    setImportBusy(true);
+    setImportError("");
+    try {
+      const saved = await api.importJournal({ url: importUrl, config });
+      await refresh();
+      setImportOpen(false);
+      setImportUrl("");
+      setOpenId(saved.id);
+    } catch (err) {
+      setImportError(err.message);
+    } finally {
+      setImportBusy(false);
+    }
   };
 
   const core = open?.core || `围绕「${open?.title || "本次讨论"}」，我用自己的话表达理解，并通过追问修正了关键概念。`;
@@ -291,6 +328,11 @@ export default function JournalsPage() {
             <div>
               <h3>{open.title}</h3>
               <span>{formatDate(open.createdAt)} · {open.turnCount || 0} 轮交流 · {open.messages?.length || 0} 条消息</span>
+              {open.source?.url ? (
+                <a className="journal-source-link" href={open.source.url} target="_blank" rel="noreferrer">
+                  <ExternalLink size={13} /> 来源：{open.source.label || "ChatGPT"}
+                </a>
+              ) : null}
             </div>
             <div className="journal-detail-actions">
               <Button variant="ghost" size="sm" icon={ArrowLeft} onClick={() => setOpenId(null)}>返回列表</Button>
@@ -363,7 +405,12 @@ export default function JournalsPage() {
             <SectionHead
               title="已保存的思考"
               desc={`共 ${journals.length} 份，每一份都是被提炼过的理解历程`}
-              action={<Badge tone="neutral"><ListChecks size={13} /> {journals.length} 份</Badge>}
+              action={(
+                <div className="journal-list-head-actions">
+                  <Button variant="ghost" size="sm" icon={LinkIcon} onClick={openImport}>导入 GPT 对话</Button>
+                  <Badge tone="neutral"><ListChecks size={13} /> {journals.length} 份</Badge>
+                </div>
+              )}
             />
             {journals.length ? (
               <div className="journal-list">
@@ -381,12 +428,40 @@ export default function JournalsPage() {
               <EmptyState
                 icon={Sparkles}
                 title="还没有思考记录"
-                desc="打开 Agent 讨论后，点“保存思考记录”才会写入。关闭抽屉或切到设置不会自动保存。"
+                desc="打开 Agent 讨论后，点“保存思考记录”才会写入；也可以导入 GPT 公开分享链接。"
+                action={<Button variant="ghost" size="sm" icon={LinkIcon} onClick={openImport}>导入 GPT 对话</Button>}
               />
             )}
           </section>
         </>
       )}
+
+      {importOpen ? (
+        <Modal title="导入 GPT 对话" onClose={closeImport}>
+          <form className="import-form" onSubmit={submitImport}>
+            <p className="form-note"><LinkIcon size={14} />仅支持 ChatGPT 的公开分享链接，例如 https://chatgpt.com/share/...</p>
+            <Field label="公开分享链接">
+              <input
+                className="input"
+                value={importUrl}
+                onChange={(event) => setImportUrl(event.target.value)}
+                placeholder="https://chatgpt.com/share/..."
+                type="url"
+                autoFocus
+                disabled={importBusy}
+              />
+            </Field>
+            <p className="form-note">导入后会使用当前模型配置生成思考记录；链接内容会发送给该模型服务商。</p>
+            {importError ? <p className="agent-error">导入失败：{importError}</p> : null}
+            <div className="import-actions">
+              <Button variant="ghost" type="button" onClick={closeImport} disabled={importBusy}>取消</Button>
+              <Button type="submit" icon={importBusy ? Loader2 : LinkIcon} disabled={importBusy || !importUrl.trim()}>
+                {importBusy ? "正在导入" : "导入并总结"}
+              </Button>
+            </div>
+          </form>
+        </Modal>
+      ) : null}
     </div>
   );
 }

@@ -31,6 +31,8 @@ export function SourceTag({ source, label }) {
     crossref: "Crossref",
     manual: "手动",
     cnki: "知网",
+    ieee: "IEEE",
+    wos: "WoS",
     wanfang: "万方",
     baidu: "百度学术",
     googlescholar: "Scholar"

@@ -1,8 +1,19 @@
+import { PDFParse } from "pdf-parse";
 import { fetchWithFallback } from "./proxy.js";
 
 const PDF_MAGIC = "%PDF-";
 const ID_CONVERTER_URL = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/";
 const EUROPE_PMC_PDF_URL = "https://europepmc.org/api/getPdf";
+
+export class PdfResolveError extends Error {
+  constructor(message, { kind = "network", status = 0, url = "" } = {}) {
+    super(String(message || "PDF 下载失败"));
+    this.name = "PdfResolveError";
+    this.kind = kind;
+    this.status = Number(status) || 0;
+    this.url = String(url || "");
+  }
+}
 
 const PDF_HEADERS = {
   Accept: "application/pdf,application/octet-stream;q=0.9,*/*;q=0.1",
@@ -14,6 +25,21 @@ export function isPdfBuffer(buffer) {
   return value.length >= PDF_MAGIC.length && value.subarray(0, PDF_MAGIC.length).toString("latin1") === PDF_MAGIC;
 }
 
+/** pdf-parse 2.4.5 的 `first` 参数只解析前 N 页。 */
+export function pdfTextParseOptions(maxPages = 15) {
+  return { first: Math.max(1, Math.floor(Number(maxPages) || 15)) };
+}
+
+export async function extractPdfText(buffer, maxPages = 15, { PDFParseClass = PDFParse } = {}) {
+  const parser = new PDFParseClass({ data: buffer });
+  try {
+    const parsed = await parser.getText(pdfTextParseOptions(maxPages));
+    return String(parsed?.text || "").replace(/[ \t]+/g, " ").trim().slice(0, 30000);
+  } finally {
+    await parser.destroy?.();
+  }
+}
+
 export function normalizeDoi(value) {
   return String(value || "")
     .trim()
@@ -23,9 +49,18 @@ export function normalizeDoi(value) {
 }
 
 async function responseBuffer(response, label) {
-  if (!response.ok) throw new Error(`${label}返回 ${response.status} ${response.statusText}`.trim());
+  const status = Number(response?.status) || 0;
+  if (!response.ok) {
+    const kind = status === 401 || status === 403 ? "auth" : status >= 300 && status < 400 ? "redirect" : "network";
+    throw new PdfResolveError(`${label}返回 ${response.status} ${response.statusText}`.trim(), { kind, status, url: response.url });
+  }
   const buffer = Buffer.from(await response.arrayBuffer());
-  if (!isPdfBuffer(buffer)) throw new Error(`${label}返回的不是 PDF 文件`);
+  if (!isPdfBuffer(buffer)) {
+    const contentType = String(response.headers?.get?.("content-type") || "").toLowerCase();
+    const kind = /text\/html|application\/xhtml|application\/json/.test(contentType) ? "landing-page" : "non-pdf";
+    const suffix = contentType ? `（Content-Type: ${contentType}）` : "";
+    throw new PdfResolveError(`${label}返回的不是 PDF 文件${suffix}`, { kind, status, url: response.url });
+  }
   return buffer;
 }
 
@@ -60,6 +95,13 @@ export async function fetchPdfWithOpenAccessFallback({
   const sourceUrl = String(url || "").trim();
   const normalizedDoi = normalizeDoi(doi);
   const failures = [];
+  const rememberFailure = (error, prefix = "") => {
+    const message = String(error?.message || error || "PDF 下载失败");
+    const status = Number(error?.status) || Number(message.match(/\b(401|403)\b/)?.[1]) || 0;
+    const kind = error?.kind || (status === 401 || status === 403 ? "auth" : /redirect|重定向/i.test(message) ? "redirect" : "network");
+    const item = error instanceof PdfResolveError ? error : new PdfResolveError(message, { kind, status });
+    failures.push({ ...item, message: prefix ? `${prefix}${item.message}` : item.message });
+  };
 
   if (/^https?:\/\//i.test(sourceUrl)) {
     try {
@@ -71,17 +113,17 @@ export async function fetchPdfWithOpenAccessFallback({
       const buffer = await responseBuffer(response, "原始链接");
       return { buffer, source: "publisher", resolvedUrl: response.url || sourceUrl, pmcid: null };
     } catch (error) {
-      failures.push(error.message);
+      rememberFailure(error);
     }
   } else if (sourceUrl) {
-    failures.push("PDF 链接不合法");
+    rememberFailure(new PdfResolveError("PDF 链接不合法", { kind: "network" }));
   }
 
   if (normalizedDoi) {
     try {
       const pmcid = await resolvePmcid(normalizedDoi, { fetcher, proxy });
       if (!pmcid) {
-        failures.push("未找到可公开获取的 PMC 全文");
+        rememberFailure(new PdfResolveError("未找到可公开获取的 PMC 全文", { kind: "network" }));
       } else {
         const resolvedUrl = `${EUROPE_PMC_PDF_URL}?pmcid=${encodeURIComponent(pmcid)}`;
         const response = await fetcher(resolvedUrl, {
@@ -93,11 +135,17 @@ export async function fetchPdfWithOpenAccessFallback({
         return { buffer, source: "europe-pmc", resolvedUrl, pmcid };
       }
     } catch (error) {
-      failures.push(`开放全文回退失败：${error.message}`);
+      rememberFailure(error, "开放全文回退失败：");
     }
   } else {
-    failures.push("缺少 DOI，无法查找开放全文");
+    rememberFailure(new PdfResolveError("缺少 DOI，无法查找开放全文", { kind: "network" }));
   }
 
-  throw new Error(failures.filter(Boolean).join("；") || "没有可用的 PDF 来源");
+  const priority = ["auth", "anti-bot", "redirect", "landing-page", "non-pdf", "pdf-parse", "network"];
+  const representative = failures.sort((a, b) => priority.indexOf(a.kind) - priority.indexOf(b.kind))[0];
+  throw new PdfResolveError(failures.map((item) => item.message).filter(Boolean).join("；") || "没有可用的 PDF 来源", {
+    kind: representative?.kind || "network",
+    status: representative?.status || 0,
+    url: sourceUrl
+  });
 }

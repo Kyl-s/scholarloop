@@ -185,7 +185,7 @@ export default function PaperDetail({ paper: initialPaper, onClose, onSave, save
               <Button
                 variant="ghost"
                 size="sm"
-                icon={AppWindow}
+                icon={ExternalLink}
                 onClick={() => onOpenPdfExternal?.(paper)}
                 title="弹出系统「打开方式」，自选 PDF 软件"
               >

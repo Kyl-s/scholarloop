@@ -35,3 +35,10 @@ test("listPdfCaches 返回数组", () => {
     assert.equal(typeof cache.readingNotes, "string");
   }
 });
+
+test("drops obsolete visual layout cache data", () => {
+  const cache = normalizePdfCache({
+    visualPageTranslationLayouts: { obsolete: { pages: { 1: [{ text: "旧译文" }] } } }
+  }, "paper-visual");
+  assert.equal(cache.visualPageTranslationLayouts, undefined);
+});

@@ -116,14 +116,14 @@ export default function LibraryPage({ focusPaper, onFocusCleared, onReadPdf }) {
                     <IconButton icon={FileText} label="打开解读" onClick={() => setSelected(p)} />
                     {(p.pdfUrl || p.localPdf) ? (
                       <IconButton
-                        icon={ExternalLink}
+                        icon={AppWindow}
                         label="内置阅读器"
                         onClick={() => onReadPdf?.(p.pdfUrl, p.title, p.doi, p.id)}
                       />
                     ) : null}
                     {(p.pdfUrl || p.localPdf) ? (
                       <IconButton
-                        icon={AppWindow}
+                        icon={ExternalLink}
                         label="用其他软件打开"
                         onClick={() => openWithExternalApp(p, true)}
                       />

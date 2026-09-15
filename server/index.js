@@ -2,13 +2,13 @@ import express from "express";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
-import { searchPapers, buildAiSearchPlan, resolveByDoi, parseBibtex, makeManualPaper } from "./sources.js";
+import { searchPapers, buildAiSearchPlan, resolveByDoi, parseBibtex, makeManualPaper, getPaperSourceInfo, PAPER_SOURCE_PORTALS, checkPaperSource, redactSensitiveError } from "./sources.js";
 import { analyzePaper, deepAnalyze } from "./analyze.js";
 import { generatePath, pathProgress, syncPathEvidence } from "./path.js";
 import { agentChat } from "./agent.js";
 import { buildJournal, refineJournal } from "./journal.js";
+import { importChatGptShare } from "./chatgptShare.js";
 import {
   getData,
   loadData,
@@ -216,6 +216,23 @@ async function extractPdfMetadataAi(text, config = {}) {
 }
 
 loadData();
+function publicSettings(settings = {}) {
+  const paperSources = {};
+  for (const [id, source] of Object.entries(settings.paperSources || {})) {
+    const { apiKey: _apiKey, ...safe } = source || {};
+    paperSources[id] = { ...safe, configured: Boolean(String(_apiKey || "").trim()) };
+  }
+  return { ...settings, paperSources };
+}
+
+function publicData(data = {}) {
+  return { ...data, settings: publicSettings(data.settings || {}) };
+}
+
+function searchErrorMessage(error, config = {}) {
+  const sourceKeys = Object.values(getSettings().paperSources || {}).map((source) => source?.apiKey);
+  return redactSensitiveError(error?.message || error, [...sourceKeys, config?.apiKey]);
+}
 app.use(express.json({ limit: "50mb" }));
 
 app.get("/api/health", (_req, res) => res.json({ ok: true, name: "ScholarLoop" }));
@@ -229,6 +246,7 @@ app.get("/api/sources", (_req, res) => {
       { id: "pubmed", label: "PubMed", home: "https://pubmed.ncbi.nlm.nih.gov", desc: "生物医学文献", enabled: true },
       { id: "crossref", label: "Crossref", home: "https://search.crossref.org", desc: "期刊与 DOI 元数据", enabled: true },
       { id: "cnki", label: "知网 CNKI", home: "https://www.cnki.net", desc: "中文期刊/学位论文/会议/报纸", enabled: true }
+      ,...getPaperSourceInfo(getSettings()).map((source) => ({ ...source, portal: source.home }))
     ],
     chinesePortals: [
       { id: "cnki", label: "知网 CNKI", home: "https://www.cnki.net" },
@@ -236,10 +254,16 @@ app.get("/api/sources", (_req, res) => {
       { id: "baidu", label: "百度学术", home: "https://xueshu.baidu.com" },
       { id: "googlescholar", label: "Google Scholar", home: "https://scholar.google.com" }
     ],
-    hasOpenAI: Boolean(process.env.OPENAI_API_KEY)
+    hasOpenAI: Boolean(process.env.OPENAI_API_KEY),
+    paperPortals: Object.values(PAPER_SOURCE_PORTALS).map((source) => ({ id: source.id, label: source.label, home: source.home }))
   });
 });
 
+app.post("/api/sources/:id/check", async (req, res) => {
+  const id = String(req.params.id || "").trim();
+  const result = await checkPaperSource(id, getSettings().paperSources?.[id] || {});
+  res.json(result);
+});
 app.get("/api/search", async (req, res) => {
   const q = String(req.query.q || "").trim();
   if (!q) return res.status(400).json({ error: "请输入搜索关键词" });
@@ -249,11 +273,12 @@ app.get("/api/search", async (req, res) => {
       fromYear: req.query.fromYear || "",
       toYear: req.query.toYear || "",
       sort: req.query.sort || "relevance",
-      limit: Number(req.query.limit) || 15
+      limit: Number(req.query.limit) || 15,
+      sourceCredentials: getSettings().paperSources || {}
     });
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: searchErrorMessage(err) });
   }
 });
 
@@ -268,11 +293,12 @@ app.post("/api/search", async (req, res) => {
       sort: req.body?.sort || "relevance",
       limit: Number(req.body?.limit) || 15,
       queries: req.body?.queries,
-      config: req.body?.config
+      config: req.body?.config,
+      sourceCredentials: getSettings().paperSources || {}
     });
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: searchErrorMessage(err, req.body?.config) });
   }
 });
 
@@ -308,7 +334,7 @@ app.get("/api/pdf", async (req, res) => {
     if (result.pmcid) res.setHeader("X-ScholarLoop-PMCID", result.pmcid);
     res.send(result.buffer);
   } catch (err) {
-    res.status(502).json({ error: `PDF 下载失败：${err.message}` });
+    res.status(502).json({ error: `PDF 下载失败：${err.message}`, kind: err.kind || "network", status: err.status || 0 });
   }
 });
 
@@ -317,6 +343,18 @@ app.get("/api/pdf/file/:name", (req, res) => {
   if (!/^[a-f0-9-]+\.pdf$/i.test(name)) return res.status(400).json({ error: "文件名不合法" });
   const file = path.join(__dirname, "..", "data", "pdfs", name);
   if (!fs.existsSync(file)) return res.status(404).json({ error: "PDF 文件不存在" });
+  // Do not serve stale/corrupt files as PDFs; every local source must pass the same magic check.
+  let valid = false;
+  try {
+    const fd = fs.openSync(file, "r");
+    const header = Buffer.alloc(5);
+    fs.readSync(fd, header, 0, 5, 0);
+    fs.closeSync(fd);
+    valid = isPdfBuffer(header);
+  } catch {
+    valid = false;
+  }
+  if (!valid) return res.status(422).json({ error: "本地文件不是有效的 PDF 文件" });
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", "inline");
   fs.createReadStream(file).pipe(res);
@@ -965,10 +1003,10 @@ app.post("/api/path/session", (req, res) => {
   res.json(syncPathEvidence(p, getData()));
 });
 
-app.get("/api/settings", (_req, res) => res.json(getSettings()));
+app.get("/api/settings", (_req, res) => res.json(publicSettings(getSettings())));
 
 app.put("/api/settings", (req, res) => {
-  res.json(updateSettings(req.body || {}));
+  res.json(publicSettings(updateSettings(req.body || {})));
 });
 
 app.get("/api/drafts", (_req, res) => res.json(getDrafts()));
@@ -999,6 +1037,31 @@ app.post("/api/journals", async (req, res) => {
     }
     const saved = upsertJournal(journal);
     res.json(saved);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post("/api/journals/import", async (req, res) => {
+  try {
+    const imported = await importChatGptShare(req.body?.url);
+    let journal = buildJournal(imported.messages, { title: imported.title });
+    if (req.body?.config) {
+      try {
+        const refined = await refineJournal(imported.messages, req.body.config);
+        if (refined) journal = refined;
+      } catch {
+        /* 精炼失败时保留本地生成结果 */
+      }
+    }
+    journal.source = {
+      provider: "chatgpt",
+      label: "ChatGPT",
+      url: imported.url,
+      shareId: imported.shareId,
+      importedAt: new Date().toISOString()
+    };
+    res.json(upsertJournal(journal));
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -1111,12 +1174,12 @@ app.get("/api/stats", (_req, res) => {
 });
 
 app.post("/api/data/export", (_req, res) => {
-  res.type("application/json").send(JSON.stringify(getData(), null, 2));
+  res.type("application/json").send(JSON.stringify(publicData(getData()), null, 2));
 });
 
 app.post("/api/data/import", (req, res) => {
   try {
-    res.json(importAll(req.body));
+    res.json(publicData(importAll(req.body)));
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

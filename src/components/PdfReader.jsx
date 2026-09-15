@@ -7,7 +7,7 @@ import {
   ChevronRight,
   FileUp,
   Download,
-  AppWindow,
+  ExternalLink,
   Scan,
   Languages,
   Loader2,
@@ -51,6 +51,7 @@ import NoteAttachmentThumbs from "./NoteAttachmentThumbs.jsx";
 import { useAgentConfig } from "../agentConfig.js";
 import { estimateTokensFromText } from "../llmUsage.js";
 import UsageMeter from "./UsageMeter.jsx";
+import { classifyPdfError, clearPdfOpenFailure, isLocalPdfUrl, PDF_ERROR_KINDS, readPdfOpenFailure, writePdfOpenFailure } from "../pdfSource.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -334,8 +335,9 @@ function EvidenceLinks({ items, onJump }) {
   );
 }
 
-export default function PdfReader({ url, title, doi, paperId, onClose, initialPage, initialTab }) {
+export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPortal, initialPage, initialTab }) {
   const { settings } = useData();
+  const config = useAgentConfig();
   const canvasRef = useRef(null);
   const canvasWrapRef = useRef(null);
   const pageSurfaceRef = useRef(null);
@@ -352,15 +354,19 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
   const followupsRef = useRef([]);
   const evidenceTimerRef = useRef(null);
   const pdfCacheSaveQueueRef = useRef(Promise.resolve());
+  const pdfCacheRef = useRef(null);
   const loadedInterpretationRef = useRef("");
   const [doc, setDoc] = useState(null);
   const [imageSource, setImageSource] = useState(null);
   const [pageNum, setPageNum] = useState(1);
   const [numPages, setNumPages] = useState(0);
   const [scale, setScale] = useState(1.15);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [errorIsAuth, setErrorIsAuth] = useState(false);
+  const rememberedOpenFailure = !isLocalPdfUrl(url) ? readPdfOpenFailure({ paperId, doi, url }) : null;
+  const [loading, setLoading] = useState(!rememberedOpenFailure);
+  const [retrying, setRetrying] = useState(false);
+  const [error, setError] = useState(rememberedOpenFailure ? (rememberedOpenFailure.message || rememberedOpenFailure.label) : "");
+  const [pdfErrorInfo, setPdfErrorInfo] = useState(rememberedOpenFailure);
+  const [errorIsAuth, setErrorIsAuth] = useState(rememberedOpenFailure?.kind === PDF_ERROR_KINDS.auth);
   const [textByPage, setTextByPage] = useState({});
   const [ocrPageTexts, setOcrPageTexts] = useState({});
   const [urlInput, setUrlInput] = useState(url || "");
@@ -434,7 +440,11 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
   const [askInput, setAskInput] = useState("");
   const [askLoading, setAskLoading] = useState(false);
 
-  const config = useAgentConfig();
+  const setPdfMathResultForCurrentConfig = (result, matchesConfig = pdfMathResultMatchesConfig(result, config)) => {
+    pdfMathResultConfigKeyRef.current = result ? (matchesConfig ? pdfMathConfigKey : "__mismatch__") : "";
+    setPdfMathResult(result);
+  };
+
   const proxy = settings?.proxy || "";
   const interpretationKey = useMemo(
     () => interpretationStorageKey({ paperId, doi, url, title }),
@@ -706,15 +716,22 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
     const sourceVariant = source.variant === "dual" || source.variant === "mono" ? source.variant : "original";
     const isTranslatedVariant = sourceVariant !== "original";
     const preservePdfMathResult = Boolean(source.preservePdfMathResult);
-    setLoading(true);
-    setError("");
-    setErrorIsAuth(false);
+    const keepErrorUi = Boolean(source.keepErrorUi);
+    if (keepErrorUi) {
+      setRetrying(true);
+    } else {
+      setRetrying(false);
+      setLoading(true);
+      setError("");
+      setPdfErrorInfo(null);
+      setErrorIsAuth(false);
+    }
     setActivePdfVariant(sourceVariant);
     setPdfSourceBase64("");
     if (!isTranslatedVariant && !preservePdfMathResult) {
       setPdfMathState("idle");
       setPdfMathError("");
-      setPdfMathResult(null);
+      setPdfMathResultForCurrentConfig(null);
       setPdfMathJobId("");
       setPdfMathProgress("");
     }
@@ -826,7 +843,10 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
             const res = await fetch(api.pdfUrl(sourceUrl, proxy, source.doi));
             if (!res.ok) {
               const body = await res.json().catch(() => ({}));
-              throw new Error(body.error || `${res.status} ${res.statusText}`);
+              const error = new Error(body.error || `${res.status} ${res.statusText}`);
+              error.kind = body.kind || "";
+              error.status = Number(body.status || res.status) || res.status;
+              throw error;
             }
             data = await res.arrayBuffer();
             sourceBase64 = arrayBufferToBase64(data);
@@ -877,7 +897,12 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
       setNumPages(pdf.numPages);
       const startPage = Number(initialPage) > 0 ? Math.min(Number(initialPage), pdf.numPages) : 1;
       setPageNum(startPage);
+      setError("");
+      setPdfErrorInfo(null);
+      setErrorIsAuth(false);
+      setRetrying(false);
       setLoading(false);
+      if (!isTranslatedVariant) clearPdfOpenFailure({ paperId, doi: source.doi || doi, url: requestedUrl || url });
 
       const texts = { ...cachedTextByPage };
       const hasCompleteTextCache = Number(cache?.numPages) === pdf.numPages && Object.keys(texts).length >= pdf.numPages;
@@ -923,9 +948,13 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
       }
     } catch (err) {
       const msg = err.message || "PDF 加载失败";
+      const info = classifyPdfError(err, { url: requestedUrl || sourceUrl });
       setError(msg);
-      setErrorIsAuth(/403|401|TOO_MANY_REDIRECTS|需要登录/i.test(msg));
+      setPdfErrorInfo(info);
+      setErrorIsAuth(info.kind === PDF_ERROR_KINDS.auth);
+      setRetrying(false);
       setLoading(false);
+      if (!isTranslatedVariant && !source.data) writePdfOpenFailure({ paperId, doi: source.doi || doi, url: requestedUrl || url }, info);
     }
   };
 
@@ -974,9 +1003,31 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
   };
 
   useEffect(() => {
-    if (url || doi) loadSource({ url, doi });
+    if (!(url || doi || paperId)) return undefined;
+    if (isLocalPdfUrl(url)) {
+      loadSource({ url, doi });
+      return undefined;
+    }
+    const remembered = readPdfOpenFailure({ paperId, doi, url });
+    if (remembered) {
+      setLoading(false);
+      setRetrying(false);
+      setError(remembered.message || remembered.label || "PDF 加载失败");
+      setPdfErrorInfo(remembered);
+      setErrorIsAuth(remembered.kind === PDF_ERROR_KINDS.auth);
+      if (!paperId) return undefined;
+      let cancelled = false;
+      api.getPdfCache(paperId).then((result) => {
+        if (cancelled) return;
+        const local = String(result?.cache?.pdfUrl || "").trim();
+        if (isLocalPdfUrl(local)) loadSource({ url: local, doi, keepErrorUi: true });
+      }).catch(() => {});
+      return () => { cancelled = true; };
+    }
+    loadSource({ url, doi });
+    return undefined;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, doi]);
+  }, [url, doi, paperId]);
 
   useEffect(() => {
     if (Number(initialPage) > 0 && numPages) {
@@ -2402,13 +2453,13 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
           <div className="pdf-url-input">
             <Link2 size={13} />
             <input value={urlInput} onChange={(e) => setUrlInput(e.target.value)} placeholder="输入 PDF 链接" />
-            <button onClick={() => { if (urlInput.trim()) loadSource({ url: urlInput.trim(), useCache: false }); }}>加载</button>
+            <button onClick={() => { if (urlInput.trim()) loadSource({ url: urlInput.trim(), useCache: false, keepErrorUi: Boolean(error) }); }}>加载</button>
           </div>
           <div className="pdf-display-switch" aria-label="PDF 显示模式">
             {PDF_DISPLAY_MODES.map((mode) => {
               const layoutVariant = layoutVariantForDisplayMode(mode.value);
               const layoutReady = layoutVariant
-                ? Boolean(resolveLayoutPageUrl(pdfMathResult, pageNum, layoutVariant).url)
+                ? Boolean(resolveLayoutPageUrl(currentModePdfMathResult, pageNum, layoutVariant).url)
                 : hasAnyLayoutResult;
               return (
                 <button
@@ -2486,7 +2537,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
             disabled={!pdfSourceBase64 || loading}
           />
           <IconButton
-            icon={AppWindow}
+            icon={ExternalLink}
             label="用其他软件打开（可选程序）"
             onClick={() => openOriginalExternally(true)}
             disabled={(!pdfSourceBase64 && !paperId) || loading}
@@ -2506,22 +2557,31 @@ export default function PdfReader({ url, title, doi, paperId, onClose, initialPa
             onPointerUp={handlePanPointerUp}
             onPointerCancel={handlePanPointerUp}
           >
-            {loading ? (
-              <div className="pdf-state"><Loader2 size={22} className="spin" /> 正在加载 PDF...</div>
-            ) : error ? (
+            {error ? (
               <div className="pdf-state error">
-                <strong>PDF 加载失败</strong>
-                <span>{error}</span>
-                {errorIsAuth ? (
-                  <p>该站点可能要求登录或开启了反爬。若你已在「论文搜索」页的内嵌浏览器中登录过该站点，点「重试」会自动携带登录状态；仍失败可改用浏览器打开。</p>
-                ) : (
-                  <p>可以换一个 PDF 链接，或从本地打开文件。</p>
-                )}
+                <strong>{pdfErrorInfo?.label || "PDF 加载失败"}</strong>
+                <span>{pdfErrorInfo?.hint || "请检查链接，也可以选择本地 PDF 文件。"}</span>
+                <details className="pdf-error-details">
+                  <summary>查看下载详情</summary>
+                  <span>{pdfErrorInfo?.message || error}</span>
+                </details>
                 <div className="pdf-error-actions">
-                  {errorIsAuth ? <button className="pdf-open-external" onClick={() => loadSource({ url, doi, useCache: false })}>重试</button> : null}
-                  <button className="pdf-open-external" onClick={() => window.open(url, "_blank", "noopener")}>用系统浏览器打开</button>
+                  {onOpenPortal && pdfErrorInfo?.canUsePortal !== false ? <button className="pdf-open-external" onClick={() => onOpenPortal({ url: url || "", doi, title })}>在内嵌门户继续访问</button> : null}
+                  <button
+                    className="pdf-open-external"
+                    disabled={retrying}
+                    onClick={() => loadSource({ url, doi, useCache: false, keepErrorUi: true })}
+                  >
+                    {retrying ? <><Loader2 size={14} className="spin" /> 正在重试…</> : "重试下载"}
+                  </button>
+                  {url ? <button className="pdf-open-external" onClick={() => window.open(url, "_blank", "noopener")}>用系统浏览器打开</button> : null}
+                  <label className="pdf-open-external">导入本地 PDF
+                    <input type="file" accept="application/pdf,.pdf" onChange={openFile} hidden />
+                  </label>
                 </div>
               </div>
+            ) : loading ? (
+              <div className="pdf-state"><Loader2 size={22} className="spin" /> 正在加载 PDF...</div>
             ) : (
               <>
                 {evidenceHighlight?.page === pageNum ? (
