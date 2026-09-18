@@ -35,6 +35,23 @@ npm start
 
 打开 http://127.0.0.1:8787 。
 
+## iPhone PWA（个人使用）
+
+第一版 iPhone 访问方式不需要 Xcode、Cloudflare 或公网端口：电脑继续运行 ScholarLoop，iPhone 和电脑都登录同一个 Tailscale 个人网络，再由 Tailscale Serve 提供私有 HTTPS 地址。
+
+1. 在电脑和 iPhone 安装并登录 Tailscale，确认两台设备出现在同一个网络中。
+2. 运行 `scripts\start-scholarloop-tailscale.cmd`，或分别运行：
+
+   `bash
+   npm start
+   tailscale serve --https=443 http://127.0.0.1:8787
+   `
+
+3. 在 Tailscale 管理界面或命令输出中找到电脑的 `*.ts.net` HTTPS 地址。
+4. 用 iPhone Safari 打开该地址，确认 ScholarLoop 可用后选择“添加到主屏幕”。
+
+Tailscale Serve 只把本机 `127.0.0.1:8787` 提供给同一 Tailscale 网络内的设备，不需要开放 Windows 防火墙入站端口。使用 PWA 时 iPhone 上的 Tailscale 必须保持连接；电脑端服务关闭时，页面会显示无法连接电脑服务。个人数据、PDF 缓存和 AI 配置仍保存在电脑端。
+
 ## 首次设置
 
 1. 打开「设置 → API 配置」，填写 OpenAI 兼容的 API Key、接口地址和模型。Key 只保存在本机浏览器。

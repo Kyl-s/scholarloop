@@ -55,6 +55,7 @@ import {
   createPdfMathTranslationIdentity,
   getPdfMathTranslateFile,
   getPdfMathTranslationForPaper,
+  hasUsablePdfMathOutput,
   getPdfMathTranslationJob,
   getPdfMathInstallState,
   getPdfMathTranslateStatus,
@@ -76,6 +77,8 @@ import { extractModelText, modelResponseError } from "./modelResponse.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 8787;
+const APP_VERSION = process.env.SCHOLARLOOP_VERSION || "1.1.0";
+const DATA_FILE = path.join(__dirname, "..", "data", "store.json");
 const latestPaperSourceWrites = new Map();
 const latestPdfCacheWrites = new Map();
 const latestPdfMathPriorities = new Map();
@@ -209,7 +212,24 @@ function searchErrorMessage(error, config = {}) {
 }
 app.use(express.json({ limit: "50mb" }));
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, name: "ScholarLoop" }));
+app.get("/api/health", (_req, res) => {
+  const pdfMath = getPdfMathTranslateStatus();
+  res.json({
+    ok: true,
+    name: "ScholarLoop",
+    version: APP_VERSION,
+    serverTime: new Date().toISOString(),
+    data: {
+      store: fs.existsSync(DATA_FILE)
+    },
+    capabilities: {
+      pdfReader: true,
+      ocr: true,
+      ai: true,
+      pdfMathTranslate: pdfMath.available
+    }
+  });
+});
 
 app.get("/api/sources", (_req, res) => {
   res.json({
@@ -383,6 +403,9 @@ app.post(
 app.get("/api/pdf/translate-layout/:job", (req, res) => {
   const job = getPdfMathTranslationJob(req.params.job);
   if (!job) return res.status(404).json({ error: "排版翻译任务不存在或已失效" });
+  if (job.status === "completed" && !hasUsablePdfMathOutput(job)) {
+    return res.status(409).json({ error: "排版翻译任务已完成但没有可用的译文 PDF，请重新翻译" });
+  }
   if (req.query?.validateEngine === "true") {
     const settings = getSettings();
     const currentEngine = createPdfMathTranslationIdentity({
@@ -786,7 +809,8 @@ app.get("/api/library/:id/pdf-layout-translation", (req, res) => {
     const candidate = getPdfMathTranslationJob(jobId);
     if (candidate
       && candidate.paperId === req.params.id
-      && pdfMathJobMatchesRequestedConfig(candidate, requestedConfig)) {
+      && pdfMathJobMatchesRequestedConfig(candidate, requestedConfig)
+      && (candidate.status !== "completed" || hasUsablePdfMathOutput(candidate))) {
       job = candidate;
       break;
     }

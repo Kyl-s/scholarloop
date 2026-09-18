@@ -11,6 +11,7 @@ import {
   cancelPdfMathTranslation,
   clearPdfMathTranslationsForPaper,
   findPdfMathTranslateOutputs,
+  hasUsablePdfMathOutput,
   getPdfMathTranslationForPaper,
   getPdfMathTranslationJob,
   getPdfMathTranslateStatus,
@@ -76,6 +77,28 @@ test("serves PDFMathTranslate files from the output directory", () => {
   }
 });
 
+test("accepts completed page-scoped outputs without whole-document URLs", () => {
+  const jobId = "22345678-1234-4234-8234-123456789abc";
+  const outputDir = path.join(process.cwd(), "data", "pdf-translations", jobId, "output");
+  fs.mkdirSync(outputDir, { recursive: true });
+  try {
+    fs.writeFileSync(path.join(outputDir, "page-001.zh.mono.pdf"), FAKE_PDF);
+    assert.equal(hasUsablePdfMathOutput({
+      jobId,
+      status: "completed",
+      result: { jobId, pages: [] },
+      pages: [{ page: 1, status: "completed", monoFile: "page-001.zh.mono.pdf", dualFile: "" }]
+    }), true);
+    assert.equal(hasUsablePdfMathOutput({
+      jobId,
+      status: "completed",
+      result: null,
+      pages: []
+    }), false);
+  } finally {
+    fs.rmSync(path.dirname(outputDir), { recursive: true, force: true });
+  }
+});
 test("builds PDFMathTranslate-next args without legacy flags or API keys", () => {
   const invocation = buildPdfMathTranslateInvocation({
     inputPath: "C:\\job\\source.pdf",

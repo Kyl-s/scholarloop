@@ -214,6 +214,9 @@ function jobHasUsablePages(job) {
   return (job.pages || []).some((page) => page?.status === "completed" && pageHasValidOutput(job, page));
 }
 
+export function hasUsablePdfMathOutput(job) {
+  return jobHasUsablePages(job);
+}
 function hydratePagesFromOutputDir(job) {
   if (!job?.jobId) return job;
   const outputDir = path.join(JOBS_DIR, job.jobId, "output");
@@ -430,7 +433,10 @@ export function getPdfMathTranslationForPaper(paperId, {
       .filter((job) => !requestedModel || String(job.identity?.model || "").trim() === requestedModel)
       .filter((job) => !requestedBaseUrl || normalizeBaseUrl(job.identity?.baseUrl) === normalizeBaseUrl(requestedBaseUrl))
       .sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0));
-    return jobs[0] ? publicPdfMathJob(jobs[0]) : null;
+    const candidate = jobs[0];
+    if (!candidate) return null;
+    if (candidate.status === "completed" && !jobHasUsablePages(candidate)) return null;
+    return publicPdfMathJob(candidate);
   } catch {
     return null;
   }

@@ -36,6 +36,12 @@ import { createPendingFollowup, settleFollowup } from "../pdfChat.js";
 import { applySampledLineAppearance, buildPdfTextLayout, extractReadablePdfText, PDF_TEXT_LAYOUT_VERSION } from "../pdfText.js";
 import { buildLayoutTranslationPrompt, joinLayoutTranslation, parseLayoutTranslation } from "../pdfLayoutTranslation.js";
 import {
+  canSelectLayoutDisplayMode,
+  initialPdfDisplayMode,
+  layoutVariantForDisplayMode,
+  resolveLayoutPageUrl
+} from "../pdfReaderDisplayState.js";
+import {
   normalizeOcrBox,
   ocrRegionCacheKey,
   protectOcrText,
@@ -67,52 +73,6 @@ const PDF_DISPLAY_MODES = [
 ];
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/** 版式翻译：显示模式 → 译文 PDF 类型 */
-function layoutVariantForDisplayMode(mode) {
-  if (mode === "translated") return "mono";
-  if (mode === "bilingual") return "dual";
-  return "";
-}
-
-function findLayoutPageResult(result, pageNumber) {
-  return (result?.pages || []).find((page) => Number(page.page) === Number(pageNumber) && page.status === "completed") || null;
-}
-
-/** 取本页版式译文 URL；优先目标类型，缺失时回退另一种 */
-function resolveLayoutPageUrl(result, pageNumber, variant) {
-  const page = findLayoutPageResult(result, pageNumber);
-  if (page) {
-    if (variant === "mono") {
-      if (page.monoUrl) return { url: page.monoUrl, page, variant: "mono", whole: false };
-      if (page.dualUrl) return { url: page.dualUrl, page, variant: "dual", whole: false };
-    }
-    if (variant === "dual") {
-      if (page.dualUrl) return { url: page.dualUrl, page, variant: "dual", whole: false };
-      if (page.monoUrl) return { url: page.monoUrl, page, variant: "mono", whole: false };
-    }
-  }
-  // 逐页任务：本页未 completed 时绝不回退整本，避免「显示就绪实则仍在译/串页」
-  const progressive = Array.isArray(result?.pages) && result.pages.length > 0;
-  if (progressive) {
-    return { url: "", page: null, variant: "", whole: false };
-  }
-  // 整本 mono/dual（非逐页任务）：按原文页码渲染
-  if (variant === "mono" && result?.monoUrl) {
-    return { url: result.monoUrl, page: null, variant: "mono", whole: true };
-  }
-  if (variant === "dual" && result?.dualUrl) {
-    return { url: result.dualUrl, page: null, variant: "dual", whole: true };
-  }
-  // dual 整本缺失时回退 mono 整本
-  if (variant === "dual" && result?.monoUrl) {
-    return { url: result.monoUrl, page: null, variant: "mono", whole: true };
-  }
-  if (variant === "mono" && result?.dualUrl) {
-    return { url: result.dualUrl, page: null, variant: "dual", whole: true };
-  }
-  return { url: "", page: page || null, variant: "", whole: false };
-}
 
 function layoutPageStatus(result, pageNumber) {
   const page = (result?.pages || []).find((item) => Number(item.page) === Number(pageNumber));
@@ -249,12 +209,6 @@ function base64ToArrayBuffer(value) {
 
 function isTranslationError(value) {
   return /^翻译失败\s*[:：]/.test(String(value || "").trim());
-}
-
-function cachedDisplayMode(cache) {
-  if (Object.values(cache?.pageTranslations || {}).some((value) => value && !isTranslationError(value))) return "translated";
-  if (Object.keys(cache?.paragraphTranslations || {}).length || Object.keys(cache?.selectionTranslations || {}).length) return "bilingual";
-  return "original";
 }
 
 function clampScale(value) {
@@ -477,7 +431,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     () => `${normalizedPdfMathBaseUrl(config?.baseUrl) || "unknown-provider"}:${String(config?.model || "").trim() || "unknown-model"}`,
     [config?.baseUrl, config?.model]
   );
-  const [displayMode, setDisplayMode] = useState("original");
+  const [displayMode, setDisplayMode] = useState(initialPdfDisplayMode);
   const [selectionPopup, setSelectionPopup] = useState(null);
   const [selectionLoading, setSelectionLoading] = useState(false);
   const [selectionTranslations, setSelectionTranslations] = useState({});
@@ -858,7 +812,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     if (!job.paperId || String(job.paperId) !== String(paperId)) return false;
     const hasCompletedPage = (job.pages || []).some((page) => page.status === "completed" && (page.monoUrl || page.dualUrl));
     const hasWholeFile = Boolean(job.monoUrl || job.dualUrl);
-    if (!hasCompletedPage && !hasWholeFile && job.status !== "completed") return false;
+    if (!hasCompletedPage && !hasWholeFile) return false;
     // 旧快照没有 identity 时只允许查看，不能把它当成当前配置的成品。
     const matchesConfig = pdfMathResultMatchesConfig(job, config);
     const matchesMode = allowModeDiscovery || job?.layoutAssist?.enabled === Boolean(expectedAssistEnabled);
@@ -1008,7 +962,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     setLayoutAssistEnabled(layoutAssistEnabledRef.current);
     setSelectionTranslations(cache?.selectionTranslations || {});
     setOcrSelectionCache(cache?.ocrSelectionCache || {});
-    setDisplayMode(compatibleTextCache ? cachedDisplayMode(cache) : "original");
+    setDisplayMode(initialPdfDisplayMode());
     // 随记：优先服务端缓存，否则本地 localStorage
     const restoredNotes = String(cache?.readingNotes || "").trim()
       ? String(cache.readingNotes)
@@ -2521,8 +2475,15 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
 
   const handleDisplayModeChange = (mode) => {
     setLayoutViewError("");
-    // 再次点击「译文/中英对照」时强制重新绑定，避免卡在英文原文
     if (mode !== "original") {
+      const variant = layoutVariantForDisplayMode(mode);
+      const resolved = resolveLayoutPageUrl(currentModePdfMathResult, pageNum, variant);
+      // 没有当前页产物时不能进入「译文」假状态；保持原文并由侧栏提示开始/等待。
+      if (layoutAssistModeMismatch || !resolved.url) {
+        setDisplayMode(initialPdfDisplayMode());
+        return;
+      }
+      // 再次点击「译文/中英对照」时强制重新绑定，避免卡在英文原文
       setLayoutReloadToken((token) => token + 1);
     }
     setDisplayMode(mode);
@@ -2776,16 +2737,15 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
           </div>
           <div className="pdf-display-switch" aria-label="PDF 显示模式">
             {PDF_DISPLAY_MODES.map((mode) => {
-              const layoutVariant = layoutVariantForDisplayMode(mode.value);
-              const layoutReady = layoutVariant
-                ? Boolean(resolveLayoutPageUrl(currentModePdfMathResult, pageNum, layoutVariant).url)
-                : hasAnyLayoutResult;
+              const layoutReady = mode.value === "original"
+                || canSelectLayoutDisplayMode(currentModePdfMathResult, pageNum, mode.value);
               return (
                 <button
                   type="button"
                   key={mode.value}
                   className={`${displayMode === mode.value ? "active" : ""}${mode.value !== "original" && hasAnyLayoutResult && layoutReady ? " has-layout" : ""}`}
                   onClick={() => handleDisplayModeChange(mode.value)}
+                  disabled={mode.value !== "original" && !layoutReady}
                   title={
                     mode.value === "original"
                       ? "显示原始 PDF"
@@ -3323,8 +3283,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                           type="button"
                           className={displayMode === "translated" ? "active" : ""}
                           onClick={() => handleDisplayModeChange("translated")}
-                          disabled={!currentLayoutPage.done && !resolveLayoutPageUrl(currentModePdfMathResult, pageNum, "mono").url}
-                          title={currentLayoutPage.done ? "显示本页译文" : "本页尚未译完"}
+                          disabled={!canSelectLayoutDisplayMode(currentModePdfMathResult, pageNum, "translated")}
+                          title={canSelectLayoutDisplayMode(currentModePdfMathResult, pageNum, "translated") ? "显示本页译文" : "本页版式译文尚未就绪"}
                         >
                           译文{currentLayoutPage.done ? "" : "·未就绪"}
                         </button>
@@ -3332,8 +3292,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                           type="button"
                           className={displayMode === "bilingual" ? "active" : ""}
                           onClick={() => handleDisplayModeChange("bilingual")}
-                          disabled={!currentLayoutPage.done && !resolveLayoutPageUrl(currentModePdfMathResult, pageNum, "dual").url}
-                          title={currentLayoutPage.done ? "显示中英对照" : "本页尚未译完"}
+                          disabled={!canSelectLayoutDisplayMode(currentModePdfMathResult, pageNum, "bilingual")}
+                          title={canSelectLayoutDisplayMode(currentModePdfMathResult, pageNum, "bilingual") ? "显示中英对照" : "本页版式译文尚未就绪"}
                         >
                           中英对照{currentLayoutPage.done ? "" : "·未就绪"}
                         </button>
