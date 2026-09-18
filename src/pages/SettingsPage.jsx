@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Download, Upload, Database, Trash2, Server, KeyRound, ShieldCheck, Info, ExternalLink, Minimize2, Globe2, School, LogIn, Languages, RefreshCw } from "lucide-react";
+import { Download, Upload, Database, Trash2, Server, KeyRound, ShieldCheck, Info, ExternalLink, Minimize2, Globe2, School, LogIn, Languages, RefreshCw, Route } from "lucide-react";
 import { api } from "../api.js";
 import { useData } from "../store.jsx";
 import { Badge, Button, SectionHead } from "../components/ui.jsx";
@@ -15,6 +15,7 @@ export default function SettingsPage({ onNavigate }) {
   const [institutionDraft, setInstitutionDraft] = useState({ enabled: false, name: "", type: "webvpn", portalUrl: "" });
   const [paperSourceDraft, setPaperSourceDraft] = useState({ ieee: { enabled: true, apiKey: "" }, wos: { enabled: true, apiKey: "", database: "WOS" } });
   const [paperSourceChecks, setPaperSourceChecks] = useState({});
+  const [learningPathSaving, setLearningPathSaving] = useState(false);
 
   const refreshPdfMathStatus = async () => {
     setPdfMathStatus((previous) => ({ ...previous, loading: true }));
@@ -113,6 +114,20 @@ export default function SettingsPage({ onNavigate }) {
     await api.post("/api/data/import", { library: [], path: { goal: null, stages: [] }, drafts: [], settings: {} });
     await refresh();
     setMsg("已清空本地数据");
+  };
+
+  const toggleLearningPath = async (event) => {
+    if (learningPathSaving) return;
+    setLearningPathSaving(true);
+    setMsg("");
+    try {
+      await updateSettings({ learningPathEnabled: event.target.checked });
+      setMsg(event.target.checked ? "学习路径已开启" : "学习路径已关闭");
+    } catch (err) {
+      setMsg(`学习路径设置失败：${err.message || "请稍后重试"}`);
+    } finally {
+      setLearningPathSaving(false);
+    }
   };
 
   return (
@@ -217,6 +232,23 @@ export default function SettingsPage({ onNavigate }) {
               type="checkbox"
               checked={settings?.minimizeToTray !== false}
               onChange={(e) => updateSettings({ minimizeToTray: e.target.checked })}
+            />
+            <i className="toggle-track" />
+          </label>
+        </section>
+
+        <section className="panel settings-panel">
+          <div className="settings-head"><Route size={17} /> 学习路径</div>
+          <label className="settings-toggle-row">
+            <span>
+              <strong>启用学习路径</strong>
+              <em>关闭后隐藏路径入口、进度和 Agent 路径引导；已有路径数据会保留。</em>
+            </span>
+            <input
+              type="checkbox"
+              checked={settings?.learningPathEnabled !== false}
+              onChange={toggleLearningPath}
+              disabled={learningPathSaving}
             />
             <i className="toggle-track" />
           </label>

@@ -12,7 +12,8 @@ const LOOP = [
 ];
 
 export default function Dashboard({ onNavigate, onOpenPaper }) {
-  const { stats, library, path } = useData();
+  const { stats, library, path, settings } = useData();
+  const learningPathEnabled = settings?.learningPathEnabled !== false;
   const nextTask = (path?.stages || []).flatMap((s) => (s.tasks || []).map((t) => ({ ...t, stage: s.title }))).find((t) => !t.done);
   const loopActive = library.filter((p) => p.status === "understood" || p.status === "retold").length > 0;
 
@@ -20,14 +21,14 @@ export default function Dashboard({ onNavigate, onOpenPaper }) {
     <div className="dashboard page">
       <section className="welcome-band">
         <div className="welcome-copy">
-          <h2>{path?.field || "从零基础到科研高手"}</h2>
+          <h2>{learningPathEnabled ? (path?.field || "从零基础到科研高手") : "从论文开始建立研究闭环"}</h2>
           <p>
-            {path?.goal
-              ? `目标：${path.goal}`
-              : "先设置研究领域与目标，生成你的个性化学习路径；之后就能聚合搜索、拆解摘要、管理笔记并最终写出论文。"}
+            {learningPathEnabled
+              ? (path?.goal ? "目标：" + path.goal : "先设置研究领域与目标，生成你的个性化学习路径；之后就能聚合搜索、拆解摘要、管理笔记并最终写出论文。")
+              : "聚合搜索论文、拆解摘要、管理笔记，并逐步形成自己的研究输出。"}
           </p>
           <div className="welcome-actions">
-            {!path?.goal ? (
+            {learningPathEnabled && !path?.goal ? (
               <Button icon={GraduationCap} onClick={() => onNavigate({ page: "path" })}>设置学习目标</Button>
             ) : (
               <Button icon={Search} onClick={() => onNavigate({ page: "search" })}>搜索论文</Button>
@@ -35,9 +36,11 @@ export default function Dashboard({ onNavigate, onOpenPaper }) {
             <Button variant="ghost" icon={Library} onClick={() => onNavigate({ page: "library" })}>查看文献库</Button>
           </div>
         </div>
-        <div className="welcome-ring">
-          <ProgressRing value={stats?.pathProgress?.percent || 0} size={104} stroke={8} label={`${stats?.pathProgress?.percent || 0}%`} sublabel="路径进度" />
-        </div>
+        {learningPathEnabled ? (
+          <div className="welcome-ring">
+            <ProgressRing value={stats?.pathProgress?.percent || 0} size={104} stroke={8} label={String(stats?.pathProgress?.percent || 0) + "%"} sublabel="路径进度" />
+          </div>
+        ) : null}
       </section>
 
       <section className="loop-rail">
@@ -49,7 +52,7 @@ export default function Dashboard({ onNavigate, onOpenPaper }) {
           {loopActive ? <Badge tone="ok">闭环已启动</Badge> : <Badge tone="neutral">等待第一步</Badge>}
         </div>
         <div className="loop-steps">
-          {LOOP.map((step, i) => {
+          {(learningPathEnabled ? LOOP : LOOP.filter((step) => step.key !== "path")).map((step, i) => {
             const Icon = step.icon;
             return (
               <button className="loop-step" key={i} onClick={() => onNavigate({ page: step.key })}>
@@ -114,6 +117,7 @@ export default function Dashboard({ onNavigate, onOpenPaper }) {
           )}
         </section>
 
+{learningPathEnabled ? (
         <section className="panel">
           <SectionHead title="下一步学习" desc={path?.goal ? "来自你的学习路径" : "先设置学习目标"} action={
             <Button variant="ghost" size="sm" onClick={() => onNavigate({ page: "path" })}>路径</Button>
@@ -142,6 +146,23 @@ export default function Dashboard({ onNavigate, onOpenPaper }) {
             <span>{stats?.dueToday > 0 ? `今天有 ${stats.dueToday} 篇论文进入复习，5 分钟回顾能显著巩固记忆。` : "今天没有到期复习，保持节奏。"}</span>
           </div>
         </section>
+) : (
+        <section className="panel">
+          <SectionHead title="研究动态" desc="你的文献、标签与复习节奏" />
+          {stats?.topTags?.length ? (
+            <div className="tag-cloud">
+              <span className="tag-cloud-label"><Tag size={13} /> 高频标签</span>
+              <div className="tag-row">
+                {stats.topTags.map((t) => <Badge key={t.name} tone="tag">{t.name} <em>{t.count}</em></Badge>)}
+              </div>
+            </div>
+          ) : null}
+          <div className="review-note">
+            <CalendarClock size={15} />
+            <span>{stats?.dueToday > 0 ? "今天有 " + stats.dueToday + " 篇论文进入复习，5 分钟回顾能显著巩固记忆。" : "今天没有到期复习，保持节奏。"}</span>
+          </div>
+        </section>
+)}
       </div>
     </div>
   );

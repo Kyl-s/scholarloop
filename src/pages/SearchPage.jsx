@@ -54,6 +54,7 @@ const BROWSER_SITES = [
 
 export default function SearchPage({ initialQuery = "", savedSession = null, onSessionChange, onPaperSaved, onReadPdf, initialInstitutionOpen = false, initialPortalUrl = "", initialPortalTitle = "" }) {
   const { library, savePaper, path, settings } = useData();
+  const learningPathEnabled = settings?.learningPathEnabled !== false;
   const institutionSite = useMemo(() => {
     const access = settings?.institutionAccess;
     if (!access?.enabled || !/^https:\/\//i.test(access.portalUrl || "")) return null;
@@ -145,8 +146,8 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
         try {
           plan = await api.searchPlan({
             q: term,
-            field: path?.field || "",
-            goal: path?.goal || "",
+            field: learningPathEnabled ? path?.field || "" : "",
+            goal: learningPathEnabled ? path?.goal || "" : "",
             instruction: sessionInstruction
           });
         } catch (planErr) {
@@ -214,7 +215,7 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
       setLoading(false);
       setAiPlanning(false);
     }
-  }, [query, sources, fromYear, toYear, sort, aiSearch, aiInstruction, path?.field, path?.goal, browserOpen, browserTabs, activeBrowserTabId, page, onSessionChange]);
+  }, [query, sources, fromYear, toYear, sort, aiSearch, aiInstruction, learningPathEnabled, path?.field, path?.goal, browserOpen, browserTabs, activeBrowserTabId, page, onSessionChange]);
 
   const restoreSession = (session) => {
     if (!session) return;

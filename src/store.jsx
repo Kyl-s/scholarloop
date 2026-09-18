@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api.js";
 
 const DataContext = createContext(null);
@@ -14,8 +14,10 @@ export function DataProvider({ children }) {
   const [stats, setStats] = useState(null);
   const [meta, setMeta] = useState(null);
   const [ready, setReady] = useState(false);
+  const refreshSequence = useRef(0);
 
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current;
     const [lib, memoryData, pathData, draftData, journalData, noteData, settingData, statData, metaData] = await Promise.all([
       api.get("/api/library"),
       api.getMemories(),
@@ -27,6 +29,7 @@ export function DataProvider({ children }) {
       api.get("/api/stats"),
       api.get("/api/sources")
     ]);
+    if (sequence !== refreshSequence.current) return false;
     setLibrary(lib);
     setMemories(memoryData);
     setPathState(pathData);
@@ -37,6 +40,7 @@ export function DataProvider({ children }) {
     setStats(statData);
     setMeta(metaData);
     setReady(true);
+    return true;
   }, []);
 
   useEffect(() => {
@@ -139,7 +143,12 @@ export function DataProvider({ children }) {
   const updateSettings = useCallback(async (patch) => {
     const s = await api.put("/api/settings", patch);
     setSettings(s);
-    refresh();
+    try {
+      await refresh();
+    } catch (err) {
+      // 设置已经由 PUT 成功保存；后台刷新失败不应造成未处理异常或白屏。
+      console.error("设置保存后刷新失败", err);
+    }
     return s;
   }, [refresh]);
 

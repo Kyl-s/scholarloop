@@ -53,7 +53,8 @@ const TOOL_LABELS = {
 };
 
 export default function AgentDrawer({ open, onClose, onNavigate }) {
-  const { path, refresh, saveJournal } = useData();
+  const { path, refresh, saveJournal, settings } = useData();
+  const learningPathEnabled = settings?.learningPathEnabled !== false;
   const config = useAgentConfig();
   const [messages, setMessages] = useState(() => (loadJSON(CHAT_KEY, []) || []).map(sanitizeMessage));
   const [input, setInput] = useState("");
@@ -63,9 +64,10 @@ export default function AgentDrawer({ open, onClose, onNavigate }) {
   const [saving, setSaving] = useState(false);
   const listRef = useRef(null);
 
-  const pathStages = path?.stages || [];
+  const pathStages = learningPathEnabled ? (path?.stages || []) : [];
   const nextTask = pathStages.flatMap((s) => (s.tasks || []).map((t) => ({ ...t, stage: s }))).find((t) => !t.done && t.status !== "skipped");
   const recentLog = Array.isArray(path?.progressLog) ? path.progressLog[0] || null : null;
+  const quickActions = learningPathEnabled ? QUICK_ACTIONS : QUICK_ACTIONS.filter((action) => action.label !== "制定学习计划");
   const learnPrompt = nextTask
     ? `继续学习我的学习路径。当前阶段「${nextTask.stage.title}」，当前任务：「${nextTask.title}」。上次学习进展：${recentLog?.summary || "无"}；上次卡点：${recentLog?.blocker || "无"}；上次说的下一步：${recentLog?.next || "无"}。请先调用 get_path 确认进度，然后引导我完成这个任务：一次只问一个问题，检查我的理解；我回答后判断是否正确，错了就纠正并让我重新回答；确认达标后再调用 complete_task 标记完成，并告诉我下一步任务。`
     : `我的学习路径已经全部完成，请调用 get_path 确认后，帮我总结这七阶段的收获，并给出下一步研究建议。`;
@@ -177,7 +179,7 @@ export default function AgentDrawer({ open, onClose, onNavigate }) {
               <div className="agent-empty">
                 <Bot size={30} />
                 <h4>今天想研究点什么？</h4>
-                <p>可以让 Agent 制定学习计划、检索特定文献、拆解论文，或和你讨论任意科研主题。</p>
+                <p>{learningPathEnabled ? "可以让 Agent 制定学习计划、检索特定文献、拆解论文，或和你讨论任意科研主题。" : "可以让 Agent 检索特定文献、拆解论文，或和你讨论任意科研主题。"}</p>
               </div>
             ) : null}
             {messages.map((m, i) => (
@@ -204,7 +206,7 @@ export default function AgentDrawer({ open, onClose, onNavigate }) {
 
           {savedNote ? <div className={`agent-saved-note ${savedNote.startsWith("保存失败") ? "error" : ""}`}>{savedNote}</div> : null}
 
-          {pathStages.length ? (
+          {learningPathEnabled && pathStages.length ? (
             <div className="agent-learn">
               <span className="learn-icon"><Target size={16} /></span>
               <div className="learn-copy">
@@ -216,7 +218,7 @@ export default function AgentDrawer({ open, onClose, onNavigate }) {
           ) : null}
 
           <div className="agent-quick">
-            {QUICK_ACTIONS.map((a) => (
+            {quickActions.map((a) => (
               <button key={a.label} onClick={() => send(a.prompt)}>{a.label}</button>
             ))}
           </div>

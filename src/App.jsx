@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useData } from "./store.jsx";
 import Shell from "./components/Shell.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
 import SearchPage from "./pages/SearchPage.jsx";
@@ -15,6 +16,8 @@ import PdfReaderBoundary from "./components/PdfReaderBoundary.jsx";
 import PdfIngestDialog, { getPdfDownloadsBridge } from "./components/PdfIngestDialog.jsx";
 
 export default function App() {
+  const { settings } = useData();
+  const learningPathEnabled = settings?.learningPathEnabled !== false;
   const [view, setView] = useState({ page: "dashboard", subtitle: "" });
   const [focusPaper, setFocusPaper] = useState(null);
   const [searchSession, setSearchSession] = useState(null);
@@ -33,6 +36,11 @@ export default function App() {
       if (typeof off === "function") off();
     };
   }, []);
+
+  useEffect(() => {
+    if (learningPathEnabled || view.page !== "path") return;
+    setView((prev) => (prev.page === "path" ? { ...prev, page: "dashboard", subtitle: "" } : prev));
+  }, [learningPathEnabled, view.page]);
 
   const showToast = (msg) => {
     setToast(msg);
@@ -55,6 +63,10 @@ export default function App() {
     window.scrollTo(0, 0);
   };
 
+  const displayView = !learningPathEnabled && view.page === "path"
+    ? { ...view, page: "dashboard" }
+    : view;
+
   const openPaper = (paper) => {
     setFocusPaper(paper);
     setView((prev) => ({ ...prev, page: "library", subtitle: "文献库" }));
@@ -71,35 +83,35 @@ export default function App() {
 
   return (
     <Shell
-      view={view}
+      view={displayView}
       onNavigate={navigate}
       onSearch={search}
       quickAgentOpen={quickAgentOpen}
       onQuickAgentChange={setQuickAgentOpen}
     >
-      {view.page === "dashboard" ? <Dashboard onNavigate={navigate} onOpenPaper={openPaper} /> : null}
-      {view.page === "search" ? (
+      {displayView.page === "dashboard" ? <Dashboard onNavigate={navigate} onOpenPaper={openPaper} /> : null}
+      {displayView.page === "search" ? (
         <SearchPage
-          initialQuery={view.query || ""}
+          initialQuery={displayView.query || ""}
           savedSession={searchSession}
           onSessionChange={updateSearchSession}
           onPaperSaved={() => {}}
           onReadPdf={openReader}
-          initialInstitutionOpen={Boolean(view.openInstitution)}
-          initialPortalUrl={view.initialPortalUrl || ""}
-          initialPortalTitle={view.initialPortalTitle || ""}
+          initialInstitutionOpen={Boolean(displayView.openInstitution)}
+          initialPortalUrl={displayView.initialPortalUrl || ""}
+          initialPortalTitle={displayView.initialPortalTitle || ""}
         />
       ) : null}
-      {view.page === "library" ? (
+      {displayView.page === "library" ? (
         <LibraryPage focusPaper={focusPaper} onFocusCleared={() => setFocusPaper(null)} onReadPdf={openReader} />
       ) : null}
-      {view.page === "memory" ? <MemoryPage /> : null}
-      {view.page === "path" ? <PathPage onNavigate={navigate} /> : null}
-      {view.page === "journals" ? <JournalsPage /> : null}
-      {view.page === "notes" ? <NotesPage onReadPdf={openReader} /> : null}
-      {view.page === "writer" ? <WriterPage onReadPdf={openReader} /> : null}
-      {view.page === "agent" ? <AgentFocusPage onOpenQuick={() => setQuickAgentOpen(true)} onNavigate={navigate} /> : null}
-      {view.page === "settings" ? <SettingsPage onNavigate={navigate} /> : null}
+      {displayView.page === "memory" ? <MemoryPage /> : null}
+      {displayView.page === "path" ? <PathPage onNavigate={navigate} /> : null}
+      {displayView.page === "journals" ? <JournalsPage /> : null}
+      {displayView.page === "notes" ? <NotesPage onReadPdf={openReader} /> : null}
+      {displayView.page === "writer" ? <WriterPage onReadPdf={openReader} /> : null}
+      {displayView.page === "agent" ? <AgentFocusPage onOpenQuick={() => setQuickAgentOpen(true)} onNavigate={navigate} /> : null}
+      {displayView.page === "settings" ? <SettingsPage onNavigate={navigate} /> : null}
       {reader ? (
         <PdfReaderBoundary onClose={() => setReader(null)}>
           <PdfReader

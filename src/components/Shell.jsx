@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { useData } from "../store.jsx";
 import AgentDrawer from "./AgentDrawer.jsx";
+import ConnectionStatus from "./ConnectionStatus.jsx";
 import { loadAgentConfig } from "../agentConfig.js";
 
 const NAV = [
@@ -32,10 +33,12 @@ const NAV = [
 ];
 
 export default function Shell({ view, onNavigate, onSearch, children, quickAgentOpen, onQuickAgentChange }) {
-  const { stats, path, library, memories } = useData();
+  const { stats, path, library, memories, settings } = useData();
+  const learningPathEnabled = settings?.learningPathEnabled !== false;
   const [mobileOpen, setMobileOpen] = useState(false);
   const [quick, setQuick] = useState("");
   const current = NAV.find((n) => n.id === view.page) || NAV[0];
+  const visibleNav = learningPathEnabled ? NAV : NAV.filter((item) => item.id !== "path");
 
   const submitQuick = (e) => {
     e.preventDefault();
@@ -56,7 +59,7 @@ export default function Shell({ view, onNavigate, onSearch, children, quickAgent
         </div>
       </div>
       <nav className="nav-list">
-        {NAV.map((item) => {
+        {visibleNav.map((item) => {
           const Icon = item.icon;
           return (
             <button
@@ -77,6 +80,7 @@ export default function Shell({ view, onNavigate, onSearch, children, quickAgent
           );
         })}
       </nav>
+      {learningPathEnabled ? (
       <div className="sidebar-foot">
         <div className="foot-progress">
           <span>科研成长</span>
@@ -90,6 +94,7 @@ export default function Shell({ view, onNavigate, onSearch, children, quickAgent
           {path?.goal ? "当前学习目标已生成" : "先设置你的学习目标"}
         </p>
       </div>
+      ) : null}
     </>
   );
 
@@ -111,6 +116,7 @@ export default function Shell({ view, onNavigate, onSearch, children, quickAgent
             <h1>{current.label}</h1>
             <span>{view.subtitle || "从零基础到科研高手"}</span>
           </div>
+          <ConnectionStatus />
           <form className="quick-search" onSubmit={submitQuick}>
             <Search size={16} />
             <input value={quick} onChange={(e) => setQuick(e.target.value)} placeholder="搜索论文、关键词或领域..." />

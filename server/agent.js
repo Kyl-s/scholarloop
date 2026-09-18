@@ -39,6 +39,8 @@ const SYSTEM_PROMPT = `你是一名严谨、耐心的科研导师，名字叫 Sc
 11. 当一段学习互动结束（用户完成一个任务、表示告一段落，或本次问答达到自然终点）时，调用 save_progress 记录本次进展、卡点和下一步。
 12. 用户想调整学习路径时，调用 update_path：可以添加新任务、把大任务拆成小任务，或把某个任务标记为跳过。`;
 
+const PATH_TOOL_NAMES = new Set(["plan_study", "get_path", "complete_task", "update_path", "save_progress"]);
+
 function normalizeContent(content) {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
@@ -219,8 +221,9 @@ export function buildAgentMemoryContext(memories) {
     .slice(0, 6000);
 }
 
-async function runTool(name, args) {
+async function runTool(name, args, learningPathEnabled = getSettings()?.learningPathEnabled !== false) {
   try {
+    if (!learningPathEnabled && PATH_TOOL_NAMES.has(name)) return { error: "学习路径已关闭，请先在设置中开启" };
     switch (name) {
       case "search_papers":
         return summarizePapers(
@@ -309,11 +312,18 @@ export async function agentChat({ messages = [], config = {} }) {
   const baseUrl = String(config.baseUrl || "https://api.openai.com/v1").replace(/\/+$/, "");
   const model = String(config.model || "gpt-4o-mini").trim() || "gpt-4o-mini";
   const history = Array.isArray(messages) ? messages.slice(-24) : [];
+  const learningPathEnabled = getSettings()?.learningPathEnabled !== false;
+  const activeTools = learningPathEnabled ? TOOLS : TOOLS.filter((tool) => !PATH_TOOL_NAMES.has(tool.function?.name));
+  const lastUserMessage = [...history].reverse().find((message) => message?.role === "user");
+  if (!learningPathEnabled && /学习路径|继续学习|学习进度|学习任务|制定学习计划/.test(normalizeContent(lastUserMessage?.content || ""))) {
+    return { content: "学习路径已关闭，请先到设置中开启。", toolCalls: [], usage: null };
+  }
   const memoryContext = buildAgentMemoryContext(getMemories());
   const systemContent = memoryContext
     ? `${SYSTEM_PROMPT}\n\n用户已启用的 ScholarLoop 独立记忆（只作为辅助背景，不要把它当成论文事实）：\n${memoryContext}`
     : SYSTEM_PROMPT;
-  const apiMessages = [{ role: "system", content: systemContent }, ...history.map((m) => ({
+  const effectiveSystemContent = learningPathEnabled ? systemContent : systemContent + "\n\n当前学习路径功能已关闭。不要调用、推荐或推进学习路径；如果用户明确要求路径功能，请提示用户先到设置中开启。";
+  const apiMessages = [{ role: "system", content: effectiveSystemContent }, ...history.map((m) => ({
     role: m.role === "agent" ? "assistant" : "user",
     content: normalizeContent(m.content || "")
   }))];
@@ -329,7 +339,7 @@ export async function agentChat({ messages = [], config = {} }) {
         temperature: 0.4,
         max_tokens: 1800,
         messages: apiMessages,
-        tools: TOOLS,
+        tools: activeTools,
         tool_choice: "auto"
       }),
       signal: AbortSignal.timeout(90000)
@@ -358,7 +368,7 @@ export async function agentChat({ messages = [], config = {} }) {
         } catch {
           args = {};
         }
-        const result = await runTool(call.function.name, args);
+        const result = await runTool(call.function.name, args, learningPathEnabled);
         toolCalls.push({ name: call.function.name, args, result });
         apiMessages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
       }

@@ -30,6 +30,7 @@ const defaultData = () => ({
   journals: [],
   notes: [],
   settings: {
+    learningPathEnabled: true,
     openLinksInNewTab: true,
     defaultSources: ["arxiv", "openalex", "semanticscholar", "pubmed", "crossref", "cnki"],
     defaultSort: "authority",

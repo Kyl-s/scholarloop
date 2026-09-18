@@ -75,7 +75,8 @@ function sanitizeMessage(m) {
 }
 
 export default function AgentFocusPage({ onOpenQuick, onNavigate }) {
-  const { path, stats, refresh, saveJournal } = useData();
+  const { path, stats, refresh, saveJournal, settings } = useData();
+  const learningPathEnabled = settings?.learningPathEnabled !== false;
   const config = useAgentConfig();
   const [messages, setMessages] = useState(() => (loadJSON(CHAT_KEY, []) || []).map(sanitizeMessage));
   const [input, setInput] = useState("");
@@ -86,12 +87,13 @@ export default function AgentFocusPage({ onOpenQuick, onNavigate }) {
   const listRef = useRef(null);
   const inputRef = useRef(null);
 
-  const pathStages = path?.stages || [];
+  const pathStages = learningPathEnabled ? (path?.stages || []) : [];
   const allTasks = pathStages.flatMap((s) => (s.tasks || []).map((t) => ({ ...t, stage: s })));
   const nextTask = allTasks.find((t) => !t.done && t.status !== "skipped");
   const doneCount = allTasks.filter((t) => t.done).length;
   const percent = stats?.pathProgress?.percent ?? (allTasks.length ? Math.round((doneCount / allTasks.length) * 100) : 0);
   const recentLog = Array.isArray(path?.progressLog) ? path.progressLog[0] || null : null;
+  const quickActions = learningPathEnabled ? QUICK_ACTIONS : QUICK_ACTIONS.filter((action) => action.label !== "制定学习计划");
 
   const learnPrompt = nextTask
     ? `继续学习我的学习路径。当前阶段「${nextTask.stage.title}」，当前任务：「${nextTask.title}」。上次学习进展：${recentLog?.summary || "无"}；上次卡点：${recentLog?.blocker || "无"}；上次说的下一步：${recentLog?.next || "无"}。请先调用 get_path 确认进度，然后引导我完成这个任务：一次只问一个问题，检查我的理解；我回答后判断是否正确，错了就纠正并让我重新回答；确认达标后再调用 complete_task 标记完成，并告诉我下一步任务。`
@@ -161,6 +163,8 @@ export default function AgentFocusPage({ onOpenQuick, onNavigate }) {
   return (
     <div className="agent-focus-page">
       <aside className="agent-focus-side">
+        {learningPathEnabled ? (
+        <>
         <div className="focus-goal-card">
           <div className="focus-goal-icon"><Target size={18} /></div>
           <div>
@@ -175,7 +179,7 @@ export default function AgentFocusPage({ onOpenQuick, onNavigate }) {
             <strong>{percent}%</strong>
           </div>
           <div className="focus-progress-track"><i style={{ width: `${percent}%` }} /></div>
-          {pathStages.length ? (
+          {learningPathEnabled && pathStages.length ? (
             <div className="focus-stage-list">
               {pathStages.map((stage, si) => {
                 const tasks = stage.tasks || [];
@@ -206,6 +210,8 @@ export default function AgentFocusPage({ onOpenQuick, onNavigate }) {
             <p className="focus-path-empty">先到「学习路径」设置研究领域和目标，Agent 会帮你规划七阶段学习。</p>
           )}
         </div>
+        </>
+        ) : null}
       </aside>
 
       <section className="agent-focus-main">
@@ -250,7 +256,7 @@ export default function AgentFocusPage({ onOpenQuick, onNavigate }) {
                 <div className="agent-focus-empty">
                   <Bot size={34} />
                   <h4>今天想研究点什么？</h4>
-                  <p>让 Agent 带你走学习路径：一次一个任务、先讲再问、答对才打勾。也可以让它检索文献、拆解论文或搭大纲。</p>
+                  <p>{learningPathEnabled ? "让 Agent 带你走学习路径：一次一个任务、先讲再问、答对才打勾。也可以让 Agent 检索文献、拆解论文或搭大纲。" : "让 Agent 帮你检索文献、拆解论文、讨论概念或搭建论文大纲。"}</p>
                 </div>
               ) : null}
               {messages.map((m, i) => (
@@ -288,7 +294,7 @@ export default function AgentFocusPage({ onOpenQuick, onNavigate }) {
                   ref={inputRef}
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
-                  placeholder="和 Agent 讨论你的研究方向，或直接说「继续学习」..."
+                  placeholder={learningPathEnabled ? "和 Agent 讨论你的研究方向，或直接说「继续学习」..." : "和 Agent 讨论你的研究方向、论文或写作问题..."}
                   disabled={busy}
                 />
                 <button type="submit" disabled={busy || !input.trim()} aria-label="发送">
@@ -301,7 +307,7 @@ export default function AgentFocusPage({ onOpenQuick, onNavigate }) {
       </section>
 
       <aside className="agent-focus-rail">
-        {pathStages.length ? (
+        {learningPathEnabled && pathStages.length ? (
           <div className="focus-continue">
             <span className="learn-icon"><Target size={16} /></span>
             <div className="learn-copy">
@@ -325,7 +331,7 @@ export default function AgentFocusPage({ onOpenQuick, onNavigate }) {
         <div className="focus-tools">
           <div className="focus-tools-head"><Sparkles size={14} /> 快捷指令</div>
           <div className="focus-tool-list">
-            {QUICK_ACTIONS.map((a) => (
+            {quickActions.map((a) => (
               <button key={a.label} onClick={() => send(a.prompt)}>
                 <ArrowRight size={13} />
                 {a.label}
