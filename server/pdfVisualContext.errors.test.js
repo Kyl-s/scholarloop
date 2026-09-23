@@ -68,3 +68,84 @@ test("区分 200 错误信封、空响应、思考独占和非法 JSON", async (
   await assert.rejects(requestWithBody({ choices: [{ message: { reasoning_content: "thinking only" } }] }), (error) => error.code === "VISION_REASONING_ONLY");
   await assert.rejects(requestWithBody({}, { jsonError: true }), (error) => error.code === "VISION_INVALID_JSON");
 });
+
+test("推理字段旁有最终 JSON 时不再误判为思考独占", async () => {
+  const result = await requestWithBody({
+    choices: [{
+      message: {
+        reasoning_content: "先判断页面结构",
+        output_text: JSON.stringify(validContext)
+      }
+    }]
+  });
+  assert.equal(result.page, 2);
+});
+
+test("视觉输出被长度截断时只重试一次，并关闭 DeepSeek 思考模式", async () => {
+  let calls = 0;
+  const bodies = [];
+  const result = await requestPdfVisualContext({
+    page: 2,
+    rendered: { textLayer: true, image: "data:image/png;base64,AA==", lines: [{ text: "Title" }] },
+    config: {
+      baseUrl: "https://api.deepseek.com/v1",
+      apiKey: "not-a-real-key",
+      model: "deepseek-flash"
+    },
+    fetchImpl: async (_url, options) => {
+      calls += 1;
+      bodies.push(JSON.parse(options.body));
+      if (calls === 1) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              choices: [{
+                finish_reason: "length",
+                message: { reasoning_content: "页面较复杂，继续分析" }
+              }]
+            };
+          }
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { choices: [{ finish_reason: "stop", message: { content: JSON.stringify(validContext) } }] };
+        }
+      };
+    }
+  });
+
+  assert.equal(result.page, 2);
+  assert.equal(calls, 2);
+  assert.equal(bodies[0].max_tokens, 4000);
+  assert.equal(bodies[1].max_tokens, 8000);
+  assert.deepEqual(bodies[0].thinking, { type: "disabled" });
+  assert.deepEqual(bodies[1].thinking, { type: "disabled" });
+});
+
+test("DeepSeek 返回 reasoning-only 且没有 finish_reason 时也只重试一次", async () => {
+  let calls = 0;
+  const result = await requestPdfVisualContext({
+    page: 2,
+    rendered: { textLayer: true, image: "data:image/png;base64,AA==", lines: [{ text: "Title" }] },
+    config: { baseUrl: "https://gateway.example/v1", apiKey: "not-a-real-key", model: "deepseek-v4-flash" },
+    fetchImpl: async () => {
+      calls += 1;
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return calls === 1
+            ? { choices: [{ message: { reasoning_content: "只完成了分析" } }] }
+            : { choices: [{ message: { content: JSON.stringify(validContext) } }] };
+        }
+      };
+    }
+  });
+  assert.equal(result.page, 2);
+  assert.equal(calls, 2);
+});

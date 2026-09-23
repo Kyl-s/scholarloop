@@ -1,6 +1,7 @@
-import { extractModelReasoning, extractModelText, modelResponseError, parseJsonFromModelText } from "./modelResponse.js";
+import { extractModelFinishReason, extractModelReasoning, extractModelText, modelResponseError, parseJsonFromModelText } from "./modelResponse.js";
 const REGION_KINDS = new Set(["text", "title", "heading", "caption", "table", "figure", "equation", "header", "footer"]);
 const MAX_LINES = 240;
+const MAX_REQUEST_LINES = 160;
 const MAX_REGIONS = 64;
 const MAX_NOTES = 600;
 
@@ -122,13 +123,28 @@ function classifyVisionResponseError(status, detail = "") {
   return createVisionRequestError(`VISION_UPSTREAM`, `视觉模型请求失败（HTTP ${code || "未知"}），已回退普通翻译`, code);
 }
 
-export async function requestPdfVisualContext({ rendered, page, config = {}, fetchImpl = globalThis.fetch, signal } = {}) {
+function createVisionOutputTruncatedError() {
+  const error = new Error("视觉模型输出被截断，未返回完整结果");
+  error.code = "VISION_OUTPUT_TRUNCATED";
+  error.stage = "response-parse";
+  error.retryable = true;
+  return error;
+}
+
+function shouldDisableThinking(config = {}) {
+  const model = String(config.model || "").toLowerCase();
+  const baseUrl = String(config.baseUrl || "").toLowerCase();
+  return config.pdfVisionDisableThinking !== false
+    && (/deepseek/.test(model) || /deepseek\.com/.test(baseUrl));
+}
+
+async function requestPdfVisualContextOnce({ rendered, page, config = {}, fetchImpl = globalThis.fetch, signal, retry = false } = {}) {
   const baseUrl = String(config.baseUrl || "").trim().replace(/\/+$/, "");
   const apiKey = String(config.apiKey || "").trim();
   const model = String(config.model || "").trim();
   if (!baseUrl || !apiKey || !model) throw new Error("视觉语境缺少模型配置");
   if (!rendered?.textLayer || !Array.isArray(rendered.lines) || !rendered.image) throw new Error("本页没有可用于视觉语境的文本层或页面图像");
-  const lines = rendered.lines.slice(0, MAX_LINES).map((line) => ({
+  const lines = rendered.lines.slice(0, retry ? 120 : MAX_REQUEST_LINES).map((line) => ({
     text: String(line?.text || "").slice(0, 1200),
     left: Number(line?.left) || 0,
     top: Number(line?.top) || 0,
@@ -146,7 +162,8 @@ export async function requestPdfVisualContext({ rendered, page, config = {}, fet
     body: JSON.stringify({
       model,
       temperature: 0,
-      max_tokens: 4000,
+      max_tokens: retry ? 8000 : 4000,
+      ...(shouldDisableThinking(config) ? { thinking: { type: "disabled" } } : {}),
       messages: [
         { role: "system", content: system },
         { role: "user", content: [{ type: "text", text: user }, { type: "image_url", image_url: { url: rendered.image } }] }
@@ -180,8 +197,10 @@ export async function requestPdfVisualContext({ rendered, page, config = {}, fet
   if (data?.error) {
     throw classifyVisionResponseError(response.status || 400, JSON.stringify(data.error).slice(0, 500));
   }
+  const finishReason = extractModelFinishReason(data);
   const text = extractModelText(data);
   if (!text) {
+    if (finishReason === "length") throw createVisionOutputTruncatedError();
     const error = new Error(modelResponseError(data));
     error.code = extractModelReasoning(data) ? "VISION_REASONING_ONLY" : "VISION_EMPTY";
     error.stage = "response-parse";
@@ -192,6 +211,7 @@ export async function requestPdfVisualContext({ rendered, page, config = {}, fet
   try {
     parsed = parseJsonFromModelText(text);
   } catch {
+    if (finishReason === "length") throw createVisionOutputTruncatedError();
     const error = new Error("视觉模型没有返回可解析的 JSON 语境");
     error.code = "VISION_INVALID_JSON";
     error.stage = "response-parse";
@@ -206,6 +226,24 @@ export async function requestPdfVisualContext({ rendered, page, config = {}, fet
     error.stage = "schema-validate";
     error.retryable = true;
     throw error;
+  }
+}
+
+export async function requestPdfVisualContext(args = {}) {
+  try {
+    return await requestPdfVisualContextOnce(args);
+  } catch (error) {
+    // A reasoning model can consume the whole output budget before emitting JSON.
+    // Retry once with a smaller prompt and a larger completion budget. DeepSeek
+    // gateways may omit finish_reason when they return reasoning only, so the
+    // same bounded retry also covers that provider-specific shape.
+    const retryableReasoningOnly = error?.code === "VISION_REASONING_ONLY"
+      && shouldDisableThinking(args.config);
+    const canRetry = error?.code === "VISION_OUTPUT_TRUNCATED" || retryableReasoningOnly;
+    if (!canRetry || args.retry) {
+      throw error;
+    }
+    return requestPdfVisualContextOnce({ ...args, retry: true });
   }
 }
 

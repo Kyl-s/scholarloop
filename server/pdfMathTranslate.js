@@ -1264,6 +1264,7 @@ function safeLayoutAssistError(error) {
     VISION_AUTH: "视觉模型鉴权失败，请检查 API Key、模型权限和接口地址",
     VISION_MODEL_UNAVAILABLE: "当前模型不存在或已失效，请在设置中刷新并选择可用模型",
     VISION_TOO_LARGE: "页面图片被上游拒绝（请求过大），请降低图片分辨率或关闭页面图片辅助翻译",
+    VISION_OUTPUT_TRUNCATED: "视觉模型输出被截断，已重试一次；仍未返回完整结果，已回退普通翻译",
     VISION_TIMEOUT: "视觉模型请求超时，已回退普通翻译",
     VISION_NETWORK: "视觉模型网络请求失败，已回退普通翻译",
     VISION_EMPTY: "视觉模型返回为空，已回退普通翻译",
