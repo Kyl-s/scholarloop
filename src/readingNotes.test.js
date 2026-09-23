@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { caretAfterLeadingMarker, collectNotePages, excerptNote, formatNoteForWriter, insertPageMarker, normalizeReadingNotes, parseReadingNotes } from "./readingNotes.js";
+import { caretAfterLeadingMarker, collectNotePages, excerptNote, formatNoteForWriter, getReadingNoteContent, insertPageMarker, normalizeReadingNotes, parseReadingNotes, readReadingNotes, updateReadingNote } from "./readingNotes.js";
 
 test("无页标记的手记视为整段", () => {
   const segments = parseReadingNotes("方法核心是时间干涉。");
@@ -83,4 +83,63 @@ test("写入论文时带上文献标题和页码", () => {
     "【手记 · 实验假设】\n先补对照。"
   );
   assert.equal(excerptNote("一段很长的手记内容用来测试截断是否生效1234567890", 12), "一段很长的手记内容用来测…");
+});
+
+test("按文献和当前页读取旧版页码手记", () => {
+  const text = [
+    "整篇论文的总印象。",
+    "",
+    "—— 第 3 页 · 2026/9/21 21:54:17 ——",
+    "第三页的方法说明。",
+    "",
+    "—— 第 4 页 · 2026/9/21 22:00:00 ——",
+    "第四页的实验结果。"
+  ].join("\n");
+  const notes = readReadingNotes(text);
+  assert.equal(notes.document, "整篇论文的总印象。");
+  assert.equal(getReadingNoteContent(text, "page", 3), "第三页的方法说明。");
+  assert.equal(getReadingNoteContent(text, "page", 4), "第四页的实验结果。");
+  assert.deepEqual(notes.pages.map((segment) => segment.page), [3, 4]);
+});
+
+test("更新当前页手记不会影响其他页或文献手记", () => {
+  let text = "整篇论文的总印象。\n";
+  text = updateReadingNote(text, { scope: "page", page: 3, content: "第三页内容。", stamp: "now" });
+  text = updateReadingNote(text, { scope: "page", page: 4, content: "第四页内容。", stamp: "later" });
+  text = updateReadingNote(text, { scope: "page", page: 4, content: "第四页修订。" });
+  assert.equal(getReadingNoteContent(text, "document"), "整篇论文的总印象。");
+  assert.equal(getReadingNoteContent(text, "page", 3), "第三页内容。");
+  assert.equal(getReadingNoteContent(text, "page", 4), "第四页修订。");
+});
+
+test("编辑框删空当前页时只移除当前页段落", () => {
+  let text = "整篇论文的总印象。\n";
+  text = updateReadingNote(text, { scope: "page", page: 3, content: "第三页内容。", stamp: "now" });
+  text = updateReadingNote(text, { scope: "page", page: 4, content: "第四页内容。", stamp: "later" });
+  text = updateReadingNote(text, { scope: "page", page: 4, content: "" });
+  assert.equal(getReadingNoteContent(text, "document"), "整篇论文的总印象。");
+  assert.equal(getReadingNoteContent(text, "page", 3), "第三页内容。");
+  assert.equal(getReadingNoteContent(text, "page", 4), "");
+  assert.deepEqual(readReadingNotes(text).pages.map((segment) => segment.page), [3]);
+});
+
+test("首次补写文献手记时不会把内容归到最后一页", () => {
+  let text = updateReadingNote("", { scope: "page", page: 4, content: "第四页内容。", stamp: "later" });
+  text = updateReadingNote(text, { scope: "document", content: "整篇论文总结。" });
+  assert.equal(getReadingNoteContent(text, "document"), "整篇论文总结。");
+  assert.equal(getReadingNoteContent(text, "page", 4), "第四页内容。");
+});
+
+test("同一页的旧分段合并且不丢失内容", () => {
+  const text = [
+    "—— 第 3 页 · first ——",
+    "第一段。",
+    "",
+    "—— 第 3 页 · second ——",
+    "第二段。"
+  ].join("\n");
+  const notes = readReadingNotes(text);
+  assert.equal(notes.pages.length, 1);
+  assert.equal(notes.pages[0].content, "第一段。\n\n第二段。");
+  assert.equal(notes.pages[0].stamp, "first");
 });

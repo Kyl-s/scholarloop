@@ -19,6 +19,12 @@ const MAP_FIELDS = [
   "ocrSelectionCache"
 ];
 
+const PDF_DISPLAY_MODES = new Set(["original", "translated", "bilingual"]);
+
+function normalizePdfDisplayMode(value) {
+  return PDF_DISPLAY_MODES.has(value) ? value : "original";
+}
+
 function asRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -75,6 +81,7 @@ export function normalizePdfCache(value, paperId = "") {
     bytes: Number(source.bytes) || 0,
     numPages: Math.max(0, Number(source.numPages) || 0),
     textLayoutVersion: Math.max(0, Number(source.textLayoutVersion) || 0),
+    displayMode: normalizePdfDisplayMode(source.displayMode),
     textByPage: cleanMap(source.textByPage),
     ocrPageTexts: cleanMap(source.ocrPageTexts),
     pageTranslations: cleanMap(source.pageTranslations),

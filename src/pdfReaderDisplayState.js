@@ -1,5 +1,30 @@
-export function initialPdfDisplayMode() {
-  return "original";
+const PDF_DISPLAY_MODES = new Set(["original", "translated", "bilingual"]);
+
+export function normalizePdfDisplayMode(mode) {
+  return PDF_DISPLAY_MODES.has(mode) ? mode : "original";
+}
+
+export function initialPdfDisplayMode(mode = "original") {
+  return normalizePdfDisplayMode(mode);
+}
+
+function hasCachedTranslationValue(value) {
+  return typeof value === "string"
+    && value.trim().length > 0
+    && !/^翻译失败\s*[:：]/.test(value.trim());
+}
+
+function hasCachedTranslationMap(value) {
+  return Object.values(value && typeof value === "object" ? value : {}).some(hasCachedTranslationValue);
+}
+
+/** Whether a non-layout display mode has usable compatible translation content. */
+export function canRestoreCachedDisplayMode(cache, mode, { compatibleTextCache = true } = {}) {
+  const normalizedMode = normalizePdfDisplayMode(mode);
+  if (normalizedMode === "original") return true;
+  const hasPageTranslations = compatibleTextCache && hasCachedTranslationMap(cache?.pageTranslations);
+  const hasParagraphTranslations = hasCachedTranslationMap(cache?.paragraphTranslations);
+  return hasPageTranslations || hasParagraphTranslations;
 }
 
 export function layoutVariantForDisplayMode(mode) {

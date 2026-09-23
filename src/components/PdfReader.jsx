@@ -31,14 +31,16 @@ import { useData } from "../store.jsx";
 import { IconButton, Segmented } from "./ui.jsx";
 import { renderMarkdown } from "./markdown.jsx";
 import { normalizePdfSelection, normalizedSelectionAnchor } from "../pdfTranslation.js";
-import { attachPdfTextLayerSelection, isPdfSelectionOverlayTarget, orderPdfTextLayerForSelection, pickSelectionAnchorRect } from "../pdfTextSelection.js";
+import { attachPdfTextLayerSelection, isPdfSelectionOverlayTarget, pickSelectionAnchorRect, reorderPdfTextLayerForSelection } from "../pdfTextSelection.js";
 import { createPendingFollowup, settleFollowup } from "../pdfChat.js";
 import { applySampledLineAppearance, buildPdfTextLayout, extractReadablePdfText, PDF_TEXT_LAYOUT_VERSION } from "../pdfText.js";
 import { buildLayoutTranslationPrompt, joinLayoutTranslation, parseLayoutTranslation } from "../pdfLayoutTranslation.js";
 import {
   canSelectLayoutDisplayMode,
+  canRestoreCachedDisplayMode,
   initialPdfDisplayMode,
   layoutVariantForDisplayMode,
+  normalizePdfDisplayMode,
   resolveLayoutPageUrl
 } from "../pdfReaderDisplayState.js";
 import {
@@ -50,7 +52,7 @@ import {
 } from "../pdfOcr.js";
 import { createSavedInterpretation, interpretationStorageKey, normalizeSavedInterpretation } from "../pdfInterpretation.js";
 import { openPdfExternal } from "../openPdfExternal.js";
-import { caretAfterLeadingMarker, collectNotePages, insertPageMarker, normalizeReadingNotes, parseReadingNotes } from "../readingNotes.js";
+import { getReadingNoteContent, normalizeReadingNotes, readReadingNotes, updateReadingNote } from "../readingNotes.js";
 import { fileToBase64, insertAtCursor, pastedFiles } from "../noteAttachments.js";
 import NoteAttachBar from "./NoteAttachBar.jsx";
 import NoteAttachmentThumbs from "./NoteAttachmentThumbs.jsx";
@@ -58,6 +60,7 @@ import { useAgentConfig } from "../agentConfig.js";
 import { estimateTokensFromText } from "../llmUsage.js";
 import UsageMeter from "./UsageMeter.jsx";
 import { classifyPdfError, clearPdfOpenFailure, isLocalPdfUrl, PDF_ERROR_KINDS, readPdfOpenFailure, writePdfOpenFailure } from "../pdfSource.js";
+import { createPdfRenderSequence } from "../pdfRenderState.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -390,6 +393,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const canvasWrapRef = useRef(null);
   const pageSurfaceRef = useRef(null);
   const textLayerRef = useRef(null);
+  const pdfRenderSequenceRef = useRef(createPdfRenderSequence());
   const imageUrlRef = useRef(null);
   const ocrDragRef = useRef({ active: false, start: null, current: null, pointerId: null });
   /** 手型拖拽：在 canvas 容器上平移滚动 */
@@ -409,6 +413,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const [pageNum, setPageNum] = useState(1);
   const [numPages, setNumPages] = useState(0);
   const [scale, setScale] = useState(1.15);
+  const [pageRendering, setPageRendering] = useState(false);
+  const [pageRenderError, setPageRenderError] = useState("");
+  const [renderRetryToken, setRenderRetryToken] = useState(0);
   const rememberedOpenFailure = !isLocalPdfUrl(url) ? readPdfOpenFailure({ paperId, doi, url }) : null;
   const [loading, setLoading] = useState(!rememberedOpenFailure);
   const [retrying, setRetrying] = useState(false);
@@ -487,6 +494,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const [isPanning, setIsPanning] = useState(false);
   /** 阅读随记：想到什么写什么 */
   const [readingNotes, setReadingNotes] = useState("");
+  const [noteScope, setNoteScope] = useState("page");
+  const [noteEditorText, setNoteEditorText] = useState("");
   const [notesSaveStatus, setNotesSaveStatus] = useState("idle"); // idle | saving | saved | error | local
   const notesSaveTimerRef = useRef(null);
   const notesTextareaRef = useRef(null);
@@ -530,7 +539,21 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const pageIsOcr = !textByPage[pageNum] && Boolean(ocrPageTexts[pageNum]);
   const hasPageSource = Boolean(doc || imageSource);
   const paragraphs = useMemo(() => splitParagraphs(pageText), [pageText]);
-  const notePages = useMemo(() => collectNotePages(parseReadingNotes(readingNotes)), [readingNotes]);
+  const noteData = useMemo(() => readReadingNotes(readingNotes), [readingNotes]);
+  const notePages = useMemo(
+    () => noteData.pages
+      .filter((segment) => segment.content.trim())
+      .map((segment) => segment.page)
+      .sort((a, b) => a - b),
+    [noteData]
+  );
+  const visibleReadingNotes = noteScope === "document"
+    ? noteData.document
+    : getReadingNoteContent(readingNotes, "page", pageNum);
+
+  useLayoutEffect(() => {
+    setNoteEditorText(visibleReadingNotes);
+  }, [noteScope, pageNum]);
 
   // 版式翻译结果：上方「原文/译文/中英对照」直接切换，不走侧栏按钮
   const layoutDisplayVariant = layoutVariantForDisplayMode(displayMode);
@@ -666,6 +689,12 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     return task;
   };
 
+  const setDisplayModeAndPersist = (mode) => {
+    const nextMode = normalizePdfDisplayMode(mode);
+    setDisplayMode(nextMode);
+    if (paperId) void persistPdfCache({ displayMode: nextMode });
+  };
+
   const persistReadingNotes = useCallback((text) => {
     writeLocalNotes(text);
     if (!paperId) {
@@ -688,7 +717,18 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   }, [persistReadingNotes]);
 
   const handleNotesChange = (event) => {
-    const next = event.target.value;
+    const nextValue = event.target.value;
+    const currentContent = getReadingNoteContent(readingNotes, noteScope, pageNum);
+    const stamp = noteScope === "page" && !currentContent.trim() && nextValue.trim()
+      ? new Date().toLocaleString("zh-CN", { hour12: false })
+      : "";
+    const next = updateReadingNote(readingNotes, {
+      scope: noteScope,
+      page: pageNum,
+      content: nextValue,
+      stamp
+    });
+    setNoteEditorText(nextValue);
     setReadingNotes(next);
     setNotesSaveStatus("saving");
     scheduleNotesSave(next);
@@ -697,9 +737,20 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const insertNotesAttachment = (token) => {
     const el = notesTextareaRef.current;
     setReadingNotes((prev) => {
-      const start = el ? el.selectionStart : prev.length;
-      const end = el ? el.selectionEnd : prev.length;
-      const { next, caret } = insertAtCursor(prev, token, start, end);
+      const currentContent = getReadingNoteContent(prev, noteScope, pageNum);
+      const start = el ? el.selectionStart : currentContent.length;
+      const end = el ? el.selectionEnd : currentContent.length;
+      const { next: nextContent, caret } = insertAtCursor(currentContent, token, start, end);
+      const stamp = noteScope === "page" && !currentContent.trim()
+        ? new Date().toLocaleString("zh-CN", { hour12: false })
+        : "";
+      const next = updateReadingNote(prev, {
+        scope: noteScope,
+        page: pageNum,
+        content: nextContent,
+        stamp
+      });
+      setNoteEditorText(nextContent);
       scheduleNotesSave(next);
       requestAnimationFrame(() => {
         if (!el) return;
@@ -728,30 +779,6 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     } catch (err) {
       window.alert(err.message || "粘贴附件失败");
     }
-  };
-
-  const insertNotesPageMarker = () => {
-    const stamp = new Date().toLocaleString("zh-CN", { hour12: false });
-    setReadingNotes((prev) => {
-      const next = insertPageMarker(prev, pageNum, stamp);
-      scheduleNotesSave(next);
-      return next;
-    });
-    setNotesSaveStatus("saving");
-    requestAnimationFrame(() => {
-      const el = notesTextareaRef.current;
-      if (!el) return;
-      el.focus();
-      const caret = caretAfterLeadingMarker(el.value);
-      el.selectionStart = el.selectionEnd = caret;
-    });
-  };
-
-  const clearReadingNotes = () => {
-    if (!window.confirm("清空本篇手记？此操作不可撤销。")) return;
-    setReadingNotes("");
-    setNotesSaveStatus("saving");
-    scheduleNotesSave("");
   };
 
   const clearPdfCache = async () => {
@@ -791,6 +818,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       setPdfCacheStatus("idle");
       setPdfCacheError("");
       setReadingNotes("");
+      setNoteScope("page");
+      setNoteEditorText("");
       setNotesSaveStatus("idle");
       writeLocalNotes("");
     } catch (err) {
@@ -901,6 +930,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     }
     setDoc(null);
     setImageSource(null);
+    setPageRendering(false);
+    setPageRenderError("");
     if (imageUrlRef.current) {
       URL.revokeObjectURL(imageUrlRef.current);
       imageUrlRef.current = null;
@@ -931,6 +962,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     setPdfCacheStatus(paperId && !isTranslatedVariant ? "reading" : "idle");
     setPdfCacheError("");
     setReadingNotes("");
+    setNoteScope("page");
+    setNoteEditorText("");
     setNotesSaveStatus("idle");
 
     let cache = null;
@@ -951,6 +984,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     const cachedPdfUrl = shouldUseCache ? String(cache?.pdfUrl || "").trim() : "";
     const sourceUrl = cachedPdfUrl || requestedUrl;
     const compatibleTextCache = Number(cache?.textLayoutVersion) === PDF_TEXT_LAYOUT_VERSION;
+    const cachedDisplayMode = initialPdfDisplayMode(cache?.displayMode);
     const cachedTextByPage = compatibleTextCache ? (cache?.textByPage || {}) : {};
     setTextByPage(cachedTextByPage);
     setOcrPageTexts(cache?.ocrPageTexts || {});
@@ -962,7 +996,6 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     setLayoutAssistEnabled(layoutAssistEnabledRef.current);
     setSelectionTranslations(cache?.selectionTranslations || {});
     setOcrSelectionCache(cache?.ocrSelectionCache || {});
-    setDisplayMode(initialPdfDisplayMode());
     // 随记：优先服务端缓存，否则本地 localStorage
     const restoredNotes = String(cache?.readingNotes || "").trim()
       ? String(cache.readingNotes)
@@ -978,6 +1011,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         })();
     const normalizedNotes = normalizeReadingNotes(restoredNotes);
     setReadingNotes(normalizedNotes);
+    setNoteEditorText(getReadingNoteContent(normalizedNotes, "page", pageNum));
     setNotesSaveStatus(normalizedNotes ? (paperId && cache?.readingNotes != null ? "saved" : "local") : "idle");
     if (normalizedNotes && normalizedNotes !== restoredNotes) {
       void persistReadingNotes(normalizedNotes);
@@ -1139,7 +1173,12 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
           pdfSourceSha256Ref.current = computedSourceSha256;
           const sourceSha256 = computedSourceSha256;
           const legacyJobId = cache?.layoutTranslationJobId || savedCache?.layoutTranslationJobId || "";
-          await restorePdfMathFromLocal(
+          const hasCachedLayoutJob = Boolean(cachedJob?.jobId || legacyJobId);
+          const canRestoreTextDisplayMode = canRestoreCachedDisplayMode(cache, cachedDisplayMode, { compatibleTextCache });
+          if (cachedDisplayMode !== "original" && !hasCachedLayoutJob && canRestoreTextDisplayMode) {
+            setDisplayMode(cachedDisplayMode);
+          }
+          const restoredPdfMathJob = await restorePdfMathFromLocal(
             cachedJob?.jobId || legacyJobId,
             {
               expectedAssistEnabled: assistEnabled,
@@ -1149,6 +1188,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
               allowModeDiscovery: !cachedJob && Boolean(legacyJobId) && (Number(cache?.layoutTranslationJobsVersion) || 0) < 1
             }
           );
+          if (restoredPdfMathJob && cachedDisplayMode !== "original" && (!canRestoreTextDisplayMode || hasCachedLayoutJob)) {
+            setDisplayMode(cachedDisplayMode);
+          }
         }
       }
     } catch (err) {
@@ -1182,6 +1224,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     setPdfMathJobId("");
     setPdfMathProgress("");
     setDoc(null);
+    setPageRendering(false);
+    setPageRenderError("");
     setTextByPage({});
     setOcrPageTexts({});
     setParagraphTranslations({});
@@ -1327,32 +1371,54 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     let textLayerDoubleClick = null;
     let pageRenderTask = null;
     let detachTextSelection = null;
-    if ((!doc && !imageSource) || !canvasRef.current) return undefined;
+    let canvasCommitted = false;
+    const renderSequence = pdfRenderSequenceRef.current.next();
+    const isCurrentRender = () => !cancelled && pdfRenderSequenceRef.current.isCurrent(renderSequence);
+    const settlePageRendering = () => {
+      setPageRendering((previous) => isCurrentRender() ? false : previous);
+    };
+    if ((!doc && !imageSource) || !canvasRef.current) {
+      settlePageRendering();
+      return undefined;
+    }
+    setPageRendering(true);
+    setPageRenderError("");
+    // 保留页面表面和 canvas，仅清理上一任务的文字层，避免翻页时串出旧文字。
+    textLayerRef.current?.replaceChildren();
 
     if (imageSource) {
-      const canvas = canvasRef.current;
-      const surface = pageSurfaceRef.current;
-      textLayerRef.current?.replaceChildren();
       const image = new Image();
       image.onload = () => {
-        if (cancelled) return;
+        if (!isCurrentRender()) return;
         const dpr = window.devicePixelRatio || 1;
         const cssWidth = Math.max(1, Math.floor(image.naturalWidth * scale));
         const cssHeight = Math.max(1, Math.floor(image.naturalHeight * scale));
-        canvas.width = Math.floor(cssWidth * dpr);
-        canvas.height = Math.floor(cssHeight * dpr);
+        const renderCanvas = document.createElement("canvas");
+        renderCanvas.width = Math.floor(cssWidth * dpr);
+        renderCanvas.height = Math.floor(cssHeight * dpr);
+        const ctx = renderCanvas.getContext("2d");
+        ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
+        ctx.drawImage(image, 0, 0);
+        if (!isCurrentRender()) return;
+
+        const canvas = canvasRef.current;
+        const surface = pageSurfaceRef.current;
+        if (!canvas) return;
+        canvas.width = renderCanvas.width;
+        canvas.height = renderCanvas.height;
         canvas.style.width = `${cssWidth}px`;
         canvas.style.height = `${cssHeight}px`;
+        canvas.getContext("2d").drawImage(renderCanvas, 0, 0);
         if (surface) {
           surface.style.width = `${cssWidth}px`;
           surface.style.height = `${cssHeight}px`;
         }
-        const ctx = canvas.getContext("2d");
-        ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
-        ctx.drawImage(image, 0, 0);
+        settlePageRendering();
       };
       image.onerror = () => {
-        if (!cancelled) setError("图片渲染失败");
+        if (!isCurrentRender()) return;
+        setPageRenderError((previous) => isCurrentRender() ? "图片渲染失败" : previous);
+        settlePageRendering();
       };
       image.src = imageSource.src;
       return () => {
@@ -1361,11 +1427,14 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     }
 
     (async () => {
+      let renderFromLayout = layoutViewReady;
       try {
         // 仅当版式文档与当前页匹配时才渲染译文，否则渲染原文（避免翻页串页）
-        const renderFromLayout = layoutViewReady;
         const sourceDoc = renderFromLayout ? layoutViewDoc : doc;
-        if (!sourceDoc) return;
+        if (!sourceDoc) {
+          settlePageRendering();
+          return;
+        }
         // pdf2zh 按 --pages N 生成的 mono/dual 往往仍是「整本 PDF」（仅第 N 页为译文），
         // 不能固定渲染第 1 页，否则会一直看到第一页原文。
         const maxPage = sourceDoc.numPages || 1;
@@ -1375,101 +1444,127 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         }
         const safePage = Math.max(1, Math.min(maxPage, sourcePageNum));
         const page = await sourceDoc.getPage(safePage);
-        if (cancelled) return;
+        if (!isCurrentRender()) return;
         const viewport = page.getViewport({ scale });
         const canvas = canvasRef.current;
         const surface = pageSurfaceRef.current;
-        const textContainer = textLayerRef.current;
+        const visibleTextContainer = textLayerRef.current;
         if (!canvas) return;
         const cssWidth = Math.floor(viewport.width);
         const cssHeight = Math.floor(viewport.height);
         const dpr = window.devicePixelRatio || 1;
-        canvas.width = Math.floor(viewport.width * dpr);
-        canvas.height = Math.floor(viewport.height * dpr);
+        const renderCanvas = document.createElement("canvas");
+        renderCanvas.width = Math.floor(viewport.width * dpr);
+        renderCanvas.height = Math.floor(viewport.height * dpr);
+        const ctx = renderCanvas.getContext("2d");
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const textContentPromise = page.getTextContent().catch((err) => {
+          if (isCurrentRender() && err?.name !== "RenderingCancelledException") {
+            console.warn("[PdfReader] text content load failed:", err);
+          }
+          return null;
+        });
+        pageRenderTask = page.render({ canvasContext: ctx, viewport });
+        await pageRenderTask.promise;
+        if (!isCurrentRender()) return;
+        canvas.width = renderCanvas.width;
+        canvas.height = renderCanvas.height;
         canvas.style.width = `${cssWidth}px`;
         canvas.style.height = `${cssHeight}px`;
+        canvas.getContext("2d").drawImage(renderCanvas, 0, 0);
         if (surface) {
           surface.style.width = `${cssWidth}px`;
           surface.style.height = `${cssHeight}px`;
         }
-        const ctx = canvas.getContext("2d");
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        const textContent = await page.getTextContent();
-        if (cancelled) return;
+        canvasCommitted = true;
+        settlePageRendering();
+
+        // 画布提交不等待文字内容/文字层；文字层在后台完成后再替换到当前页面。
+        const textContent = await textContentPromise;
+        if (!isCurrentRender() || !textContent) return;
+
         // 仅在原文上建立文本布局缓存，供文字翻译覆盖层使用
-        let pageLayout = null;
         if (!renderFromLayout) {
-          pageLayout = buildPdfTextLayout(textContent.items, page.getViewport({ scale: 1 }));
-          setPageTextLayouts((previous) => previous[pageNum] ? previous : { ...previous, [pageNum]: pageLayout });
-          if (displayMode === "translated" && pageTranslations[pageNum] && !isTranslationError(pageTranslations[pageNum]) && !pageTranslationLayouts[pageNum]) {
-            setPageTranslationLayouts((previous) => previous[pageNum]
-              ? previous
-              : { ...previous, [pageNum]: parseLayoutTranslation(pageTranslations[pageNum], pageLayout) });
+          const pageLayout = buildPdfTextLayout(textContent.items, page.getViewport({ scale: 1 }));
+          if (pageLayout?.length && isCurrentRender()) {
+            const painted = applySampledLineAppearance(pageLayout, renderCanvas, cssWidth, cssHeight);
+            setPageTextLayouts((previous) => isCurrentRender() ? ({ ...previous, [pageNum]: painted }) : previous);
+            if (displayMode === "translated" && pageTranslations[pageNum] && !isTranslationError(pageTranslations[pageNum]) && !pageTranslationLayouts[pageNum]) {
+              setPageTranslationLayouts((previous) => !isCurrentRender() ? previous : previous[pageNum]
+                ? previous
+                : { ...previous, [pageNum]: parseLayoutTranslation(pageTranslations[pageNum], painted) });
+            }
+            setPageTranslationLayouts((previous) => {
+              if (!isCurrentRender()) return previous;
+              const current = previous[pageNum];
+              if (!Array.isArray(current) || !current.length) return previous;
+              return {
+                ...previous,
+                [pageNum]: current.map((line, index) => ({
+                  ...line,
+                  color: painted[index]?.color || line.color,
+                  background: painted[index]?.background || line.background,
+                  fontWeight: painted[index]?.fontWeight || line.fontWeight
+                }))
+              };
+            });
           }
         }
-        pageRenderTask = page.render({ canvasContext: ctx, viewport });
-        const renderPromise = pageRenderTask.promise;
-        let textPromise = Promise.resolve();
-        if (textContainer) {
-          textContainer.replaceChildren();
-          textContainer.style.setProperty("--total-scale-factor", String(viewport.scale));
-          textLayerTask = new pdfjsLib.TextLayer({
-            textContentSource: textContent,
-            container: textContainer,
-            viewport
-          });
-          textPromise = textLayerTask.render();
-          textLayerDoubleClick = (event) => {
-            const target = event.target?.closest?.("span");
-            if (!target || !textContainer.contains(target)) return;
-            const text = normalizePdfSelection(target.textContent);
-            const anchor = normalizedSelectionAnchor(target.getBoundingClientRect(), surface?.getBoundingClientRect());
-            if (text && anchor) setSelectionPopup({ text, ...anchor, error: "" });
-          };
-          textContainer.addEventListener("dblclick", textLayerDoubleClick);
-        }
-        await Promise.all([renderPromise, textPromise]);
-        if (cancelled) return;
-        if (textContainer) {
-          textContainer.style.width = `${cssWidth}px`;
-          textContainer.style.height = `${cssHeight}px`;
-          orderPdfTextLayerForSelection(textContainer);
-        }
-        // 原页画完后取样颜色/底色，译文覆盖层跟原文走
-        if (!renderFromLayout && pageLayout?.length) {
-          const painted = applySampledLineAppearance(pageLayout, canvas, cssWidth, cssHeight);
-          setPageTextLayouts((previous) => ({ ...previous, [pageNum]: painted }));
-          setPageTranslationLayouts((previous) => {
-            const current = previous[pageNum];
-            if (!Array.isArray(current) || !current.length) return previous;
-            return {
-              ...previous,
-              [pageNum]: current.map((line, index) => ({
-                ...line,
-                color: painted[index]?.color || line.color,
-                background: painted[index]?.background || line.background,
-                fontWeight: painted[index]?.fontWeight || line.fontWeight
-              }))
-            };
-          });
-        }
-        if (textContainer) {
-          detachTextSelection = attachPdfTextLayerSelection(textContainer, {
-            onSelectionStart: () => setSelectionPopup(null)
-          });
-          if (cancelled) {
-            detachTextSelection?.();
-            detachTextSelection = null;
+
+        if (!visibleTextContainer || !isCurrentRender()) return;
+        const renderTextContainer = document.createElement("div");
+        renderTextContainer.className = `textLayer pdf-text-layer${canUseHandPan ? " is-hand-passthrough" : ""}`;
+        renderTextContainer.style.width = `${cssWidth}px`;
+        renderTextContainer.style.height = `${cssHeight}px`;
+        renderTextContainer.style.setProperty("--total-scale-factor", String(viewport.scale));
+        textLayerTask = new pdfjsLib.TextLayer({
+          textContentSource: textContent,
+          container: renderTextContainer,
+          viewport
+        });
+        try {
+          await textLayerTask.render();
+        } catch (err) {
+          if (isCurrentRender() && err?.name !== "RenderingCancelledException") {
+            console.warn("[PdfReader] text layer render failed:", err);
           }
+          return;
         }
+        if (!isCurrentRender()) return;
+        reorderPdfTextLayerForSelection(renderTextContainer, { renderFromLayout });
+        visibleTextContainer.replaceChildren(...Array.from(renderTextContainer.childNodes));
+        visibleTextContainer.style.width = `${cssWidth}px`;
+        visibleTextContainer.style.height = `${cssHeight}px`;
+        visibleTextContainer.style.setProperty("--total-scale-factor", String(viewport.scale));
+        textLayerDoubleClick = (event) => {
+          const target = event.target?.closest?.("span");
+          if (!target || !visibleTextContainer.contains(target)) return;
+          const text = normalizePdfSelection(target.textContent);
+          const anchor = normalizedSelectionAnchor(target.getBoundingClientRect(), surface?.getBoundingClientRect());
+          if (text && anchor) setSelectionPopup({ text, ...anchor, error: "" });
+        };
+        visibleTextContainer.addEventListener("dblclick", textLayerDoubleClick);
+        detachTextSelection = attachPdfTextLayerSelection(visibleTextContainer, {
+          onSelectionStart: () => setSelectionPopup(null)
+        });
       } catch (err) {
-        if (cancelled || err?.name === "RenderingCancelledException" || /cancel/i.test(String(err?.message || ""))) return;
+        if (!isCurrentRender()) return;
+        if (err?.name === "RenderingCancelledException" || /cancel/i.test(String(err?.message || ""))) {
+          settlePageRendering();
+          return;
+        }
+        if (canvasCommitted) {
+          console.warn("[PdfReader] text layer/layout update failed:", err);
+          return;
+        }
         // 版式页渲染失败：不写全局 error，也不永久锁死；下次切换可重试
         if (renderFromLayout) {
           console.warn("[PdfReader] layout render failed:", err);
-          return;
+        } else {
+          console.warn("[PdfReader] page render failed:", err);
         }
-        if (!cancelled) setError(err.message || "页面渲染失败");
+        setPageRenderError((previous) => isCurrentRender() ? (err.message || "页面渲染失败") : previous);
+        settlePageRendering();
       }
     })();
     return () => {
@@ -1485,7 +1580,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         textLayerRef.current.removeEventListener("dblclick", textLayerDoubleClick);
       }
     };
-  }, [doc, imageSource, pageNum, scale, displayMode, pageTranslations[pageNum], layoutViewReady, layoutViewDoc]);
+  }, [doc, imageSource, pageNum, scale, displayMode, pageTranslations[pageNum], layoutViewReady, layoutViewDoc, interactionMode, ocrSelectMode, ocrBusy, renderRetryToken]);
 
   useEffect(() => {
     setSelectionPopup(null);
@@ -2024,7 +2119,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       const result = await api.translate({ text, config, mode: "paragraph" });
       setParagraphTranslations((prev) => ({ ...prev, [key]: result.text }));
       void persistPdfCache({ paragraphTranslations: { [key]: result.text } }, cacheGeneration);
-      setDisplayMode("bilingual");
+      setDisplayModeAndPersist("bilingual");
     } catch (err) {
       setParagraphTranslations((prev) => ({ ...prev, [key]: `翻译失败：${err.message}` }));
     } finally {
@@ -2061,7 +2156,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const translateCurrentPage = async (force = false) => {
     if (!config || translatingPage || !hasPageSource) return;
     if (!force && pageTranslations[pageNum]) {
-      setDisplayMode("translated");
+      setDisplayModeAndPersist("translated");
       return;
     }
     const cacheGeneration = pdfCacheGenerationRef.current;
@@ -2084,7 +2179,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       };
       if (translated.lines) cachePatch.pageTranslationLayouts = { [pageNum]: translated.lines };
       void persistPdfCache(cachePatch, cacheGeneration);
-      setDisplayMode("translated");
+      setDisplayModeAndPersist("translated");
     } catch (err) {
       setPageTranslations((prev) => ({ ...prev, [pageNum]: `翻译失败：${err.message}` }));
     } finally {
@@ -2096,7 +2191,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     if (!hasPageSource || !config || translatingAll) return;
     const cacheGeneration = pdfCacheGenerationRef.current;
     setTranslatingAll(true);
-    setDisplayMode("translated");
+    setDisplayModeAndPersist("translated");
     // 阅读顺序：当前页 → 向后 → 再补前面；一页一页串行全力
     const startPage = Math.min(Math.max(1, pageNum || 1), Math.max(1, numPages));
     const readingOrder = [
@@ -2205,7 +2300,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         const preferred = completed.find((page) => page.page === priorityPage) || completed[0];
         pdfMathFirstPageOpened.current = true;
         if (!resuming && preferred.page && preferred.page !== pageNum) setPageNum(preferred.page);
-        setDisplayMode(preferred.dualUrl ? "bilingual" : "translated");
+        setDisplayModeAndPersist(preferred.dualUrl ? "bilingual" : "translated");
       };
       let job = started;
       if (!["queued", "running", "canceling"].includes(job.status)) {
@@ -2445,15 +2540,16 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
 
   const restoreOriginalPdf = () => {
     // 兼容旧逻辑：若曾整本替换为译文 PDF，回到原始数据
-    setDisplayMode("original");
-    if (activePdfVariant === "original" || !originalPdfSource?.data) return;
-    loadSource({
-      data: base64ToArrayBuffer(originalPdfSource.data),
-      useCache: false,
-      variant: "original",
-      preservePdfMathResult: true,
-      doi: originalPdfSource.doi || ""
-    });
+    if (activePdfVariant !== "original" && originalPdfSource?.data) {
+      loadSource({
+        data: base64ToArrayBuffer(originalPdfSource.data),
+        useCache: false,
+        variant: "original",
+        preservePdfMathResult: true,
+        doi: originalPdfSource.doi || ""
+      });
+    }
+    setDisplayModeAndPersist("original");
   };
 
   const handleLayoutAssistChange = async (enabled) => {
@@ -2461,7 +2557,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     setLayoutAssistEnabled(enabled);
     // 切换模式后先回到原文，避免短暂显示另一模式的 PDFMath 译文。
     if (hasAnyPdfMathResult && (layoutAssistResultEnabled === null || layoutAssistResultEnabled !== enabled)) {
-      setDisplayMode("original");
+      setDisplayModeAndPersist("original");
       setLayoutViewError("");
     }
     const mode = layoutTranslationModeKey(enabled);
@@ -2486,7 +2582,6 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       // 再次点击「译文/中英对照」时强制重新绑定，避免卡在英文原文
       setLayoutReloadToken((token) => token + 1);
     }
-    setDisplayMode(mode);
     // 若之前误加载了整本译文 PDF，切回原文时恢复源文件
     if (mode === "original" && activePdfVariant !== "original" && originalPdfSource?.data) {
       loadSource({
@@ -2497,6 +2592,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         doi: originalPdfSource.doi || ""
       });
     }
+    setDisplayModeAndPersist(mode);
   };
 
   const runInterpret = useCallback(
@@ -2615,7 +2711,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     if (!targetPage) return;
     const page = Math.max(1, Math.min(numPages || targetPage, targetPage));
     if (evidenceTimerRef.current) window.clearTimeout(evidenceTimerRef.current);
-    setDisplayMode("original");
+    setDisplayModeAndPersist("original");
     setAiFocus(false);
     setShowPanel(false);
     setPageNum(page);
@@ -2863,6 +2959,12 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
               <div className="pdf-state"><Loader2 size={22} className="spin" /> 正在加载 PDF...</div>
             ) : (
               <>
+                {pageRendering || pageRenderError ? (
+                  <div className={`pdf-rendering-status${pageRenderError ? " is-error" : ""}`} role={pageRenderError ? "alert" : "status"}>
+                    {pageRenderError ? <span>页面重绘失败：{pageRenderError}</span> : <><Loader2 size={13} className="spin" /> <span>正在重绘页面…</span></>}
+                    {pageRenderError ? <button type="button" onClick={() => setRenderRetryToken((value) => value + 1)}>重试</button> : null}
+                  </div>
+                ) : null}
                 {evidenceHighlight?.page === pageNum ? (
                   <div className="pdf-evidence-jump" role="status" aria-live="polite">
                     <Link2 size={14} />
@@ -2921,7 +3023,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                 ) : null}
                 <div
                   ref={pageSurfaceRef}
-                  className={`pdf-page-surface${ocrSelectMode ? " is-ocr-selecting" : ""}${canUseHandPan ? " is-hand-mode" : " is-select-mode"}${usingLayoutPdf ? " is-layout-pdf" : ""}`}
+                  className={`pdf-page-surface${ocrSelectMode ? " is-ocr-selecting" : ""}${canUseHandPan ? " is-hand-mode" : " is-select-mode"}${usingLayoutPdf ? " is-layout-pdf" : ""}${pageRendering ? " is-page-rendering" : ""}`}
                   onMouseUp={captureTextSelection}
                   onPointerDown={handleOcrPointerDown}
                   onPointerMove={handleOcrPointerMove}
@@ -3066,7 +3168,10 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         </div>
 
         {showPanel ? (
-          <aside ref={panelRef} className={`pdf-translate-panel${aiFocus ? " is-ai-focus" : ""}`}>
+          <aside
+            ref={panelRef}
+            className={`pdf-translate-panel${aiFocus ? " is-ai-focus" : ""}${panelTab === "ai" ? " is-ai-panel" : ""}`}
+          >
             <div className="pdf-panel-tabs">
               <Segmented
                 value={panelTab}
@@ -3355,7 +3460,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                       <button
                         type="button"
                         onClick={() => {
-                          setDisplayMode("original");
+                          setDisplayModeAndPersist("original");
                           setOcrSelectionBox(null);
                           setSelectionPopup(null);
                           setOcrSelectMode((value) => !value);
@@ -3407,7 +3512,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                     <div className="pdf-page-translation-status">
                       <Check size={14} />
                       <span>本页已完成原位覆盖翻译，图片和版式保持不变。</span>
-                      <button type="button" onClick={() => setDisplayMode("original")}>查看原文</button>
+                      <button type="button" onClick={() => setDisplayModeAndPersist("original")}>查看原文</button>
                     </div>
                   ) : (
                     <div className="pdf-page-translation">
@@ -3490,25 +3595,46 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                   </div>
                 </div>
                 <p className="pdf-notes-hint">
-                  页标记加在文首，标记下面才是这一页的正文。再标另一页时，新标记仍加在最上面。
+                  {noteScope === "document"
+                    ? "文献手记用于整篇总结；切换到本页手记可记录当前页面内容。"
+                    : `本页手记只属于当前第 ${pageNum} 页，翻页后会自动切换。`}
                 </p>
-                <div className="pdf-notes-toolbar">
-                  <button type="button" onClick={insertNotesPageMarker} title="在文末插入当前页标记">
-                    插入第 {pageNum} 页
+                <div className="pdf-notes-scope-switch" role="tablist" aria-label="手记范围">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={noteScope === "document"}
+                    className={noteScope === "document" ? "active" : ""}
+                    onClick={() => setNoteScope("document")}
+                  >
+                    文献手记
                   </button>
-                  <NoteAttachBar compact onInsert={insertNotesAttachment} onError={(message) => window.alert(message)} />
-                  <button type="button" onClick={clearReadingNotes} disabled={!readingNotes} title="清空本篇手记">
-                    清空
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={noteScope === "page"}
+                    className={noteScope === "page" ? "active" : ""}
+                    onClick={() => setNoteScope("page")}
+                  >
+                    本页手记
                   </button>
                 </div>
-                {notePages.length ? (
-                  <div className="pdf-notes-jumps" aria-label="手记页码">
+                <div className="pdf-notes-scope-head">
+                  <strong>{noteScope === "document" ? "文献手记" : `第 ${pageNum} 页手记`}</strong>
+                  <span>{noteEditorText.length ? `${noteEditorText.length} 字` : "尚无内容"}</span>
+                </div>
+                {noteScope === "page" && notePages.length ? (
+                  <div className="pdf-notes-jumps" aria-label="已有页手记">
+                    <span>已有页：</span>
                     {notePages.map((page) => (
                       <button
                         key={page}
                         type="button"
                         className={page === pageNum ? "active" : ""}
-                        onClick={() => setPageNum(page)}
+                        onClick={() => {
+                          setNoteScope("page");
+                          setPageNum(page);
+                        }}
                         title={`跳到第 ${page} 页`}
                       >
                         第 {page} 页
@@ -3519,16 +3645,21 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                 <textarea
                   ref={notesTextareaRef}
                   className="pdf-notes-textarea"
-                  value={readingNotes}
+                  value={noteEditorText}
                   onChange={handleNotesChange}
                   onPaste={handleNotesPaste}
-                  placeholder={"例如：\n- 方法核心是……\n- 图 2 有点反直觉\n- 和某篇工作的差异：……\n也可插入图片、文件，或直接粘贴截图。"}
+                  placeholder={noteScope === "document"
+                    ? "例如：\n- 这篇论文解决了什么问题\n- 方法和已有工作的差异\n- 值得继续追问的地方"
+                    : `例如：\n- 第 ${pageNum} 页的核心概念是……\n- 图表/公式哪里值得注意\n- 和前后页的关系：……`}
                   spellCheck={false}
                 />
-                <NoteAttachmentThumbs text={readingNotes} />
+                <div className="pdf-notes-toolbar">
+                  <NoteAttachBar compact onInsert={insertNotesAttachment} onError={(message) => window.alert(message)} />
+                </div>
+                <NoteAttachmentThumbs text={noteEditorText} />
                 <div className="pdf-notes-foot">
-                  <span>{readingNotes.length ? `${readingNotes.length} 字` : "空白手记"}</span>
                   <span>{paperId ? "随文献缓存同步" : "未关联文献库 · 仅浏览器本地"}</span>
+                  <span>可用 Ctrl+Z 撤销编辑</span>
                 </div>
               </div>
             ) : (

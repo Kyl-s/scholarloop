@@ -22,10 +22,85 @@ export function serializeReadingNotes(segments) {
   return blocks.length ? `${blocks.join("\n\n")}\n` : "";
 }
 
+function mergeReadingNoteSegments(segments) {
+  const merged = [];
+  for (const segment of segments || []) {
+    const page = Number(segment?.page) || null;
+    const content = String(segment?.content || "").trim();
+    const stamp = String(segment?.stamp || "").trim();
+    const existing = merged.find((item) => (Number(item.page) || null) === page);
+    if (!existing) {
+      merged.push({
+        id: page ? `p${page}` : "document",
+        page,
+        stamp,
+        content
+      });
+      continue;
+    }
+    if (content) existing.content = existing.content ? `${existing.content}\n\n${content}` : content;
+    if (!existing.stamp && stamp) existing.stamp = stamp;
+  }
+  return merged;
+}
+
 export function normalizeReadingNotes(text) {
   const source = String(text || "");
   if (!source.trim()) return "";
   return serializeReadingNotes(parseReadingNotes(source));
+}
+
+export function readReadingNotes(text) {
+  const segments = parseReadingNotes(text);
+  const documentSegment = segments.find((segment) => !segment.page);
+  return {
+    document: documentSegment?.content || "",
+    pages: segments
+      .filter((segment) => segment.page)
+      .map((segment) => ({
+        page: Number(segment.page),
+        stamp: segment.stamp || "",
+        content: segment.content || ""
+      }))
+  };
+}
+
+export function getReadingNoteContent(text, scope = "page", page) {
+  const notes = readReadingNotes(text);
+  if (scope === "document") return notes.document;
+  const pageNumber = Number(page) || 0;
+  return notes.pages.find((segment) => segment.page === pageNumber)?.content || "";
+}
+
+export function updateReadingNote(text, { scope = "page", page, content = "", stamp = "" } = {}) {
+  const segments = parseReadingNotes(text);
+  const pageNumber = Number(page) || 0;
+  const nextContent = String(content || "").trim();
+  const targetPage = scope === "document" ? null : pageNumber;
+  const index = segments.findIndex((segment) => (Number(segment.page) || null) === targetPage);
+
+  if (!nextContent && scope !== "document") {
+    if (index >= 0) segments.splice(index, 1);
+    return serializeReadingNotes(segments);
+  }
+
+  if (index >= 0) {
+    segments[index] = {
+      ...segments[index],
+      content: nextContent,
+      stamp: segments[index].stamp || (scope === "document" ? "" : String(stamp || "").trim())
+    };
+  } else if (nextContent) {
+    const nextSegment = {
+      id: targetPage ? `p${targetPage}` : "document",
+      page: targetPage,
+      stamp: targetPage ? String(stamp || "").trim() : "",
+      content: nextContent
+    };
+    if (targetPage) segments.push(nextSegment);
+    else segments.unshift(nextSegment);
+  }
+  return serializeReadingNotes(segments);
 }
 
 export function caretAfterLeadingMarker(text) {
@@ -49,7 +124,7 @@ export function insertPageMarker(text, page, stamp) {
   return `${marker}\n\n${normalized}\n`;
 }
 
-export function parseReadingNotes(text) {
+function parseReadingNoteSegments(text) {
   const source = String(text || "");
   if (!source.trim()) return [];
 
@@ -92,6 +167,10 @@ export function parseReadingNotes(text) {
   }
 
   return segments;
+}
+
+export function parseReadingNotes(text) {
+  return mergeReadingNoteSegments(parseReadingNoteSegments(text));
 }
 
 export function excerptNote(text, max = 140) {

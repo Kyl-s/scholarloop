@@ -61,6 +61,11 @@ export function orderPdfTextLayerForSelection(textLayer) {
   return ordered.length;
 }
 
+export function reorderPdfTextLayerForSelection(textLayer, { renderFromLayout = false } = {}) {
+  if (!renderFromLayout) return 0;
+  return orderPdfTextLayerForSelection(textLayer);
+}
+
 export function pickSelectionAnchorRect(rects, fallback) {
   const list = Array.from(rects || []).filter((rect) => rect && rect.width > 0 && rect.height > 0);
   return list.at(-1) || fallback || null;

@@ -14,7 +14,7 @@ export default function ReadingNotesList({
   items,
   query = "",
   emptyTitle = "还没有阅读手记",
-  emptyDesc = "打开一篇 PDF，在右侧「手记」里写下想法，并用「插入第 N 页」打上定位。",
+  emptyDesc = "打开一篇 PDF，在右侧「手记」里写下文献手记或当前页手记。",
   onOpen,
   onInsert,
   insertLabel = "插入这段"

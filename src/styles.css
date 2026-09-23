@@ -3151,6 +3151,7 @@ code {
 }
 
 .pdf-canvas-wrap {
+  position: relative;
   width: 100%;
   height: 100%;
   overflow: auto;
@@ -3213,6 +3214,50 @@ code {
 
 .pdf-page-surface.is-hidden {
   display: none;
+}
+
+.pdf-page-surface.is-page-rendering .pdf-layout-translation-layer,
+.pdf-page-surface.is-page-rendering .pdf-paragraph-overlay-stack,
+.pdf-page-surface.is-page-rendering .pdf-selection-translation-card {
+  visibility: hidden;
+}
+
+.pdf-rendering-status {
+  position: absolute;
+  z-index: 10;
+  top: 12px;
+  left: 50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 24px);
+  padding: 6px 10px;
+  border: 1px solid rgba(176, 201, 244, 0.9);
+  border-radius: 999px;
+  background: rgba(240, 246, 255, 0.94);
+  color: #31558f;
+  box-shadow: 0 5px 16px rgba(20, 45, 90, 0.18);
+  font-size: 11px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.pdf-rendering-status.is-error {
+  border-color: #edb4b4;
+  border-radius: 8px;
+  background: rgba(255, 246, 246, 0.96);
+  color: #a23a3a;
+  pointer-events: auto;
+}
+
+.pdf-rendering-status button {
+  border: 1px solid #d98e8e;
+  border-radius: 5px;
+  padding: 3px 7px;
+  background: #fff;
+  color: #a23a3a;
+  cursor: pointer;
+  font-size: 11px;
 }
 
 .pdf-page-compare {
@@ -3762,12 +3807,13 @@ code {
 
 .pdf-state.error strong {
   font-size: 15px;
+  color: #1e2d4d;
 }
 
 .pdf-state.error span,
 .pdf-state.error p {
   font-size: 12.5px;
-  color: #c8d4ec;
+  color: #536684;
   max-width: 420px;
   line-height: 1.7;
 }
@@ -3807,6 +3853,11 @@ code {
   flex-direction: column;
   gap: 12px;
   min-height: 0;
+}
+
+/* AI 解读由内容区独立滚动，避免追问框覆盖卡片。 */
+.pdf-translate-panel.is-ai-panel {
+  overflow: hidden;
 }
 
 .pdf-translate-shell {
@@ -4108,6 +4159,49 @@ code {
   line-height: 1.55;
 }
 
+.pdf-notes-scope-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid #d7e0f1;
+  border-radius: 9px;
+  background: #edf2fa;
+}
+
+.pdf-notes-scope-switch button {
+  min-width: 0;
+  border: 0;
+  border-radius: 7px;
+  padding: 7px 8px;
+  background: transparent;
+  color: #65758e;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pdf-notes-scope-switch button.active,
+.pdf-notes-scope-switch button:hover {
+  background: #fff;
+  color: #2456e6;
+  box-shadow: 0 1px 3px rgba(35, 70, 130, 0.12);
+}
+
+.pdf-notes-scope-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #243756;
+  font-size: 12px;
+}
+
+.pdf-notes-scope-head span,
+.pdf-notes-jumps > span {
+  color: #7a879c;
+  font-size: 11px;
+}
+
 .pdf-notes-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -4140,6 +4234,7 @@ code {
 
 .pdf-notes-jumps {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 6px;
 }
@@ -5437,8 +5532,6 @@ code {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  position: sticky;
-  bottom: 0;
   background: linear-gradient(180deg, rgba(246, 248, 252, 0), #f6f8fc 18%);
   padding-top: 10px;
   flex-shrink: 0;
@@ -5488,6 +5581,9 @@ code {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  flex: 1;
+  overflow-y: auto;
+  padding-right: 4px;
   min-height: 0;
 }
 
@@ -5588,6 +5684,7 @@ code {
 }
 
 .pdf-body.ai-focus-mode .pdf-ai-scroll {
+  /* 保留放大模式的显式规则，便于覆盖旧主题样式。 */
   flex: 1;
   overflow-y: auto;
   padding-right: 4px;

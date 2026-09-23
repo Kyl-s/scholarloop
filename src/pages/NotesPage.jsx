@@ -183,7 +183,7 @@ export default function NotesPage({ onReadPdf }) {
             items={items}
             query={query}
             onOpen={openNote}
-            emptyDesc="打开一篇 PDF，在右侧「手记」里写下想法，并用「插入第 N 页」打上定位。写完后这里就能单独打开，也可以在论文写作里插入。"
+            emptyDesc="打开一篇 PDF，在右侧「手记」里写下文献手记或当前页手记。写完后这里就能单独打开，也可以在论文写作里插入。"
           />
         )
       ) : (

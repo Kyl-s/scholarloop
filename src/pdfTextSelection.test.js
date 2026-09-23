@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isPdfSelectionOverlayTarget, orderPdfTextLayerForSelection, pickSelectionAnchorRect, sortPdfTextLayerBoxes, usesNativePdfSelection } from "./pdfTextSelection.js";
+import { isPdfSelectionOverlayTarget, orderPdfTextLayerForSelection, pickSelectionAnchorRect, reorderPdfTextLayerForSelection, sortPdfTextLayerBoxes, usesNativePdfSelection } from "./pdfTextSelection.js";
 
 test("anchors the translation popover on the last visible selection line", () => {
   const last = pickSelectionAnchorRect(
@@ -83,6 +83,25 @@ test("reorders a text layer so later stamped author spans come before the abstra
     kids.filter((node) => node.tagName === "SPAN").map((node) => node.textContent),
     ["文章", "Nir", "摘要"]
   );
+});
+
+test("does not reorder original PDF text layers, preserving column-contiguous selection", () => {
+  const leftFirst = { tagName: "SPAN", classList: { contains: () => false }, style: { top: "10%", left: "8%" } };
+  const rightFirst = { tagName: "SPAN", classList: { contains: () => false }, style: { top: "10%", left: "55%" } };
+  const leftSecond = { tagName: "SPAN", classList: { contains: () => false }, style: { top: "12%", left: "8%" } };
+  const children = [leftFirst, rightFirst, leftSecond];
+  const layer = {
+    children,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    append(node) {
+      const index = children.indexOf(node);
+      if (index >= 0) children.splice(index, 1);
+      children.push(node);
+    }
+  };
+  assert.equal(reorderPdfTextLayerForSelection(layer, { renderFromLayout: false }), 0);
+  assert.deepEqual(children, [leftFirst, rightFirst, leftSecond]);
 });
 
 test("treats Chromium 148+ as having native PDF selection", () => {
