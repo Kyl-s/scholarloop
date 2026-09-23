@@ -10,6 +10,7 @@
     "dev:server": "node server/index.js",
     "dev:web": "vite",
     "build": "vite build",
+    "test": "node --test \"src/**/*.test.js\" \"server/**/*.test.js\"",
     "smoke:learning-path": "node scripts/learning-path-toggle-smoke.mjs",
     "start": "node server/index.js",
     "desktop": "electron .",
