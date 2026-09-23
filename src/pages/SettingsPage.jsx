@@ -337,6 +337,7 @@ export default function SettingsPage({ onNavigate }) {
           <span><strong>{path?.stages?.length || 0}</strong> 个学习阶段</span>
           <span><strong>{drafts.length}</strong> 篇草稿</span>
         </div>
+        <p className="about-author">作者：<a className="external-link" href="https://github.com/Kyl-s" target="_blank" rel="noreferrer">Phantom <ExternalLink size={13} /></a></p>
         <a className="external-link" href="https://api.semanticscholar.org" target="_blank" rel="noreferrer">Semantic Scholar API 偶尔限流，重试即可 <ExternalLink size={13} /></a>
       </section>
     </div>
