@@ -6,6 +6,8 @@
 
 作者：[Phantom](https://github.com/Kyl-s)
 
+仓库：[github.com/Kyl-s/scholarloop](https://github.com/Kyl-s/scholarloop)
+
 个人数据只留在你的电脑上，仓库里不包含文献库、笔记、PDF 和 API Key。
 
 ## 功能

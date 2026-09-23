@@ -6895,6 +6895,21 @@ code {
   line-height: 1.7;
 }
 
+.about-credits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 0 0 8px;
+  color: #47556e;
+  font-size: 12.5px;
+}
+
+.about-credits > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
 .about-counts {
   display: flex;
   gap: 26px;
