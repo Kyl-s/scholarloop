@@ -1,3 +1,4 @@
+import { chatgptModelFetch, isChatGptModelUrl } from "./chatgptModel.js";
 import { searchPapers } from "./sources.js";
 import { mergeUsages, parseChatUsage } from "../src/llmUsage.js";
 import { analyzePaper } from "./analyze.js";
@@ -308,7 +309,7 @@ async function runTool(name, args, learningPathEnabled = getSettings()?.learning
 
 export async function agentChat({ messages = [], config = {} }) {
   const apiKey = String(config.apiKey || "").trim();
-  if (!apiKey) throw new Error("请先配置 API Key");
+  if (!apiKey && !isChatGptModelUrl(config.baseUrl)) throw new Error("请先配置 API Key");
   const baseUrl = String(config.baseUrl || "https://api.openai.com/v1").replace(/\/+$/, "");
   const model = String(config.model || "gpt-4o-mini").trim() || "gpt-4o-mini";
   const history = Array.isArray(messages) ? messages.slice(-24) : [];
@@ -331,7 +332,7 @@ export async function agentChat({ messages = [], config = {} }) {
   const usages = [];
 
   for (let round = 0; round < 6; round++) {
-    const res = await fetch(`${baseUrl}/chat/completions`, {
+    const res = await chatgptModelFetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
@@ -360,7 +361,8 @@ export async function agentChat({ messages = [], config = {} }) {
     if (!message) throw new Error("模型未返回有效消息");
 
     if (message.tool_calls?.length) {
-      apiMessages.push({ role: "assistant", content: normalizeContent(message.content), tool_calls: message.tool_calls });
+      apiMessages.push({ role: "assistant", content: normalizeContent(message.content), tool_calls: message.tool_calls,
+        ...(message.chatgpt_response_output ? { chatgpt_response_output: message.chatgpt_response_output } : {}) });
       for (const call of message.tool_calls) {
         let args = {};
         try {

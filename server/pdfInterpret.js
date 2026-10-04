@@ -1,3 +1,4 @@
+import { chatgptModelFetch, isChatGptModelUrl } from "./chatgptModel.js";
 /**
  * PDF 正文 AI 解读：快速 / 完全 双模式
  * 使用用户 Agent 配置（baseUrl/apiKey/model），与 /api/translate 一致
@@ -219,7 +220,7 @@ function normalizeResult(parsed, mode) {
 }
 
 async function callChat({ baseUrl, apiKey, model, system, user, maxTokens = 5000, temperature = 0.2 }) {
-  const r = await fetch(`${baseUrl}/chat/completions`, {
+  const r = await chatgptModelFetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -334,7 +335,7 @@ export async function interpretPdf({
   const baseUrl = String(config.baseUrl || "").trim().replace(/\/+$/, "");
   const apiKey = String(config.apiKey || "").trim();
   const model = String(config.model || "").trim();
-  if (!baseUrl || !apiKey || !model) {
+  if (!baseUrl || (!apiKey && !isChatGptModelUrl(baseUrl)) || !model) {
     throw new Error("请先在设置中配置 API Key");
   }
 
@@ -382,7 +383,8 @@ export async function interpretPdf({
     let answer;
     try {
       answer = await attempt();
-    } catch {
+    } catch (error) {
+      if (isChatGptModelUrl(baseUrl)) throw error;
       await new Promise((r) => setTimeout(r, 800));
       answer = await attempt();
     }
@@ -424,7 +426,8 @@ export async function interpretPdf({
           maxTokens: 2000,
           temperature: 0.1
         });
-      } catch {
+      } catch (error) {
+        if (isChatGptModelUrl(baseUrl)) throw error;
         return part.slice(0, 1500);
       }
     };
@@ -447,7 +450,8 @@ export async function interpretPdf({
   let content;
   try {
     content = await attempt();
-  } catch {
+  } catch (error) {
+    if (isChatGptModelUrl(baseUrl)) throw error;
     await new Promise((r) => setTimeout(r, 900));
     content = await attempt();
   }

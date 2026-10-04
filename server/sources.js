@@ -1,3 +1,4 @@
+import { chatgptModelFetch, isChatGptModelUrl } from "./chatgptModel.js";
 import { XMLParser } from "fast-xml-parser";
 import { getSearchCache, setSearchCache } from "./store.js";
 import { getProxyUrl, fetchWithFallback } from "./proxy.js";
@@ -206,7 +207,7 @@ function scoreMergedPapers(papers, queries) {
 
 async function callChatCompletion(baseUrl, apiKey, model, system, user, opts = {}) {
   const attempt = async () => {
-    const res = await fetch(`${baseUrl}/chat/completions`, {
+    const res = await chatgptModelFetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
@@ -229,6 +230,7 @@ async function callChatCompletion(baseUrl, apiKey, model, system, user, opts = {
   try {
     return await attempt();
   } catch (err) {
+    if (isChatGptModelUrl(baseUrl)) throw err;
     console.error(`[scholarloop] 模型调用失败，重试一次: ${err?.name || "Error"} ${err?.message || err}`);
     await sleep(700);
     return await attempt();
@@ -280,7 +282,7 @@ export async function expandQuery(q, config = {}) {
   const baseUrl = String(config?.baseUrl || "").trim().replace(/\/+$/, "");
   const apiKey = String(config?.apiKey || "").trim();
   const model = String(config?.model || "").trim();
-  if (!baseUrl || !apiKey || !model) return [clean];
+  if (!baseUrl || (!apiKey && !isChatGptModelUrl(baseUrl)) || !model) return [clean];
   const cacheKey = `${model}:${clean}`;
   const cached = readSearchCache(`query:${cacheKey}`);
   if (cached) return cached;
@@ -327,7 +329,7 @@ export async function buildAiSearchPlan(q, opts = {}) {
   const baseUrl = String(opts.config?.baseUrl || "").trim().replace(/\/+$/, "");
   const apiKey = String(opts.config?.apiKey || "").trim();
   const model = String(opts.config?.model || "").trim();
-  if (!clean || !baseUrl || !apiKey || !model) {
+  if (!clean || !baseUrl || (!apiKey && !isChatGptModelUrl(baseUrl)) || !model) {
     return {
       queries: [clean],
       rationale: field || goal ? "已读取你的研究领域，但还没有配置 AI 模型，先用关键词直搜。" : "",

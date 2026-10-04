@@ -1,3 +1,4 @@
+import { chatgptModelFetch, isChatGptModelUrl } from "./chatgptModel.js";
 import { randomUUID } from "node:crypto";
 import {
   looksLikeBatchJsonRequest,
@@ -82,7 +83,7 @@ function choiceContent(data) {
 
 export async function handlePdfMathLlmProxy(req, res) {
   const session = getPdfMathLlmSession(req.params.token);
-  if (!session?.baseUrl || !session.apiKey) {
+  if (!session?.baseUrl || (!session.apiKey && !isChatGptModelUrl(session.baseUrl))) {
     res.status(404).json({ error: "翻译代理会话不存在" });
     return;
   }
@@ -93,7 +94,7 @@ export async function handlePdfMathLlmProxy(req, res) {
   const expectJson = looksLikeBatchJsonRequest(userText) || body.response_format?.type === "json_object";
 
   const upstream = `${session.baseUrl}/chat/completions`;
-  const response = await fetch(upstream, {
+  const response = await chatgptModelFetch(upstream, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

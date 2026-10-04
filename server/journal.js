@@ -1,3 +1,4 @@
+import { chatgptModelFetch, isChatGptModelUrl } from "./chatgptModel.js";
 function clip(text, max = 320) {
   const t = String(text || "").trim();
   return t.length > max ? `${t.slice(0, max)}…` : t;
@@ -130,7 +131,7 @@ export async function refineJournal(messages = [], config = {}) {
   const baseUrl = String(config?.baseUrl || "").trim().replace(/\/+$/, "");
   const apiKey = String(config?.apiKey || "").trim();
   const model = String(config?.model || "").trim();
-  if (!baseUrl || !apiKey || !model) return null;
+  if (!baseUrl || (!apiKey && !isChatGptModelUrl(baseUrl)) || !model) return null;
 
   const transcript = fallback.messages
     .map((m) => `${m.role === "user" ? "用户" : "Agent"}：${m.content}`)
@@ -160,7 +161,7 @@ export async function refineJournal(messages = [], config = {}) {
 3. mindmap 最多三层，每个 label 不超过 10 个字，note 不超过 40 个字。
 4. 保留用户真正的认知变化，去掉寒暄、客套和重复内容。`;
 
-  const res = await fetch(`${baseUrl}/chat/completions`, {
+  const res = await chatgptModelFetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({

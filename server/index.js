@@ -73,6 +73,8 @@ import {
 } from "./translationQuality.js";
 import { handlePdfMathLlmProxy, setPdfMathLlmProxyPort } from "./pdfMathLlmProxy.js";
 import { extractModelText, modelResponseError } from "./modelResponse.js";
+import { chatGptAuth, isLocalChatGptRequest } from "./chatgptAuth.js";
+import { chatgptModelFetch, isChatGptModelUrl } from "./chatgptModel.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -148,7 +150,7 @@ async function extractPdfMetadataAi(text, config = {}) {
   if (!baseUrl || !apiKey || !model || !text.trim()) return null;
   const system = "你是学术文献元数据提取助手。从论文正文中提取结构化信息，只输出一个 JSON 对象，不要输出其他文字。格式：{\"title\":\"论文标题\",\"authors\":[\"作者1\",\"作者2\"],\"year\":2024,\"venue\":\"期刊或会议\",\"doi\":\"\",\"abstract\":\"摘要前 600 字\",\"keywords\":[\"关键词\"]}。不确定的字段填空字符串或空数组。";
   const attempt = async () => {
-    const r = await fetch(`${baseUrl}/chat/completions`, {
+    const r = await chatgptModelFetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
@@ -211,6 +213,30 @@ function searchErrorMessage(error, config = {}) {
   return redactSensitiveError(error?.message || error, [...sourceKeys, config?.apiKey]);
 }
 app.use(express.json({ limit: "50mb" }));
+// OAuth credentials are usable only by the local desktop/browser client.
+app.use((req, res, next) => {
+  const oauth = req.path.startsWith("/api/chatgpt/")
+    || String(req.body?.config?.baseUrl || req.body?.baseUrl || "").startsWith("scholarloop-chatgpt:");
+  if (oauth && !isLocalChatGptRequest(req)) return res.status(403).json({ error: "ChatGPT OAuth 仅支持在本机 ScholarLoop 中使用" });
+  next();
+});
+app.get("/api/chatgpt/status", async (_req, res) => { await chatGptAuth.ready; res.set("Cache-Control", "no-store").json(chatGptAuth.status()); });
+app.post("/api/chatgpt/login", async (_req, res) => {
+  try { res.set("Cache-Control", "no-store").json(await chatGptAuth.login()); }
+  catch { res.status(400).json({ error: "无法启动 ChatGPT 登录，请检查本机回调端口和网络" }); }
+});
+app.post("/api/chatgpt/logout", async (_req, res) => {
+  try { res.json(await chatGptAuth.logout()); }
+  catch { res.status(500).json({ error: "无法清除本机 ChatGPT 加密凭据，请重试退出登录" }); }
+});
+app.get("/api/chatgpt/models", async (_req, res) => {
+  try {
+    const response = await chatgptModelFetch("scholarloop-chatgpt://local/models", { signal: AbortSignal.timeout(25000) });
+    if (!response.ok) throw new Error(`ChatGPT 模型列表请求失败（HTTP ${response.status}）`);
+    const body = await response.json();
+    res.json({ models: (body.data || []).map((item) => item.id).filter(Boolean) });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
 
 app.get("/api/health", (_req, res) => {
   const pdfMath = getPdfMathTranslateStatus();
@@ -511,7 +537,7 @@ app.post("/api/translate", async (req, res) => {
   async function callModel(chunk) {
     const { text: protectedChunk, urls } = protectUrls(chunk);
     const system = systemBase + buildGlossaryHintForText(protectedChunk);
-    const r = await fetch(`${baseUrl}/chat/completions`, {
+    const r = await chatgptModelFetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
@@ -584,7 +610,8 @@ app.post("/api/translate", async (req, res) => {
         const out = await callModel(chunk);
         translated.push(out.text);
         usages.push(out.usage);
-      } catch {
+      } catch (err) {
+        if (isChatGptModelUrl(baseUrl)) throw err;
         await new Promise((r) => setTimeout(r, 1200));
         const out = await callModel(chunk);
         translated.push(out.text);
@@ -648,7 +675,7 @@ app.post("/api/agent/models", async (req, res) => {
     if (!baseUrl || !apiKey) {
       return res.status(400).json({ error: "请先填写接口地址与 API Key" });
     }
-    const r = await fetch(`${baseUrl}/models`, {
+    const r = await chatgptModelFetch(`${baseUrl}/models`, {
       method: "GET",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       signal: AbortSignal.timeout(15000)

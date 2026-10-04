@@ -11,6 +11,7 @@ import {
   setActiveProvider
 } from "../agentConfig.js";
 import { Badge, Button, IconButton } from "./ui.jsx";
+import ChatGptLogin, { CHATGPT_PROVIDER_ID } from "./ChatGptLogin.jsx";
 
 const emptyForm = (preset = null) => ({
   id: "",
@@ -57,6 +58,11 @@ export default function ApiConfigForm() {
   };
 
   const showProvider = (provider, isNew = false) => {
+    if (provider?.id === CHATGPT_PROVIDER_ID) {
+      setEditingId(CHATGPT_PROVIDER_ID);
+      setAdding(false);
+      return;
+    }
     const next = provider ? { ...emptyForm(), ...provider } : emptyForm();
     setForm(next);
     setEditingId(isNew ? "" : (provider?.id || ""));
@@ -149,6 +155,12 @@ export default function ApiConfigForm() {
         </p>
       </div>
 
+      <ChatGptLogin onChanged={() => {
+        const next = refreshStore();
+        const provider = next.providers.find((item) => item.id === next.activeId) || next.providers[0] || null;
+        showProvider(provider, !provider);
+      }} />
+
       {store.providers.length ? (
         <div className="api-provider-list" role="list">
           {store.providers.map((item) => {
@@ -162,13 +174,13 @@ export default function ApiConfigForm() {
               >
                 <div>
                   <strong>{item.name}</strong>
-                  <span>{item.baseUrl.replace(/^https?:\/\//, "")} · {item.model}</span>
+                  <span>{item.id === CHATGPT_PROVIDER_ID ? "ChatGPT 账号授权" : item.baseUrl.replace(/^https?:\/\//, "")} · {item.model}</span>
                 </div>
                 <div className="api-provider-row-actions">
-                  {isActive ? <Badge tone="ok">使用中</Badge> : (
+                  {isActive ? <Badge tone="ok">使用中</Badge> : item.id === CHATGPT_PROVIDER_ID ? <Badge tone="neutral">请在上方登录后启用</Badge> : (
                     <button type="button" className="api-provider-text-btn" onClick={() => activate(item.id)}>启用</button>
                   )}
-                  <IconButton icon={Pencil} label={`编辑 ${item.name}`} onClick={() => showProvider(item, false)} />
+                  {item.id !== CHATGPT_PROVIDER_ID ? <IconButton icon={Pencil} label={`编辑 ${item.name}`} onClick={() => showProvider(item, false)} /> : null}
                   <IconButton icon={Trash2} label={`删除 ${item.name}`} onClick={() => remove(item.id)} />
                 </div>
               </div>
@@ -183,7 +195,7 @@ export default function ApiConfigForm() {
         </Button>
       </div>
 
-      <div className="api-provider-editor">
+      {editingId !== CHATGPT_PROVIDER_ID ? <div className="api-provider-editor">
         <div className="api-provider-editor-head">
           <strong>{formTitle}</strong>
           <div className="api-preset-chips">
@@ -264,17 +276,17 @@ export default function ApiConfigForm() {
             {modelsLoading ? <span className="model-note">正在获取该接口的模型列表...</span> : null}
           </label>
         </div>
-      </div>
+      </div> : null}
 
       {error ? <p className="agent-error">{error}</p> : null}
       {note ? <p className="settings-msg">{note}</p> : null}
 
-      <div className="institution-actions">
+      {editingId !== CHATGPT_PROVIDER_ID ? <div className="institution-actions">
         <Button icon={ShieldCheck} onClick={() => save(false)}>保存</Button>
         {store.providers.length > 0 && (adding || editingId !== store.activeId) ? (
           <Button variant="ghost" icon={Check} onClick={() => save(true)}>保存并启用</Button>
         ) : null}
-      </div>
+      </div> : null}
     </div>
   );
 }
