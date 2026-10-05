@@ -5,7 +5,7 @@ import { loadAgentConfigStore, removeProvider, saveProvider } from "../agentConf
 import { Badge, Button, IconButton } from "./ui.jsx";
 
 export const CHATGPT_PROVIDER_ID = "chatgpt-oauth";
-const NEW_MODEL_SUGGESTIONS = ["gpt-6.1-sol", "gpt-6-sol"];
+const COMMON_CHATGPT_MODELS = ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"];
 
 export default function ChatGptLogin({ onChanged }) {
   const [status, setStatus] = useState(null);
@@ -94,8 +94,8 @@ export default function ChatGptLogin({ onChanged }) {
     } catch (err) { setError(err.message); }
   };
 
-  const suggestedModels = NEW_MODEL_SUGGESTIONS.filter((item) => !models.includes(item));
-  const customModel = !models.includes(model) && !suggestedModels.includes(model);
+  const modelOptions = [...new Set([...models, ...COMMON_CHATGPT_MODELS])];
+  const customModel = !modelOptions.includes(model);
 
   return (
     <section className="api-provider-editor" aria-label="ChatGPT OAuth 登录">
@@ -116,15 +116,12 @@ export default function ChatGptLogin({ onChanged }) {
             <label className="proxy-field api-model-field">
               <span>
                 <strong>ChatGPT 模型</strong>
-                <em>刷新账号模型列表，也可手动指定新模型；可用性以账号权限和实际响应为准。</em>
+                <em>刷新最新模型列表，也可输入其他模型 ID。</em>
               </span>
               <div className="model-picker">
                 <select aria-label="ChatGPT 模型" value={customModel ? "__custom__" : model} onChange={(event) => setModel(event.target.value === "__custom__" ? "" : event.target.value)} disabled={modelsLoading}>
                   {modelsLoading && !models.length ? <option value="">加载模型中...</option> : null}
-                  {models.map((item) => <option key={item} value={item}>{item}</option>)}
-                  {suggestedModels.length ? <optgroup label="新模型（手动指定）">
-                    {suggestedModels.map((item) => <option key={item} value={item}>{item}（手动指定）</option>)}
-                  </optgroup> : null}
+                  {modelOptions.map((item) => <option key={item} value={item}>{item}</option>)}
                   <option value="__custom__">自定义...</option>
                 </select>
                 <IconButton
@@ -136,7 +133,6 @@ export default function ChatGptLogin({ onChanged }) {
                 />
               </div>
               {customModel ? <input aria-label="自定义 ChatGPT 模型" value={model} onChange={(event) => setModel(event.target.value)} placeholder="输入模型 ID，如 gpt-6.1-sol" /> : null}
-              {model.trim() && !models.includes(model) ? <span className="model-note">此模型未出现在账号目录中，手动指定后能否使用取决于账号权限。</span> : null}
               {modelsLoading ? <span className="model-note" role="status">正在获取账号的模型列表...</span> : null}
               {modelsError ? <span className="model-note warn" role="alert">获取模型列表失败：{modelsError}</span> : null}
             </label>
