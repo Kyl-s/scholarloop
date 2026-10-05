@@ -94,6 +94,7 @@ export async function readChatGptStream(response) {
   const decoder = new TextDecoder();
   let buffer = "";
   let completed = null;
+  const completedItems = new Map();
   function event(frame) {
     const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
     if (!data || data === "[DONE]") return;
@@ -102,6 +103,10 @@ export async function readChatGptStream(response) {
     if (["response.failed", "response.incomplete", "error"].includes(value.type)) {
       const detail = value.response?.error || value.error || value.response?.incomplete_details || value;
       throw new Error(`ChatGPT 请求未完成：${detail.code || detail.reason || detail.message || value.type}`);
+    }
+    if (value.type === "response.output_item.done") {
+      if (!Number.isInteger(value.output_index) || value.output_index < 0 || !value.item?.type) throw new Error("ChatGPT 返回了无效输出项");
+      completedItems.set(value.output_index, value.item);
     }
     if (value.type === "response.completed") {
       if (!value.response || (value.response.status && value.response.status !== "completed")) throw new Error("ChatGPT 返回了无效完成状态");
@@ -124,7 +129,15 @@ export async function readChatGptStream(response) {
     throw error;
   } finally { reader.releaseLock(); }
   if (!completed) throw new Error("ChatGPT 响应流中断，未收到 response.completed");
-  return completionJson(completed);
+  // Some live plan responses carry completed items only in the preceding SSE events.
+  // Prefer the final snapshot when present; never concatenate it with those items.
+  const output = completed.output?.length ? completed.output
+    : [...completedItems.entries()].sort(([left], [right]) => left - right).map(([, item]) => item);
+  const result = completionJson({ ...completed, output });
+  if (!result.choices[0].message.content.trim() && !result.choices[0].message.tool_calls?.length) {
+    throw new Error("ChatGPT 已完成请求，但没有返回文本或工具调用");
+  }
+  return result;
 }
 
 /** Only the internal marker activates OAuth; ordinary providers retain their fetch behavior. */

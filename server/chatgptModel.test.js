@@ -128,3 +128,49 @@ test("an account catalog does not imply access to newer models absent from its r
   const catalog = await (await modelFetch(CHATGPT_BASE_URL + "/models")).json();
   assert.deepEqual(catalog.data.map(m => m.id), ["gpt-6-astra", "gpt-5.6-sol"]);
 });
+
+
+test("recovers Luna text from completed output items when the final snapshot is empty or omitted", async () => {
+  const item = { id: "msg_test", type: "message", status: "completed", role: "assistant", content: [{ type: "output_text", text: "你好" }] };
+  for (const omit of [false, true]) {
+    const final = completed();
+    if (omit) delete final.response.output;
+    const result = await readChatGptStream(stream([
+      { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "你好" },
+      { type: "response.output_text.done", output_index: 0, content_index: 0, text: "你好" },
+      { type: "response.output_item.done", output_index: 0, item }, final
+    ], 1));
+    assert.equal(result.choices[0].message.content, "你好");
+    assert.equal(result.usage.total_tokens, 12);
+  }
+});
+
+test("recovers ordered reasoning and function calls for the next Agent tool round", async () => {
+  const reasoning = { id: "reason_test", type: "reasoning", encrypted_content: "fake-encrypted-reasoning", summary: [] };
+  const tool = { id: "fc_test", type: "function_call", status: "completed", namespace: "scholarloop", name: "lookup", call_id: "call_test", arguments: '{"query":"test"}' };
+  const result = await readChatGptStream(stream([
+    { type: "response.output_item.done", output_index: 1, item: tool },
+    { type: "response.output_item.done", output_index: 0, item: reasoning }, completed()
+  ]));
+  const message = result.choices[0].message;
+  assert.equal(result.choices[0].finish_reason, "tool_calls");
+  assert.equal(message.tool_calls[0].function.arguments, tool.arguments);
+  const next = toChatGptResponsesBody({ model: "test", messages: [message, { role: "tool", tool_call_id: "call_test", content: "found" }] });
+  assert.deepEqual(next.input, [reasoning, tool, { type: "function_call_output", call_id: "call_test", output: "found" }]);
+});
+
+test("prefers the final output snapshot without duplicating streamed text", async () => {
+  const item = { type: "message", content: [{ type: "output_text", text: "你好" }] };
+  const result = await readChatGptStream(stream([{ type: "response.output_item.done", output_index: 0, item }, completed([item])]));
+  assert.equal(result.choices[0].message.content, "你好");
+});
+
+test("completed output items do not turn a failed or interrupted stream into success", async () => {
+  const item = { type: "message", content: [{ type: "output_text", text: "partial" }] };
+  const done = { type: "response.output_item.done", output_index: 0, item };
+  await assert.rejects(readChatGptStream(stream([done])), /response.completed/);
+  for (const type of ["response.failed", "response.incomplete"]) {
+    await assert.rejects(readChatGptStream(stream([done, { type, response: { error: { code: "usage_limit" } } }])), /usage_limit/);
+  }
+  await assert.rejects(readChatGptStream(stream([completed()])), /没有返回文本或工具调用/);
+});
