@@ -24,21 +24,21 @@ import {
 } from "./store.js";
 
 const SYSTEM_PROMPT = `你是一名严谨、耐心的科研导师，名字叫 ScholarLoop Agent。
-你的职责是帮助用户从零基础成长为能独立做研究的人，并在合适时调用工具。
+你的职责是帮助用户把论文读懂、把问题想清楚、把下一步做成可检验的小任务，并在合适时调用工具。
 
 规则：
 1. 默认使用中文回答，除非用户明确要求其他语言。
-2. 用户需要检索论文时，调用 search_papers；需要制定学习路径时，调用 plan_study；需要拆解摘要或论文时，调用 analyze_paper；需要了解文献库时，调用 get_library。
-3. 回答要具体、可执行，避免空泛鼓励。给出下一步建议和可检验的小任务。
+2. 先把概念、论文或下一步讲具体，再按需要提问。不要只当考官，也不要空泛鼓励。
+3. 用户需要检索论文时，调用 search_papers；需要制定学习路径时，调用 plan_study；需要拆解摘要或论文时，调用 analyze_paper；需要了解文献库时，调用 get_library。
 4. 涉及论文时，注明来源、年份与链接，并区分“已核实事实”与“建议进一步查阅”的内容。
 5. 如果工具返回为空或出错，如实告诉用户，并给出替代建议。
-6. 当用户表示想开始学习、继续学习或询问学习进度时，先调用 get_path 获取当前路径，找到第一个未完成任务。
-7. 学习互动采用“一任务一问答”模式：先让用户用自己的话解释、复述或给出实际产出；不要直接替用户完成任务。
-8. 判断用户回答是否真正理解：理解正确或有实质进展，再调用 complete_task 标记完成；理解有误时先纠正、补充解释，再让用户重新回答，不轻易打勾。
-9. 对检索、阅读、写作、复现等实操任务，要求用户提供具体产出（论文标题、链接、笔记要点、代码结果等），并追问关键点验证，而不是仅凭“我完成了”就通过。
-10. 每次标记任务完成后，告诉用户已完成的阶段和下一步任务，继续保持一问一答。
-11. 当一段学习互动结束（用户完成一个任务、表示告一段落，或本次问答达到自然终点）时，调用 save_progress 记录本次进展、卡点和下一步。
-12. 用户想调整学习路径时，调用 update_path：可以添加新任务、把大任务拆成小任务，或把某个任务标记为跳过。`;
+6. 系统会附上当前学习进展和下一步任务。用户要开始、继续或询问进度时，先依据这份状态回答；只有状态不够或用户要改路径时，再调用 get_path。
+7. 不要替用户虚假完成任务。理解正确或有具体产出，再调用 complete_task；理解有误时先纠正并讲清楚，再让用户用自己的话确认。
+8. 对检索、阅读、写作、复现等实操任务，要求具体产出（论文标题、链接、笔记要点、代码结果），不要仅凭“我完成了”就通过。
+9. 标记任务完成后，说明已完成的阶段和下一步，并继续把下一步讲清楚。
+10. 一段学习互动结束（完成一个任务、用户表示告一段落，或问答到达自然终点）时，调用 save_progress 记录进展、卡点和下一步。
+11. 用户想调整学习路径时，调用 update_path：可以添加新任务、把大任务拆成小任务，或把某个任务标记为跳过。
+12. 对话里的“更早对话摘要”和“此前工具结果”是已核实的会话状态。沿用其中的目标、纠正和论文线索，不要重新追问已经确认的事实。`;
 
 const PATH_TOOL_NAMES = new Set(["plan_study", "get_path", "complete_task", "update_path", "save_progress"]);
 
@@ -213,13 +213,155 @@ function summarizePath(path) {
   };
 }
 
-export function buildAgentMemoryContext(memories) {
-  return (Array.isArray(memories) ? memories : [])
-    .filter((memory) => memory?.enabled !== false && memory.content)
-    .slice(0, 30)
-    .map((memory) => `- ${memory.title || "未命名记忆"}：${memory.content}`)
-    .join("\n")
-    .slice(0, 6000);
+const MEMORY_LIMIT = 8;
+const MEMORY_CHAR_BUDGET = 4000;
+const RECENT_MESSAGE_LIMIT = 16;
+const SUMMARY_CHAR_BUDGET = 1800;
+const TOOL_NOTE_LIMIT = 8;
+
+function memoryTerms(text) {
+  const raw = String(text || "").toLowerCase();
+  const latin = raw.match(/[a-z0-9][a-z0-9+._-]{1,}/g) || [];
+  const cjk = [];
+  for (const block of raw.match(/[\u4e00-\u9fff]+/g) || []) {
+    if (block.length <= 4) cjk.push(block);
+    for (let size = 2; size <= 4; size++) {
+      for (let i = 0; i <= block.length - size; i++) cjk.push(block.slice(i, i + size));
+    }
+  }
+  return [...new Set([...latin, ...cjk])];
+}
+
+function scoreMemory(memory, terms) {
+  if (!terms.length) return 1;
+  const haystack = `${memory.title || ""}\n${memory.content || ""}\n${(memory.tags || []).join(" ")}`.toLowerCase();
+  return terms.reduce((score, term) => score + (haystack.includes(term) ? term.length : 0), 0);
+}
+
+export function selectAgentMemories(memories, query = "", limit = MEMORY_LIMIT) {
+  const enabled = (Array.isArray(memories) ? memories : [])
+    .filter((memory) => memory?.enabled !== false && memory.content);
+  const terms = memoryTerms(query);
+  const ranked = enabled
+    .map((memory, index) => ({ memory, index, score: scoreMemory(memory, terms) }))
+    .filter((item) => !terms.length || item.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+  const picked = (ranked.length ? ranked : enabled.map((memory, index) => ({ memory, index }))).slice(0, limit);
+  return picked.map((item) => item.memory);
+}
+
+export function buildAgentMemoryContext(memories, query = "") {
+  const lines = [];
+  let used = 0;
+  for (const memory of selectAgentMemories(memories, query)) {
+    const line = `- ${memory.title || "未命名记忆"}：${memory.content}`;
+    if (lines.length && used + line.length + 1 > MEMORY_CHAR_BUDGET) break;
+    lines.push(line.slice(0, MEMORY_CHAR_BUDGET - used));
+    used += lines[lines.length - 1].length + 1;
+    if (used >= MEMORY_CHAR_BUDGET) break;
+  }
+  return lines.join("\n");
+}
+
+function clipText(value, max) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+
+export function summarizeToolResult(name, result) {
+  if (!result || typeof result !== "object") return clipText(result, 240);
+  if (result.error) return `失败：${clipText(result.error, 180)}`;
+  if (name === "search_papers") {
+    const papers = Array.isArray(result.papers) ? result.papers.slice(0, 5) : [];
+    const lines = papers.map((paper) => {
+      const where = [paper.year, paper.venue || paper.source].filter(Boolean).join(" ");
+      return `${clipText(paper.title, 80)}${where ? ` (${where})` : ""}${paper.url ? ` ${paper.url}` : ""}`;
+    });
+    return `检索到 ${result.total ?? papers.length} 篇。${lines.join("；")}`;
+  }
+  if (name === "get_path") {
+    const next = result.next?.title ? `下一步：${result.next.title}` : "没有未完成任务";
+    const log = result.recentLog?.summary ? `最近进展：${clipText(result.recentLog.summary, 80)}` : "";
+    return [result.field, result.goal, next, log].filter(Boolean).join("。");
+  }
+  if (name === "analyze_paper") {
+    return [result.title || result.oneSentence, result.problem || result.question, result.method]
+      .filter(Boolean)
+      .map((part) => clipText(part, 80))
+      .join("。");
+  }
+  if (name === "save_progress") return result.message || "已记录进展";
+  if (name === "get_library") {
+    const papers = Array.isArray(result) ? result.slice(0, 5) : [];
+    return papers.length
+      ? `文献库 ${result.length} 篇：${papers.map((paper) => clipText(paper.title, 40)).join("；")}`
+      : "文献库为空";
+  }
+  return clipText(JSON.stringify(result), 240);
+}
+
+export function formatToolTrace(toolCalls) {
+  return (Array.isArray(toolCalls) ? toolCalls : [])
+    .slice(0, 4)
+    .map((call) => `${call?.name || "tool"}：${summarizeToolResult(call?.name, call?.result)}`)
+    .filter((line) => !line.endsWith("："))
+    .join("\n");
+}
+
+export function buildConversationSummary(messages) {
+  const older = Array.isArray(messages) ? messages.slice(0, -RECENT_MESSAGE_LIMIT) : [];
+  if (!older.length) return "";
+  const lines = [];
+  for (const message of older) {
+    const content = clipText(normalizeContent(message?.content), 180);
+    if (content) lines.push(`${message.role === "agent" ? "导师" : "用户"}：${content}`);
+    const tools = formatToolTrace(message?.toolCalls);
+    if (tools) lines.push(`工具：${tools.replace(/\n/g, " | ")}`);
+  }
+  if (lines.join("\n").length <= SUMMARY_CHAR_BUDGET) return lines.join("\n");
+  const kept = [];
+  let used = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const next = used + lines[i].length + 1;
+    if (kept.length && next > SUMMARY_CHAR_BUDGET) break;
+    kept.unshift(lines[i].slice(0, SUMMARY_CHAR_BUDGET - used));
+    used = next;
+    if (used >= SUMMARY_CHAR_BUDGET) break;
+  }
+  return kept.join("\n");
+}
+
+export function buildSessionContext(messages) {
+  const summary = buildConversationSummary(messages);
+  const recent = (Array.isArray(messages) ? messages : []).slice(-RECENT_MESSAGE_LIMIT);
+  const notes = [];
+  for (const message of recent) {
+    const tools = formatToolTrace(message?.toolCalls);
+    if (tools) notes.push(tools);
+  }
+  const toolNote = notes.slice(-TOOL_NOTE_LIMIT).join("\n");
+  return [summary && `更早对话摘要：\n${summary}`, toolNote && `此前工具结果：\n${toolNote}`]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+export function messageRoundTokens(round) {
+  return round > 0 ? 4096 : 1200;
+}
+
+export function buildLearningStateContext(path) {
+  if (!path || typeof path !== "object") return "";
+  const tasks = flattenPath(path);
+  const next = tasks.find((task) => !task.done && task.status !== "skipped") || null;
+  const log = Array.isArray(path.progressLog) ? path.progressLog[0] : null;
+  const lines = [];
+  if (path.field || path.goal) lines.push(`方向：${[path.field, path.goal].filter(Boolean).join(" / ")}`);
+  if (next) lines.push(`下一步任务：${next.title}${next.stageTitle ? `（${next.stageTitle}）` : ""}`);
+  if (log?.summary || log?.next || log?.blocker) {
+    lines.push(`最近进展：${[log.summary, log.blocker && `卡点 ${log.blocker}`, log.next && `接着 ${log.next}`].filter(Boolean).join("；")}`);
+  }
+  return lines.join("\n");
 }
 
 async function runTool(name, args, learningPathEnabled = getSettings()?.learningPathEnabled !== false) {
@@ -312,21 +454,30 @@ export async function agentChat({ messages = [], config = {} }) {
   if (!apiKey && !isChatGptModelUrl(config.baseUrl)) throw new Error("请先配置 API Key");
   const baseUrl = String(config.baseUrl || "https://api.openai.com/v1").replace(/\/+$/, "");
   const model = String(config.model || "gpt-4o-mini").trim() || "gpt-4o-mini";
-  const history = Array.isArray(messages) ? messages.slice(-24) : [];
+  const history = Array.isArray(messages) ? messages : [];
+  const recentHistory = history.slice(-RECENT_MESSAGE_LIMIT);
   const learningPathEnabled = getSettings()?.learningPathEnabled !== false;
   const activeTools = learningPathEnabled ? TOOLS : TOOLS.filter((tool) => !PATH_TOOL_NAMES.has(tool.function?.name));
   const lastUserMessage = [...history].reverse().find((message) => message?.role === "user");
+  const queryText = [normalizeContent(lastUserMessage?.content), ...recentHistory.slice(-4).map((message) => normalizeContent(message?.content))]
+    .filter(Boolean)
+    .join("\n");
   if (!learningPathEnabled && /学习路径|继续学习|学习进度|学习任务|制定学习计划/.test(normalizeContent(lastUserMessage?.content || ""))) {
     return { content: "学习路径已关闭，请先到设置中开启。", toolCalls: [], usage: null };
   }
-  const memoryContext = buildAgentMemoryContext(getMemories());
-  const systemContent = memoryContext
-    ? `${SYSTEM_PROMPT}\n\n用户已启用的 ScholarLoop 独立记忆（只作为辅助背景，不要把它当成论文事实）：\n${memoryContext}`
-    : SYSTEM_PROMPT;
+  const memoryContext = buildAgentMemoryContext(getMemories(), queryText);
+  const sessionContext = buildSessionContext(history);
+  const learningState = learningPathEnabled ? buildLearningStateContext(syncPathEvidence(getData().path, getData())) : "";
+  const contextBlocks = [
+    memoryContext && `用户已启用的 ScholarLoop 独立记忆（只作为辅助背景，不要把它当成论文事实）：\n${memoryContext}`,
+    learningState && `当前学习状态（已核实，优先依据它回答，不要重复追问已经记录的进展）：\n${learningState}`,
+    sessionContext
+  ].filter(Boolean);
+  const systemContent = contextBlocks.length ? `${SYSTEM_PROMPT}\n\n${contextBlocks.join("\n\n")}` : SYSTEM_PROMPT;
   const effectiveSystemContent = learningPathEnabled ? systemContent : systemContent + "\n\n当前学习路径功能已关闭。不要调用、推荐或推进学习路径；如果用户明确要求路径功能，请提示用户先到设置中开启。";
-  const apiMessages = [{ role: "system", content: effectiveSystemContent }, ...history.map((m) => ({
+  const apiMessages = [{ role: "system", content: effectiveSystemContent }, ...recentHistory.map((m) => ({
     role: m.role === "agent" ? "assistant" : "user",
-    content: normalizeContent(m.content || "")
+    content: [normalizeContent(m.content || ""), formatToolTrace(m.toolCalls)].filter(Boolean).join("\n\n")
   }))];
   const toolCalls = [];
   const usages = [];
@@ -338,7 +489,7 @@ export async function agentChat({ messages = [], config = {} }) {
       body: JSON.stringify({
         model,
         temperature: 0.4,
-        max_tokens: 1800,
+        max_tokens: messageRoundTokens(round),
         messages: apiMessages,
         tools: activeTools,
         tool_choice: "auto"

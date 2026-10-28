@@ -152,12 +152,26 @@ function readRawStore() {
 }
 
 export function loadAgentConfigStore() {
+  const desktop = typeof window !== "undefined" ? window.scholarloop : null;
+  if (desktop?.readAgentConfig) {
+    const saved = desktop.readAgentConfig();
+    if (saved !== null) return migrateAgentConfigStore(saved);
+    const legacy = readRawStore();
+    if (legacy !== null) {
+      const migrated = migrateAgentConfigStore(legacy);
+      desktop.writeAgentConfig(migrated);
+      return migrated;
+    }
+  }
   return migrateAgentConfigStore(readRawStore());
 }
 
 function persistStore(store) {
   const next = migrateAgentConfigStore(store);
-  if (typeof localStorage !== "undefined") {
+  const desktop = typeof window !== "undefined" ? window.scholarloop : null;
+  if (desktop?.writeAgentConfig) {
+    desktop.writeAgentConfig(next);
+  } else if (typeof localStorage !== "undefined") {
     localStorage.setItem(AGENT_CONFIG_KEY, JSON.stringify(next));
   }
   notifyAgentConfig(toAgentConfig(activeProviderFromStore(next)));
@@ -196,6 +210,7 @@ export function removeProvider(id) {
 }
 
 export function clearAgentConfig() {
+  if (typeof window !== "undefined" && window.scholarloop?.writeAgentConfig) window.scholarloop.writeAgentConfig(null);
   if (typeof localStorage !== "undefined") localStorage.removeItem(AGENT_CONFIG_KEY);
   notifyAgentConfig(null);
 }

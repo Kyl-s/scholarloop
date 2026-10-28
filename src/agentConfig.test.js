@@ -11,6 +11,36 @@ import {
   toAgentConfig,
   upsertProviderInStore
 } from "./agentConfig.js";
+import { loadAgentConfigStore, saveProvider, clearAgentConfig } from "./agentConfig.js";
+
+test("桌面配置跨端口恢复，迁移旧配置并防止清空后复活", () => {
+  const previousWindow = globalThis.window;
+  const previousStorage = globalThis.localStorage;
+  let durable = null;
+  let local = JSON.stringify({ apiKey: "fake-test-key", model: "deepseek-chat", baseUrl: "https://api.deepseek.com/v1" });
+  globalThis.window = {
+    dispatchEvent() {},
+    scholarloop: {
+      readAgentConfig: () => durable,
+      writeAgentConfig: (value) => { durable = value ?? { version: 2, activeId: "", providers: [] }; }
+    }
+  };
+  globalThis.localStorage = { getItem: () => local, removeItem: () => { local = null; } };
+  try {
+    assert.equal(loadAgentConfigStore().providers[0].model, "deepseek-chat");
+    assert.ok(durable);
+    local = null; // A different port has no browser config.
+    assert.equal(loadAgentConfigStore().providers[0].apiKey, "fake-test-key");
+    saveProvider({ id: durable.activeId, model: "deepseek-reasoner", apiKey: "fake-test-key", baseUrl: "https://api.deepseek.com/v1" }, { activate: true });
+    assert.equal(loadAgentConfigStore().providers[0].model, "deepseek-reasoner");
+    clearAgentConfig();
+    local = JSON.stringify({ apiKey: "stale-test-key" });
+    assert.deepEqual(loadAgentConfigStore().providers, []);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window; else globalThis.window = previousWindow;
+    if (previousStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = previousStorage;
+  }
+});
 
 test("按接口域名给出常用模型预设", () => {
   assert.ok(presetModels("https://api.deepseek.com/v1").includes("deepseek-chat"));

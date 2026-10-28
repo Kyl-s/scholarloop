@@ -222,7 +222,7 @@ export default function ApiConfigForm() {
           <label className="proxy-field">
             <span>
               <strong>API Key</strong>
-              <em>只保存在本机浏览器，不会写入 ScholarLoop 数据文件。</em>
+              <em>{window.scholarloop?.writeAgentConfig ? "加密保存在本机，重启后自动恢复。" : "只保存在本机浏览器，不会写入 ScholarLoop 数据文件。"}</em>
             </span>
             <input
               type="password"

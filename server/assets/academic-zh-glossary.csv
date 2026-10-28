@@ -50,3 +50,112 @@ however,然而,zh
 therefore,因此,zh
 in contrast,相比之下,zh
 consistent with,与……一致,zh
+affordance,可供性,zh
+affordances,可供性,zh
+value function,价值函数,zh
+value functions,价值函数,zh
+reward function,奖励函数,zh
+reward,奖励,zh
+reinforcement learning,强化学习,zh
+deep reinforcement learning,深度强化学习,zh
+inverse reinforcement learning,逆强化学习,zh
+sparse reward,稀疏奖励,zh
+reward shaping,奖励塑形,zh
+optimal policy,最优策略,zh
+policy,策略,zh
+policies,策略,zh
+Markov decision process,马尔可夫决策过程,zh
+dynamic programming,动态规划,zh
+approximate dynamic programming,近似动态规划,zh
+temporal difference,时序差分,zh
+value iteration,价值迭代,zh
+Q-learning,Q学习,zh
+sample efficiency,样本效率,zh
+imitation learning,模仿学习,zh
+behavioral cloning,行为克隆,zh
+curriculum learning,课程学习,zh
+domain randomization,域随机化,zh
+loss function,损失函数,zh
+objective function,目标函数,zh
+gradient descent,梯度下降,zh
+attention mechanism,注意力机制,zh
+neural network,神经网络,zh
+deep neural network,深度神经网络,zh
+convolutional,卷积的,zh
+machine learning,机器学习,zh
+deep learning,深度学习,zh
+large language model,大语言模型,zh
+large language models,大语言模型,zh
+language model,语言模型,zh
+LLM,大语言模型,zh
+prompt engineering,提示工程,zh
+fine-tuning,微调,zh
+fine-tune,微调,zh
+pre-training,预训练,zh
+pre-trained,预训练的,zh
+embedding,嵌入,zh
+embeddings,嵌入,zh
+multimodal,多模态,zh
+zero-shot,零样本,zh
+few-shot,少样本,zh
+end-to-end,端到端,zh
+state-of-the-art,最先进的,zh
+ablation study,消融实验,zh
+benchmark,基准,zh
+baseline,基线,zh
+fine-grained,细粒度,zh
+vision-language,视觉-语言,zh
+embodied AI,具身智能,zh
+embodied,具身,zh
+agent,智能体,zh
+agents,智能体,zh
+skill,技能,zh
+skills,技能,zh
+language instruction,语言指令,zh
+instruction following,指令遵循,zh
+grounding,接地,zh
+trajectory,轨迹,zh
+trajectories,轨迹,zh
+feasibility,可行性,zh
+feasible,可行的,zh
+probability,概率,zh
+robot,机器人,zh
+robots,机器人,zh
+robotic arm,机械臂,zh
+manipulator,机械臂,zh
+end effector,末端执行器,zh
+gripper,夹爪,zh
+humanoid,人形机器人,zh
+quadruped,四足机器人,zh
+mobile robot,移动机器人,zh
+autonomous driving,自动驾驶,zh
+navigation,导航,zh
+path planning,路径规划,zh
+motion planning,运动规划,zh
+obstacle,障碍物,zh
+obstacles,障碍物,zh
+point cloud,点云,zh
+camera,相机,zh
+simulation,仿真,zh
+simulator,仿真器,zh
+teleoperation,遥操作,zh
+success rate,成功率,zh
+exploration,探索,zh
+dataset,数据集,zh
+framework,框架,zh
+architecture,架构,zh
+related work,相关工作,zh
+conclusion,结论,zh
+contribution,贡献,zh
+contributions,贡献,zh
+evaluation,评估,zh
+experiment,实验,zh
+experiments,实验,zh
+assumption,假设,zh
+theorem,定理,zh
+lemma,引理,zh
+definition,定义,zh
+limitation,局限,zh
+future work,未来工作,zh
+quantitative,定量,zh
+qualitative,定性,zh

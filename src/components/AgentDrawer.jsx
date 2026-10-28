@@ -1,13 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Bot, X, Send, KeyRound, Trash2, Settings2, Sparkles, Search, Route, BookOpen, Loader2, Target, Play, BookmarkPlus } from "lucide-react";
-import { api } from "../api.js";
 import { Button, IconButton } from "./ui.jsx";
 import { useData } from "../store.jsx";
 import { renderMarkdown } from "./markdown.jsx";
 import { useAgentConfig } from "../agentConfig.js";
-import { clearJournalLink, persistAgentJournal } from "../agentJournal.js";
+import { persistAgentJournal } from "../agentJournal.js";
 
-const CHAT_KEY = "scholarloop.agent.chat";
+import { useAgentSession, sanitizeMessage } from "../agentSession.js";
 
 const QUICK_ACTIONS = [
   { label: "制定学习计划", prompt: "帮我制定一个 3 个月掌握大语言模型的完整学习计划" },
@@ -15,35 +14,6 @@ const QUICK_ACTIONS = [
   { label: "解释领域概念", prompt: "用适合小白的语言解释什么是注意力机制，并推荐入门论文" },
   { label: "帮我写论文", prompt: "我要写一篇关于大语言模型推理效率的综述，帮我搭建论文大纲" }
 ];
-
-function loadJSON(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function asText(text) {
-  if (typeof text === "string") return text;
-  if (Array.isArray(text)) {
-    return text
-      .map((part) => {
-        if (typeof part === "string") return part;
-        if (part && typeof part === "object") return part.text || part.content || JSON.stringify(part);
-        return String(part || "");
-      })
-      .join("\n");
-  }
-  return text ? String(text) : "";
-}
-
-function sanitizeMessage(m) {
-  if (!m || typeof m !== "object") return m;
-  const content = asText(m.content);
-  return content === m.content ? m : { ...m, content };
-}
 
 const TOOL_LABELS = {
   search_papers: { icon: Search, label: "检索论文" },
@@ -56,9 +26,7 @@ export default function AgentDrawer({ open, onClose, onNavigate }) {
   const { path, refresh, saveJournal, settings } = useData();
   const learningPathEnabled = settings?.learningPathEnabled !== false;
   const config = useAgentConfig();
-  const [messages, setMessages] = useState(() => (loadJSON(CHAT_KEY, []) || []).map(sanitizeMessage));
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
+  const { messages, input, setInput, busy, sendMessage, clearMessages } = useAgentSession();
   const [error, setError] = useState("");
   const [savedNote, setSavedNote] = useState("");
   const [saving, setSaving] = useState(false);
@@ -98,13 +66,11 @@ export default function AgentDrawer({ open, onClose, onNavigate }) {
 
   useEffect(() => {
     if (open) {
-      setMessages((loadJSON(CHAT_KEY, []) || []).map(sanitizeMessage));
       setError("");
     }
   }, [open]);
 
   useEffect(() => {
-    localStorage.setItem(CHAT_KEY, JSON.stringify(messages));
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
@@ -115,27 +81,13 @@ export default function AgentDrawer({ open, onClose, onNavigate }) {
       goSettings();
       return;
     }
-    setInput("");
     setError("");
     setSavedNote("");
-    const history = [...messages.map(sanitizeMessage), { role: "user", content }];
-    setMessages(history);
-    setBusy(true);
-    try {
-      const result = await api.agentChat({ messages: history, config });
-      setMessages([...history, { role: "agent", content: asText(result.content) || "Agent 没有返回内容。", toolCalls: result.toolCalls || [] }]);
-      if (result.toolCalls?.some((t) => t.name === "complete_task")) refresh();
-    } catch (err) {
-      setMessages([...history, { role: "agent", content: `出错了：${err.message}`, toolCalls: [] }]);
-    } finally {
-      setBusy(false);
-    }
+    await sendMessage(content, config, refresh);
   };
 
   const clearChat = () => {
-    setMessages([]);
-    localStorage.removeItem(CHAT_KEY);
-    clearJournalLink();
+    if (clearMessages()) setSavedNote("");
   };
 
   const configured = Boolean(config?.apiKey);
@@ -153,7 +105,7 @@ export default function AgentDrawer({ open, onClose, onNavigate }) {
         <div className="agent-head-actions">
           <IconButton icon={Settings2} label="API 设置" onClick={goSettings} />
           <IconButton icon={BookmarkPlus} label="保存思考记录" onClick={saveDiscussion} disabled={!canSave || saving} />
-          <IconButton icon={Trash2} label="清空对话" onClick={clearChat} />
+          <IconButton icon={Trash2} label="清空对话" onClick={clearChat} disabled={busy || !messages.length} />
           <IconButton icon={X} label="关闭" onClick={onClose} />
         </div>
       </div>
@@ -219,7 +171,7 @@ export default function AgentDrawer({ open, onClose, onNavigate }) {
 
           <div className="agent-quick">
             {quickActions.map((a) => (
-              <button key={a.label} onClick={() => send(a.prompt)}>{a.label}</button>
+              <button key={a.label} onClick={() => send(a.prompt)} disabled={busy}>{a.label}</button>
             ))}
           </div>
 

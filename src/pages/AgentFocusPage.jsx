@@ -18,14 +18,13 @@ import {
   ArrowRight,
   MessageSquarePlus
 } from "lucide-react";
-import { api } from "../api.js";
 import { Button, IconButton } from "../components/ui.jsx";
 import { useData } from "../store.jsx";
 import { renderMarkdown } from "../components/markdown.jsx";
 import { useAgentConfig } from "../agentConfig.js";
-import { clearJournalLink, persistAgentJournal } from "../agentJournal.js";
+import { persistAgentJournal } from "../agentJournal.js";
 
-const CHAT_KEY = "scholarloop.agent.chat";
+import { useAgentSession, sanitizeMessage } from "../agentSession.js";
 
 const QUICK_ACTIONS = [
   { label: "制定学习计划", prompt: "帮我制定一个 3 个月掌握大语言模型的完整学习计划" },
@@ -45,42 +44,11 @@ const TOOL_LABELS = {
 
 const STATUS_LABELS = { todo: "未开始", inprogress: "进行中", review: "待回顾", done: "已完成", skipped: "已跳过" };
 
-function loadJSON(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function asText(text) {
-  if (typeof text === "string") return text;
-  if (Array.isArray(text)) {
-    return text
-      .map((part) => {
-        if (typeof part === "string") return part;
-        if (part && typeof part === "object") return part.text || part.content || JSON.stringify(part);
-        return String(part || "");
-      })
-      .join("\n");
-  }
-  return text ? String(text) : "";
-}
-
-function sanitizeMessage(m) {
-  if (!m || typeof m !== "object") return m;
-  const content = asText(m.content);
-  return content === m.content ? m : { ...m, content };
-}
-
 export default function AgentFocusPage({ onOpenQuick, onNavigate }) {
   const { path, stats, refresh, saveJournal, settings } = useData();
   const learningPathEnabled = settings?.learningPathEnabled !== false;
   const config = useAgentConfig();
-  const [messages, setMessages] = useState(() => (loadJSON(CHAT_KEY, []) || []).map(sanitizeMessage));
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
+  const { messages, input, setInput, busy, sendMessage, clearMessages } = useAgentSession();
   const [error, setError] = useState("");
   const [savedNote, setSavedNote] = useState("");
   const [saving, setSaving] = useState(false);
@@ -103,7 +71,6 @@ export default function AgentFocusPage({ onOpenQuick, onNavigate }) {
   const canSave = messages.some((m) => m.role === "agent" && typeof m.content === "string" && m.content.trim() && !m.content.startsWith("出错了"));
 
   useEffect(() => {
-    localStorage.setItem(CHAT_KEY, JSON.stringify(messages));
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
@@ -120,27 +87,13 @@ export default function AgentFocusPage({ onOpenQuick, onNavigate }) {
       goSettings();
       return;
     }
-    setInput("");
     setError("");
     setSavedNote("");
-    const history = [...messages.map(sanitizeMessage), { role: "user", content }];
-    setMessages(history);
-    setBusy(true);
-    try {
-      const result = await api.agentChat({ messages: history, config });
-      setMessages([...history, { role: "agent", content: asText(result.content) || "Agent 没有返回内容。", toolCalls: result.toolCalls || [] }]);
-      if (result.toolCalls?.some((t) => t.name === "complete_task")) refresh();
-    } catch (err) {
-      setMessages([...history, { role: "agent", content: `出错了：${err.message}`, toolCalls: [] }]);
-    } finally {
-      setBusy(false);
-    }
+    await sendMessage(content, config, refresh);
   };
 
   const clearChat = () => {
-    setMessages([]);
-    localStorage.removeItem(CHAT_KEY);
-    clearJournalLink();
+    if (clearMessages()) setSavedNote("");
   };
 
   const saveDiscussion = async () => {
@@ -229,7 +182,7 @@ export default function AgentFocusPage({ onOpenQuick, onNavigate }) {
               {saving ? "保存中…" : "保存记录"}
             </Button>
             <span className="agent-focus-actions-split" aria-hidden="true" />
-            <Button size="sm" variant="ghost" icon={Trash2} className="agent-focus-clear" onClick={clearChat} disabled={!messages.length}>
+            <Button size="sm" variant="ghost" icon={Trash2} className="agent-focus-clear" onClick={clearChat} disabled={busy || !messages.length}>
               清空对话
             </Button>
           </div>
@@ -241,7 +194,7 @@ export default function AgentFocusPage({ onOpenQuick, onNavigate }) {
               <KeyRound size={22} />
               <div>
                 <strong>尚未配置 API</strong>
-                <p>请先到设置中填写 OpenAI 兼容的 API Key、接口地址和模型。Key 只保存在本机浏览器。</p>
+                <p>请先到设置中填写 OpenAI 兼容的 API Key、接口地址和模型。配置保存在本机。</p>
               </div>
             </div>
             {error ? <p className="agent-error">{error}</p> : null}
@@ -332,7 +285,7 @@ export default function AgentFocusPage({ onOpenQuick, onNavigate }) {
           <div className="focus-tools-head"><Sparkles size={14} /> 快捷指令</div>
           <div className="focus-tool-list">
             {quickActions.map((a) => (
-              <button key={a.label} onClick={() => send(a.prompt)}>
+              <button key={a.label} onClick={() => send(a.prompt)} disabled={busy}>
                 <ArrowRight size={13} />
                 {a.label}
               </button>
