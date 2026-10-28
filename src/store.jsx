@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api.js";
+import useSourceConnectivity from "./useSourceConnectivity.js";
 
 const DataContext = createContext(null);
 
@@ -14,6 +15,7 @@ export function DataProvider({ children }) {
   const [stats, setStats] = useState(null);
   const [meta, setMeta] = useState(null);
   const [ready, setReady] = useState(false);
+  const sourceConnectivity = useSourceConnectivity(meta?.sources, settings?.paperSources);
   const refreshSequence = useRef(0);
 
   const refresh = useCallback(async () => {
@@ -153,8 +155,8 @@ export function DataProvider({ children }) {
   }, [refresh]);
 
   const value = useMemo(
-    () => ({ library, memories, path, drafts, journals, notes, settings, stats, meta, ready, refresh, savePaper, updatePaper, removePaper, createMemory, updateMemory, deleteMemory, generatePath, updatePath, saveDraft, deleteDraft, saveJournal, deleteJournal, createNote, updateNote, deleteNote, updateSettings }),
-    [library, memories, path, drafts, journals, notes, settings, stats, meta, ready, refresh, savePaper, updatePaper, removePaper, createMemory, updateMemory, deleteMemory, generatePath, updatePath, saveDraft, deleteDraft, saveJournal, deleteJournal, createNote, updateNote, deleteNote, updateSettings]
+    () => ({ library, memories, path, drafts, journals, notes, settings, stats, meta, ready, refresh, sourceConnectivity, savePaper, updatePaper, removePaper, createMemory, updateMemory, deleteMemory, generatePath, updatePath, saveDraft, deleteDraft, saveJournal, deleteJournal, createNote, updateNote, deleteNote, updateSettings }),
+    [library, memories, path, drafts, journals, notes, settings, stats, meta, ready, refresh, sourceConnectivity, savePaper, updatePaper, removePaper, createMemory, updateMemory, deleteMemory, generatePath, updatePath, saveDraft, deleteDraft, saveJournal, deleteJournal, createNote, updateNote, deleteNote, updateSettings]
   );
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 }

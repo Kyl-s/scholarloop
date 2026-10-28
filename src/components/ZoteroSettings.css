@@ -1,0 +1,25 @@
+.zotero-settings-panel { grid-column: 1 / -1; min-width: 0; }
+.zotero-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 28px; margin-top: 20px; align-items: start; }
+.zotero-columns h3 { font-size: 14px; margin: 0 0 16px; }
+.zotero-connection { min-width: 0; }
+.zotero-settings-panel .settings-note-text, .zotero-muted, .zotero-help { font-size: 12px; line-height: 1.7; color: var(--muted); }
+.zotero-settings-panel .institution-actions { gap: 8px; }
+.zotero-help { margin-top: 18px; }
+.zotero-help summary, .zotero-results summary { cursor: pointer; }
+.zotero-help p { margin: 8px 0; }
+.zotero-progress { min-width: 0; }
+.zotero-settings-panel .zotero-progress { padding: 20px; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.zotero-stats { display: grid; grid-template-columns: 1.5fr repeat(3, 1fr); gap: 10px; margin-bottom: 18px; }
+.zotero-stats strong { display: block; font-size: 20px; }
+.zotero-stats span { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+.zotero-progress progress { width: 100%; margin-bottom: 14px; }
+.zotero-results summary { font-size: 13px; }
+.zotero-results ul { list-style: none; padding: 0; margin: 12px 0 0; }
+.zotero-results li { border-top: 1px solid var(--line); padding: 12px 0; }
+.zotero-result-head { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; }
+.zotero-result-head strong { font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.zotero-result-head .badge { flex-shrink: 0; }
+.zotero-file-status { font-size: 12px; line-height: 1.6; color: var(--muted); margin: 5px 0 0; overflow-wrap: anywhere; }
+.zotero-pagination { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+@media (max-width: 1100px) { .zotero-columns { grid-template-columns: minmax(0, 1fr); gap: 20px; } }
+@media (max-width: 540px) { .zotero-settings-panel .zotero-progress { padding: 12px; } .zotero-stats { gap: 6px; } .zotero-stats strong { font-size: 16px; } }

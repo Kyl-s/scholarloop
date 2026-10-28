@@ -62,6 +62,14 @@ export const api = {
     method: "POST",
     body: JSON.stringify(body)
   }), body?.config),
+  interpretGuide: async (body) => trackUsage("guide", await request("/api/pdf/interpret/guide", {
+    method: "POST",
+    body: JSON.stringify(body)
+  }), body?.config),
+  interpretGuideDialog: async (body) => trackUsage("guide", await request("/api/pdf/interpret/guide/dialog", {
+    method: "POST",
+    body: JSON.stringify(body)
+  }), body?.config),
   agentChat: async (body) => trackUsage("agent", await request("/api/agent/chat", {
     method: "POST",
     body: JSON.stringify(body || {})
@@ -110,6 +118,7 @@ export const api = {
   },
   getPdfLayoutTranslation: (id, config = {}, options = {}) => {
     const query = new URLSearchParams();
+    if (options.restoreOnly) query.set("restoreOnly", "true");
     const model = String(config?.model || "").trim();
     const baseUrl = String(config?.baseUrl || "").trim();
     if (model) query.set("model", model);
@@ -145,7 +154,7 @@ export const api = {
   deepAnalyze: (body) => request("/api/analyze/deep", { method: "POST", body: JSON.stringify(body) }),
   models: (body) => request("/api/agent/models", { method: "POST", body: JSON.stringify(body || {}) }),
   exportData: () => request("/api/data/export", { method: "POST" }),
-  checkPaperSource: (id) => request(`/api/sources/${encodeURIComponent(id)}/check`, { method: "POST" }),
+  checkPaperSource: (id) => request(`/api/sources/${encodeURIComponent(id)}/check`, { method: "POST", signal: AbortSignal.timeout(25000) }),
   exportDraft: (id) => request(`/api/drafts/${id}/export`, { method: "POST" }),
   importJournal: (body) => request("/api/journals/import", {
     method: "POST",

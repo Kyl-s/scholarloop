@@ -8,6 +8,8 @@ import { Badge, Button, EmptyState, IconButton, SourceTag, Spinner } from "../co
 import { loadAgentConfig } from "../agentConfig.js";
 import { isSafeBrowserUrl, normalizeBrowserUrl, createBrowserTab, createBlankBrowserTab, getBrowserTabLabel } from "../browserTabs.js";
 import { isDirectPdfUrl } from "../pdfSource.js";
+import { sourceStatusView } from "../sourceStatus.js";
+import SourceConnectivity from "../components/SourceConnectivity.jsx";
 
 const SOURCE_OPTIONS = [
   { id: "arxiv", label: "arXiv" },
@@ -52,8 +54,9 @@ const BROWSER_SITES = [
   ,{ id: "wos", label: "Web of Science", home: "https://www.webofscience.com", url: (q) => `https://www.webofscience.com/wos/woscc/basic-search?query=${encodeURIComponent(q)}` }
 ];
 
-export default function SearchPage({ initialQuery = "", savedSession = null, onSessionChange, onPaperSaved, onReadPdf, initialInstitutionOpen = false, initialPortalUrl = "", initialPortalTitle = "" }) {
-  const { library, savePaper, path, settings } = useData();
+export default function SearchPage({ initialQuery = "", savedSession = null, onSessionChange, onPaperSaved, onReadPdf, initialInstitutionOpen = false, initialPortalUrl = "", initialPortalTitle = "", portalDownloadActive = false }) {
+  const { library, savePaper, path, settings, sourceConnectivity } = useData();
+  const recordSourceSearch = sourceConnectivity.recordSearch;
   const learningPathEnabled = settings?.learningPathEnabled !== false;
   const institutionSite = useMemo(() => {
     const access = settings?.institutionAccess;
@@ -91,6 +94,9 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState([]);
+  const [searchMeta, setSearchMeta] = useState({});
+  const searchSequence = useRef(0);
+  useEffect(() => () => { searchSequence.current++; }, []);
   const [queries, setQueries] = useState([]);
   const [selected, setSelected] = useState(null);
   const [showFilters, setShowFilters] = useState(false);
@@ -102,6 +108,8 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
   const [activeBrowserTabId, setActiveBrowserTabId] = useState("");
   const [tabLoading, setTabLoading] = useState({});
   const [tabErrors, setTabErrors] = useState({});
+  const [portalPdfLoading, setPortalPdfLoading] = useState(false);
+  const [portalPdfMessage, setPortalPdfMessage] = useState("");
   const [tabTitles, setTabTitles] = useState({});
   const [browserAddress, setBrowserAddress] = useState("");
   const [aiPlanning, setAiPlanning] = useState(false);
@@ -127,6 +135,8 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
   const runSearch = useCallback(async (q, opts = {}) => {
     const term = (q ?? query).trim();
     if (!term) return;
+    const sequence = ++searchSequence.current;
+    let plan = null;
     setQuery(term);
     const sessionSources = opts.sources || sources;
     const sessionFromYear = opts.fromYear !== undefined ? opts.fromYear : fromYear;
@@ -136,12 +146,15 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
     const useAi = opts.aiSearch !== undefined ? opts.aiSearch : aiSearch;
     setLoading(true);
     setError("");
+    setStatus([]);
+    setQueries([]);
+    setSearchMeta({});
+    setAiPlan(null);
     setActiveQuery(term);
     setResultFilter("all");
     setPage(1);
     if (useAi) setAiPlanning(true);
     try {
-      let plan = null;
       if (useAi) {
         try {
           plan = await api.searchPlan({
@@ -154,6 +167,7 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
           plan = { queries: [term], rationale: "AI 规划暂时不可用，已退回关键词直搜。", mode: "keyword" };
         }
       }
+      if (sequence !== searchSequence.current) return;
       setAiPlan(plan);
       const data = await api.search({
         q: term,
@@ -165,6 +179,10 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
         sort: sessionSort,
         limit: 100
       });
+      if (sequence !== searchSequence.current) return;
+      recordSourceSearch(data.sourceStatus, data.completedAt);
+      const meta = { completedAt: data.completedAt, total: data.total, historical: false };
+      setSearchMeta(meta);
       const session = {
         query: term,
         activeQuery: term,
@@ -177,6 +195,8 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
         aiPlan: plan,
         results: data.papers,
         status: data.sourceStatus || [],
+        error: "",
+        searchMeta: meta,
         queries: data.queries || [],
         resultFilter: "all",
         browserOpen,
@@ -189,8 +209,10 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
       setQueries(session.queries);
       onSessionChange?.(session);
     } catch (err) {
+      if (sequence !== searchSequence.current) return;
       setError(err.message);
       setResults([]);
+      setStatus([]);
       setQueries([]);
       onSessionChange?.({
         query: term,
@@ -203,6 +225,7 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
         aiInstruction: sessionInstruction,
         aiPlan: plan,
         results: [],
+        error: err.message,
         status: [],
         queries: [],
         resultFilter: "all",
@@ -212,10 +235,12 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
         page
       });
     } finally {
-      setLoading(false);
-      setAiPlanning(false);
+      if (sequence === searchSequence.current) {
+        setLoading(false);
+        setAiPlanning(false);
+      }
     }
-  }, [query, sources, fromYear, toYear, sort, aiSearch, aiInstruction, learningPathEnabled, path?.field, path?.goal, browserOpen, browserTabs, activeBrowserTabId, page, onSessionChange]);
+  }, [query, sources, fromYear, toYear, sort, aiSearch, aiInstruction, learningPathEnabled, path?.field, path?.goal, browserOpen, browserTabs, activeBrowserTabId, page, onSessionChange, settings?.paperSources, recordSourceSearch]);
 
   const restoreSession = (session) => {
     if (!session) return;
@@ -227,6 +252,8 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
     setSort(session.sort || "authority");
     setResults(Array.isArray(session.results) ? session.results : null);
     setStatus(Array.isArray(session.status) ? session.status : []);
+    setError(session.error || "");
+    setSearchMeta({ ...session.searchMeta, historical: true });
     setQueries(Array.isArray(session.queries) ? session.queries : []);
     setShowFilters(Boolean(session.showFilters));
     setAiSearch(Boolean(session.aiSearch));
@@ -293,6 +320,8 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
       sort,
       results,
       status,
+      error,
+      searchMeta,
       queries,
       showFilters,
       aiSearch,
@@ -304,9 +333,14 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
       activeBrowserTabId,
       page
     });
-  }, [hydrated, query, activeQuery, sources, fromYear, toYear, sort, results, status, queries, showFilters, aiSearch, aiInstruction, aiPlan, resultFilter, page, browserOpen, browserTabs, activeBrowserTabId, onSessionChange]);
+  }, [hydrated, query, activeQuery, sources, fromYear, toYear, sort, results, status, error, searchMeta, queries, showFilters, aiSearch, aiInstruction, aiPlan, resultFilter, page, browserOpen, browserTabs, activeBrowserTabId, onSessionChange]);
 
   const clearSession = () => {
+    searchSequence.current++;
+    setLoading(false);
+    setAiPlanning(false);
+    setError("");
+    setSearchMeta({});
     setQuery("");
     setActiveQuery("");
     setSources(DEFAULT_SOURCES);
@@ -430,18 +464,51 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
   };
 
   const activeWebview = activeBrowserTabId ? webviewRefs.current.get(activeBrowserTabId) : null;
-  const openCurrentPageInReader = () => {
+  const openCurrentPageInReader = async () => {
     const currentUrl = isElectron ? (activeWebview?.getURL?.() || browserUrl) : browserUrl;
     if (!isSafeBrowserUrl(currentUrl)) return;
-    if (!isDirectPdfUrl(currentUrl)) {
-      setTabErrors((prev) => ({
-        ...prev,
-        [activeBrowserTabId]: "当前页不是可直接打开的 PDF。请打开 PDF 链接后再点「阅读当前 PDF」，或继续在门户中访问。"
-      }));
-      return;
-    }
     const currentTitle = isElectron ? (activeWebview?.getTitle?.() || tabTitles[activeBrowserTabId] || browserSite.label) : browserSite.label;
-    onReadPdf?.(currentUrl, currentTitle || "机构资源 PDF");
+    setPortalPdfLoading(true);
+    setPortalPdfMessage("正在查找当前页面的 PDF 链接…");
+    try {
+      let target = isDirectPdfUrl(currentUrl) ? currentUrl : "";
+      if (!target && activeWebview?.executeJavaScript) {
+        target = await activeWebview.executeJavaScript(`(() => {
+          const meta = document.querySelector('meta[name="citation_pdf_url"], meta[name="wkhealth_pdf_url"]');
+          const links = [...document.querySelectorAll('a[href],link[type="application/pdf"]')];
+          const form = [...document.querySelectorAll('form[action]')].find(f => {
+            const action = new URL(f.action, location.href);
+            return action.origin === location.origin && /\\.pdf$/i.test(action.pathname) && !f.querySelector('input[name],select[name],textarea[name]');
+          });
+          const found = meta?.content || links.find((a) => a.type === 'application/pdf' || /\\.pdf(?:[?#]|$)|\\/(?:doi\\/(?:e?pdf)|pdf)(?:\\/|[?#]|$)/i.test(a.href))?.href || form?.action;
+          if (!found) return '';
+          try { return new URL(found, location.href).href; } catch { return ''; }
+        })()`);
+      }
+      if (target && isSafeBrowserUrl(target)) {
+        if (typeof window.scholarloop?.downloadPortalPdf === "function") {
+          const result = await window.scholarloop.downloadPortalPdf(target, currentUrl);
+          if (result?.ok === false) throw new Error(result.error || "无法发起 PDF 下载");
+          setPortalPdfMessage("已发起 PDF 下载，将显示进度；下载完成后可入库并阅读。");
+        } else {
+          onReadPdf?.(target, currentTitle || "机构资源 PDF");
+          setPortalPdfMessage("");
+        }
+      } else {
+        const doi = currentUrl.match(/10\.\d{4,9}\/[^?#\s]+/i)?.[0] || "";
+        const paper = library.find((p) => p.url === currentUrl || (doi && p.doi === doi));
+        if (paper?.pdfUrl || paper?.localPdf) {
+          onReadPdf?.(paper.pdfUrl || "", paper.title, paper.doi, paper.id);
+          setPortalPdfMessage("");
+        } else {
+          setPortalPdfMessage("当前页面未提供可识别的 PDF 链接或下载表单。请先在网页完成访问授权，或打开原站 PDF 后重试；也可附加本地 PDF。");
+        }
+      }
+    } catch (error) {
+      setPortalPdfMessage(error.message || "获取 PDF 失败，请在门户中重试或使用本地 PDF。");
+    } finally {
+      setPortalPdfLoading(false);
+    }
   };
 
   const openCurrentPageInNewTab = () => {
@@ -564,11 +631,14 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
             <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="输入关键词、标题或研究方向，例如：transformer attention" />
             <button type="submit" disabled={loading}>{loading ? <Loader2 className="spin" size={17} /> : "搜索"}</button>
           </div>
+          <SourceConnectivity sources={SOURCE_OPTIONS} connectivity={sourceConnectivity} />
           <div className="source-pills">
+            <span className="muted">参与检索：</span>
             {SOURCE_OPTIONS.map((s) => (
               <button
                 key={s.id}
                 type="button"
+                aria-pressed={sources.includes(s.id)}
                 className={sources.includes(s.id) ? "pill on" : "pill"}
                 onClick={() => toggleSource(s.id)}
               >
@@ -684,8 +754,9 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
             <Button size="sm" variant="secondary" icon={ExternalLink} onClick={openCurrentPageInNewTab} disabled={!isSafeBrowserUrl(browserUrl)}>在新标签打开</Button>
             <IconButton icon={ExternalLink} label="用系统浏览器打开" onClick={() => window.open(browserUrl, "_blank", "noopener")} disabled={!isSafeBrowserUrl(browserUrl)} />
             {isElectron && browserSite.id === "institution" ? <Button size="sm" variant="secondary" icon={LogIn} onClick={openInstitutionLogin}>独立登录</Button> : null}
-            {isElectron ? <Button size="sm" icon={FileText} onClick={openCurrentPageInReader} disabled={!isDirectPdfUrl(browserUrl)}>阅读当前 PDF</Button> : null}
+            {isElectron ? <Button size="sm" icon={portalPdfLoading ? Loader2 : FileText} onClick={openCurrentPageInReader} disabled={portalPdfLoading || !isSafeBrowserUrl(browserUrl)}>{portalPdfLoading ? "正在获取…" : "获取 / 阅读 PDF"}</Button> : null}
           </div>
+          {portalPdfMessage ? <div className="browser-guide" role="status" aria-live="polite"><FileText size={14} />{portalPdfMessage}<button type="button" onClick={() => setPortalPdfMessage("")}>关闭提示</button></div> : null}
           <div className="browser-guide">
             <KeyRound size={14} />
             {isElectron
@@ -714,7 +785,7 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
                     useragent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                     webpreferences="contextIsolation=yes, nodeIntegration=no"
                     className={"browser-webview" + (tab.id === activeBrowserTabId ? " active" : "")}
-                    style={{ width: "100%", height: "100%", visibility: tab.id === activeBrowserTabId ? "visible" : "hidden", pointerEvents: tab.id === activeBrowserTabId ? "auto" : "none" }}
+                    style={{ width: "100%", height: "100%", visibility: tab.id === activeBrowserTabId && !portalDownloadActive ? "visible" : "hidden", pointerEvents: tab.id === activeBrowserTabId && !portalDownloadActive ? "auto" : "none" }}
                   />
                 ))}
                 {browserLoading && !activeBrowserTab?.blank ? <div className="browser-state"><Loader2 className="spin" size={18} /> 正在加载站点...</div> : null}
@@ -789,28 +860,42 @@ export default function SearchPage({ initialQuery = "", savedSession = null, onS
       <section className="results-section">
         {loading ? <Spinner text={aiPlanning ? "AI 正在规划检索词..." : "正在跨源检索..."} /> : null}
         {error ? <div className="error-banner"><strong>搜索失败</strong><p>{error}</p></div> : null}
+        {!loading && status.length > 0 ? (
+          <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+            <strong>{searchMeta.historical ? "上次检索" : "本次检索"}的数据源执行状态</strong>
+            <p className="muted">完整成功 {status.filter((s) => ["success", "empty"].includes(sourceStatusView(s).state)).length}/{status.length} 个来源
+              {searchMeta.completedAt ? ` · ${new Date(searchMeta.completedAt).toLocaleString()}` : " · 时间未记录"}。顶部按钮表示参与下一次检索的来源。</p>
+            <div className="source-status" style={{ flexWrap: "wrap" }}>
+              {status.map((s) => {
+                const view = sourceStatusView(s);
+                return <span key={s.id} className={view.tone}><i />{SOURCE_OPTIONS.find((x) => x.id === s.id)?.label || s.id}：{view.label}</span>;
+              })}
+            </div>
+            <details style={{ marginTop: 10 }}><summary>查看请求与结果详情</summary>
+              {status.map((s) => <p key={s.id}>
+                <strong>{SOURCE_OPTIONS.find((x) => x.id === s.id)?.label || s.id}</strong> · {s.successfulQueries ?? (s.ok ? 1 : 0)}/{s.attemptedQueries ?? 1} 个查询成功
+                {s.attempts !== undefined ? ` · ${s.attempts} 次执行（含重试）` : ""}
+                {s.uniqueCount !== undefined ? ` · 原始 ${s.count} 条 / 去重 ${s.uniqueCount} 条 / 筛选后 ${s.filteredCount} 条 / 展示 ${s.displayedCount} 条` : ""}
+                {s.error ? <><br /><span className="error-text">{s.errors?.[0]?.type ? `[${s.errors[0].type}] ` : ""}{s.error}</span></> : null}
+              </p>)}
+            </details>
+          </div>
+        ) : null}
         {!loading && !error && results === null ? (
           <EmptyState icon={Search} title="开始你的第一次聚合检索" desc="输入研究方向或论文关键词，选择来源后点击搜索。" />
         ) : null}
-        {!loading && results !== null && results.length === 0 ? (
-          <EmptyState icon={FileText} title="没有找到结果" desc="换一组关键词，或放宽年份与来源筛选后重试。" action={<Button size="sm" icon={RotateCw} onClick={() => runSearch()}>重新搜索</Button>} />
+        {!loading && !error && results !== null && results.length === 0 ? (
+          <EmptyState icon={FileText} title={status.length && !status.some((s) => s.ok) ? "数据源未能完成检索" : "没有匹配的展示结果"} desc={status.length && !status.some((s) => s.ok) ? "请查看来源状态与错误详情，检查授权或稍后重试。" : "来源可能返回零条，或论文被年份、相关性筛选移除；请查看上方详情。"} action={<Button size="sm" icon={RotateCw} onClick={() => runSearch()}>重新搜索</Button>} />
         ) : null}
         {!loading && results?.length ? (
           <>
             <div className="results-head">
               <div>
                 <h3>“{activeQuery}”的结果</h3>
-                <span>共 {results.length} 条 · {status.filter((s) => s.ok).length}/{status.length} 个来源可用</span>
+                <span>展示 {results.length} 篇去重论文{searchMeta.total > results.length ? ` · 筛选后共 ${searchMeta.total} 篇（最多展示 100 篇）` : ""} · 同一论文可属于多个来源，来源数量不可相加</span>
                 {queries.length > 1 ? <em className="query-expanded">已同时检索：{queries.join(" / ")}</em> : null}
               </div>
               <div className="results-actions">
-                <div className="source-status">
-                  {status.map((s) => (
-                    <span key={s.id} className={s.ok ? "ok" : "fail"} title={s.error || ""}>
-                      <i /> {SOURCE_OPTIONS.find((x) => x.id === s.id)?.label.split(" ")[0] || s.id}
-                    </span>
-                  ))}
-                </div>
                 <Button variant="ghost" size="sm" icon={Trash2} onClick={clearSession}>清空结果</Button>
               </div>
             </div>

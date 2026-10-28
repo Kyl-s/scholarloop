@@ -3,22 +3,85 @@ import { XMLParser } from "fast-xml-parser";
 import { getSearchCache, setSearchCache } from "./store.js";
 import { getProxyUrl, fetchWithFallback } from "./proxy.js";
 import { asDirectPdfUrl, preferPdfUrl } from "../src/pdfSource.js";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
+import { classifySourceError, summarizeSourceStatus } from "../src/sourceStatus.js";
 
 const TIMEOUT = 15000;
 const AGENT = "ScholarLoop/0.1 (research desktop app; mailto:local@scholarloop.app)";
+const searchContext = new AsyncLocalStorage();
+const sourceQueues = new Map();
+export const sourceTransport = {
+  fetch: (url, options) => fetchWithFallback(url, options, getProxyUrl())
+};
+
+function requestTimeout(options) {
+  const remaining = (searchContext.getStore()?.deadline || Infinity) - Date.now();
+  if (remaining <= 0) throw Object.assign(new Error("搜索时间预算已耗尽"), { code: "TIMEOUT" });
+  return Math.min(options.timeout || TIMEOUT, remaining);
+}
+
+function httpError(res) {
+  const error = Object.assign(new Error(`${res.status} ${res.statusText}`), { status: res.status });
+  const retryAfter = res.headers?.get("retry-after");
+  error.retryAfterMs = retryAfter ? Math.max(0, Number(retryAfter) * 1000 || Date.parse(retryAfter) - Date.now() || 0) : 0;
+  return error;
+}
+
+export function requireSourceArray(value, source) {
+  if (!Array.isArray(value)) throw Object.assign(new Error(`${source} 响应结构异常或返回业务错误，请稍后重试或打开门户`), { code: "INVALID_RESPONSE" });
+  return value;
+}
+
+async function queueSource(id, job) {
+  const previous = sourceQueues.get(id) || Promise.resolve();
+  const current = previous.catch(() => {}).then(async () => {
+    const started = Date.now();
+    const context = { ...searchContext.getStore(), attempts: 0 };
+    return searchContext.run(context, async () => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        requestTimeout({});
+        context.attempts++;
+        try {
+          const papers = await job();
+          return { papers, attempts: context.attempts, elapsedMs: Date.now() - started };
+        } catch (error) {
+          error.attempts = context.attempts;
+          error.elapsedMs = Date.now() - started;
+          if (attempt || ![429, 500, 502, 503, 504].includes(error.status)) throw error;
+          const delay = error.retryAfterMs || 800 + Math.floor(Math.random() * 400);
+          if (delay >= (context.deadline || Infinity) - Date.now()) throw error;
+          await sleep(delay);
+        }
+      }
+    });
+  });
+  sourceQueues.set(id, current);
+  try { return await current; }
+  finally { if (sourceQueues.get(id) === current) sourceQueues.delete(id); }
+}
 
 async function fetchJson(url, options = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.timeout || TIMEOUT);
+  const timer = setTimeout(() => controller.abort(), requestTimeout(options));
   try {
-    const res = await fetchWithFallback(url, {
+    const res = await sourceTransport.fetch(url, {
       headers: { "User-Agent": AGENT, Accept: "application/json", ...(options.headers || {}) },
       method: options.method || "GET",
       body: options.body,
       signal: controller.signal
-    }, getProxyUrl());
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    return await res.json();
+    });
+    if (!res.ok) throw httpError(res);
+    let json;
+    try { json = await res.json(); }
+    catch (error) {
+      if (controller.signal.aborted) throw error;
+      throw Object.assign(new Error("数据源返回非 JSON 或无法解析的响应"), { code: "INVALID_RESPONSE" });
+    }
+    if (json?.error || json?.errors || json?.esearchresult?.ERROR || json?.success === false || Number(json?.code) >= 400) {
+      throw Object.assign(new Error("数据源返回业务错误，未获得有效搜索响应"), { code: "INVALID_RESPONSE" });
+    }
+    return json;
   } finally {
     clearTimeout(timer);
   }
@@ -26,15 +89,15 @@ async function fetchJson(url, options = {}) {
 
 async function fetchText(url, options = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.timeout || TIMEOUT);
+  const timer = setTimeout(() => controller.abort(), requestTimeout(options));
   try {
-    const res = await fetchWithFallback(url, {
+    const res = await sourceTransport.fetch(url, {
       headers: { "User-Agent": AGENT, ...(options.headers || {}) },
       method: options.method || "GET",
       body: options.body,
       signal: controller.signal
-    }, getProxyUrl());
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    });
+    if (!res.ok) throw httpError(res);
     return await res.text();
   } finally {
     clearTimeout(timer);
@@ -273,7 +336,17 @@ async function addMissingLanguageQueries(queries, clean, baseUrl, apiKey, model)
       .slice(0, 3);
     list.push(...extra);
   }
-  return [...new Set(list)].slice(0, 6);
+  return selectLanguageQueries(list);
+}
+
+export function selectLanguageQueries(queries) {
+  const list = [...new Set(queries.map((query) => String(query).trim()).filter(Boolean))];
+  const selected = list.slice(0, 6);
+  for (const chinese of [true, false]) {
+    const candidate = list.find((query) => hasCjk(query) === chinese);
+    if (candidate && !selected.some((query) => hasCjk(query) === chinese)) selected[selected.length - 1] = candidate;
+  }
+  return selected;
 }
 
 export async function expandQuery(q, config = {}) {
@@ -530,6 +603,8 @@ async function searchArxiv(q, limit) {
   const xml = await fetchText(url, { headers: { Accept: "application/atom+xml" } });
   const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_" });
   const json = parser.parse(xml);
+  const responseEntries = Array.isArray(json?.feed?.entry) ? json.feed.entry : [json?.feed?.entry];
+  if (!json?.feed || responseEntries.some((entry) => String(entry?.id || "").includes("api/errors"))) throw Object.assign(new Error("arXiv 响应结构异常或查询被拒绝"), { code: "INVALID_RESPONSE" });
   let entries = json?.feed?.entry;
   if (!entries) return [];
   if (!Array.isArray(entries)) entries = [entries];
@@ -575,7 +650,7 @@ async function searchOpenAlex(q, limit, fromYear, toYear) {
     params.set("filter", existing ? `${existing},to_publication_date:${toYear}-12-31` : `to_publication_date:${toYear}-12-31`);
   }
   const json = await fetchJson(`https://api.openalex.org/works?${params.toString()}`);
-  const results = json.results || [];
+  const results = requireSourceArray(json?.results, "OpenAlex");
   const maxRelevance = Math.max(0, ...results.map((w) => Number(w.relevance_score) || 0));
   return results.map((w) => {
     const abstract = reconstructAbstract(w.abstract_inverted_index);
@@ -602,18 +677,8 @@ async function searchOpenAlex(q, limit, fromYear, toYear) {
 
 async function searchSemanticScholar(q, limit) {
   const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(q)}&limit=${Math.min(limit, 100)}&fields=title,abstract,year,venue,citationCount,authors,url,externalIds,openAccessPdf,publicationTypes,tldr,paperId`;
-  let json;
-  try {
-    json = await fetchJson(url);
-  } catch (err) {
-    if (String(err.message).includes("429")) {
-      await new Promise((r) => setTimeout(r, 1200));
-      json = await fetchJson(url);
-    } else {
-      throw err;
-    }
-  }
-  return (json.data || []).map((p) =>
+  const json = await fetchJson(url);
+  return requireSourceArray(json?.data, "Semantic Scholar").map((p) =>
     toPaper({
       source: "semanticscholar",
       sourceLabel: "Semantic Scholar",
@@ -641,11 +706,12 @@ async function searchPubMed(q, limit, fromYear, toYear) {
   if (toYear) term += ` AND 0001:${toYear}[dp]`;
   const esearchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodeURIComponent(term)}&retmode=json&retmax=${Math.min(limit, 50)}&sort=relevance&tool=scholarloop&email=local@scholarloop.app`;
   const search = await fetchJson(esearchUrl);
-  const ids = search?.esearchresult?.idlist || [];
+  const ids = requireSourceArray(search?.esearchresult?.idlist, "PubMed");
   if (!ids.length) return [];
   const esummaryUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&retmode=json&id=${ids.join(",")}&tool=scholarloop&email=local@scholarloop.app`;
   const summary = await fetchJson(esummaryUrl);
   const result = summary?.result || {};
+  if (ids.some((id) => !result[id]?.title || result[id]?.error)) throw Object.assign(new Error("PubMed 元数据响应不完整"), { code: "INVALID_RESPONSE" });
   return ids.map((id, i) => {
     const item = result[id];
     return toPaper({
@@ -681,7 +747,7 @@ async function searchCrossref(q, limit, fromYear, toYear) {
     params.set("filter", existing ? `${existing},until-pub-date:${toYear}-12-31` : `until-pub-date:${toYear}-12-31`);
   }
   const json = await fetchJson(`https://api.crossref.org/works?${params.toString()}`);
-  return (json.message?.items || []).map((w) => {
+  return requireSourceArray(json?.message?.items, "Crossref").map((w) => {
     const year = w.issued?.["date-parts"]?.[0]?.[0] || null;
     const link = (w.link || []).find((l) => l["content-type"]?.includes("pdf"));
     return toPaper({
@@ -735,9 +801,19 @@ export function normalizeIeeeArticle(a = {}) {
 async function searchIeee(q, limit, fromYear, toYear, credentials = {}) {
   const apiKey = String(credentials.apiKey || "").trim();
   if (!apiKey) throw new Error("IEEE Xplore 未配置 API Key；可从搜索页打开门户");
-  const params = new URLSearchParams({ querytext: q, max_records: String(Math.min(limit, 200)), start_record: "1" });
-  const json = await fetchJson(`https://ieeexploreapi.ieee.org/api/v1/search/articles?${params}`, { headers: { apikey: apiKey } });
-  const articles = Array.isArray(json?.articles) ? json.articles : [];
+  const params = new URLSearchParams({ querytext: q, max_records: String(Math.min(limit, 200)), start_record: "1", apikey: apiKey });
+  let json;
+  try {
+    json = await fetchJson(`https://ieeexploreapi.ieee.org/api/v1/search/articles?${params}`);
+  } catch (error) {
+    const encodedKey = new URLSearchParams({ apikey: apiKey }).toString().slice(7);
+    error.message = String(error.message || "IEEE Xplore 请求失败")
+      .replaceAll(apiKey, "[redacted]")
+      .replaceAll(encodeURIComponent(apiKey), "[redacted]")
+      .replaceAll(encodedKey, "[redacted]");
+    throw error;
+  }
+  const articles = requireSourceArray(json?.articles, "IEEE Xplore");
   return articles.map(normalizeIeeeArticle).filter((paper) => (!fromYear || !paper.year || Number(paper.year) >= Number(fromYear)) && (!toYear || !paper.year || Number(paper.year) <= Number(toYear)));
 }
 
@@ -750,13 +826,14 @@ function wosIdentifier(record, type) {
 export function normalizeWosHit(hit = {}) {
   const record = hit?.source?.record || hit?.record || hit;
   const title = stringValue(record.title) || stringValue(record.titles?.title) || stringValue(hit.title);
-  const authorBlock = record.names?.authors?.author || record.authors?.author || record.authors || hit.names?.authors?.author || hit.authors;
+  const authorBlock = record.names?.authors?.author || record.names?.authors || record.authors?.author || record.authors || hit.names?.authors?.author || hit.names?.authors || hit.authors;
   const links = listValue(record.links || hit.links);
   const recordLink = links.find((link) => String(link?.type || link?.name || "").toLowerCase().includes("record"));
-  const published = record.published || record.publicationDate || record.pub_info?.pubyear || record.year || hit.published || hit.year;
+  const published = record.published || record.publicationDate || record.pub_info?.pubyear || record.source?.publishYear || record.year || hit.published || hit.year;
   const source = record.source || hit.source;
   const abstract = record.abstract?.value || record.abstract?.text || record.abstract || hit.abstract;
-  const keywords = record.keywords?.keyword || record.keywords || hit.keywords || [];
+  const keywords = record.keywords?.authorKeywords || record.keywords?.keyword || record.keywords || hit.keywords || [];
+  const citationCount = Array.isArray(record.citations) ? (record.citations.find((item) => item.db === "WOS") || record.citations[0])?.count : record.citations?.count;
   const articleId = record.uid || hit.uid || wosIdentifier(record, "uid") || title;
   const doi = normalizeDoi(wosIdentifier(record, "doi"));
   return toPaper({
@@ -769,10 +846,10 @@ export function normalizeWosHit(hit = {}) {
     authors: listValue(authorBlock).map(authorName).filter(Boolean),
     venue: stringValue(typeof source === "string" ? source : source?.title || source?.sourceTitle || record.sourceTitle || hit.sourceTitle),
     abstract: stringValue(abstract),
-    url: recordLink?.url || recordLink?.value || record.url || hit.url || (doi ? `https://doi.org/${doi}` : ""),
+    url: record.links?.record || recordLink?.url || recordLink?.value || record.url || hit.url || (doi ? `https://doi.org/${doi}` : ""),
     pdfUrl: "",
     keywords: listValue(keywords).map(stringValue).filter(Boolean),
-    citations: Number(record.citations?.count || record.timesCited || hit.citations || hit.timesCited) || 0,
+    citations: Number(citationCount ?? record.timesCited ?? hit.timesCited) || 0,
     relevance: Number(hit.relevance || record.relevance) || 0.75,
     type: String(record.types?.[0] || record.type || hit.type || "article").toLowerCase().includes("review") ? "review" : "article"
   });
@@ -781,26 +858,62 @@ export function normalizeWosHit(hit = {}) {
 async function searchWos(q, limit, fromYear, toYear, credentials = {}) {
   const apiKey = String(credentials.apiKey || "").trim();
   if (!apiKey) throw new Error("Web of Science 未配置 API Key；可从搜索页打开门户");
-  const params = new URLSearchParams({ db: String(credentials.database || "WOS"), q, limit: String(Math.min(limit, 50)), firstRecord: "1" });
+  const query = /^[A-Z]{2,5}\s*=/i.test(q) ? q : `TS=(${q})`;
+  const params = new URLSearchParams({ db: String(credentials.database || "WOS"), q: query, limit: String(Math.min(limit, 50)), page: "1" });
   const json = await fetchJson(`https://api.clarivate.com/apis/wos-starter/v1/documents?${params}`, { headers: { "X-ApiKey": apiKey, Accept: "application/json" } });
-  const records = Array.isArray(json?.hits) ? json.hits : Array.isArray(json?.hits?.hit) ? json.hits.hit : Array.isArray(json?.documents) ? json.documents : Array.isArray(json?.data) ? json.data : [];
+  const records = requireSourceArray(Array.isArray(json?.hits) ? json.hits : json?.hits?.hit ?? json?.documents ?? json?.data, "Web of Science");
   return records.map(normalizeWosHit).filter((paper) => (!fromYear || !paper.year || Number(paper.year) >= Number(fromYear)) && (!toYear || !paper.year || Number(paper.year) <= Number(toYear)));
 }
+const paperSourceChecks = new Map();
+const PAPER_SOURCE_CHECK_TTL = 60000;
+
 export async function checkPaperSource(id, credentials = {}) {
   const source = PAPER_SOURCE_PORTALS[id];
-  if (!source) return { id, ok: false, configured: false, error: "不支持的数据源" };
   const apiKey = String(credentials.apiKey || "").trim();
-  if (credentials.enabled === false) return { id, ok: false, configured: Boolean(apiKey), enabled: false, portal: source.home, error: "该来源已在设置中停用" };
-  if (!apiKey) return { id, ok: false, configured: false, enabled: true, portal: source.home, error: `${source.label} 未配置 API Key；可从搜索页打开门户` };
-  try {
-    const papers = id === "ieee"
-      ? await searchIeee("scholarloop connection test", 1, "", "", credentials)
-      : await searchWos("TS=(scholarloop connection test)", 1, "", "", credentials);
-    return { id, ok: true, configured: true, enabled: true, portal: source.home, count: papers.length };
-  } catch (err) {
-    const detail = redactSensitiveError(err?.message || "连接失败", [apiKey]).slice(0, 240);
-    return { id, ok: false, configured: true, enabled: true, portal: source.home, error: detail };
+  const configured = !source || Boolean(apiKey);
+  const base = { id, ok: false, configured, enabled: credentials.enabled !== false, portal: source?.home || "", count: 0, latencyMs: 0, errorType: null };
+  const immediate = (state, error) => ({ ...base, state, error, checkedAt: new Date().toISOString() });
+  if (!PAPER_SOURCE_IDS.includes(id)) return { ...immediate("unsupported", "不支持的数据源"), configured: false };
+  if (!base.enabled || !configured) {
+    paperSourceChecks.delete(id);
+    return !base.enabled ? immediate("disabled", "该来源已在设置中停用") : immediate("unconfigured", `${source.label} 未配置 API Key；可从搜索页打开门户`);
   }
+
+  // 仅保留配置摘要；配置变更后不可复用旧授权的探测结果。
+  const signature = createHash("sha256").update(JSON.stringify([apiKey, credentials.enabled !== false, String(credentials.database || "WOS"), getProxyUrl() || ""])).digest("hex");
+  const existing = paperSourceChecks.get(id);
+  if (existing?.signature === signature) {
+    if (existing.promise) return existing.promise;
+    if (Date.now() - existing.completedAt < PAPER_SOURCE_CHECK_TTL) return { ...existing.result };
+  }
+  const entry = { signature };
+  paperSourceChecks.set(id, entry);
+  entry.promise = searchContext.run({ deadline: Date.now() + 15000, connectivityCheck: true }, async () => {
+    const started = Date.now();
+    let result;
+    let timer;
+    try {
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error("连接检测超时，请稍后重试"), { code: "TIMEOUT" })), 15000);
+      });
+      const { settled } = await Promise.race([
+        runSources("machine learning", [id], 1, "", "", { [id]: { ...credentials } }),
+        timeout
+      ]);
+      if (settled[0].status === "rejected") throw settled[0].reason;
+      result = { ...base, ok: true, state: "connected", count: settled[0].value.papers.length, error: null };
+    } catch (error) {
+      const classified = classifySourceError(error);
+      result = { ...base, state: "failed", errorType: classified.type, httpStatus: classified.httpStatus, error: redactSensitiveError(error?.message || "连接失败", [apiKey]).slice(0, 240) };
+    } finally {
+      clearTimeout(timer);
+    }
+    entry.completedAt = Date.now();
+    entry.result = { ...result, checkedAt: new Date(entry.completedAt).toISOString(), latencyMs: entry.completedAt - started };
+    entry.promise = null;
+    return { ...entry.result };
+  });
+  return entry.promise;
 }
 async function runSources(q, sources, perSource, fromYear, toYear, sourceCredentials = {}) {
   const jobs = {
@@ -813,18 +926,17 @@ async function runSources(q, sources, perSource, fromYear, toYear, sourceCredent
     ieee: () => searchIeee(q, perSource, fromYear, toYear, sourceCredentials.ieee),
     wos: () => searchWos(q, perSource, fromYear, toYear, sourceCredentials.wos)
   };
-  const settled = await Promise.allSettled(sources.map((s) => jobs[s]()));
+  const settled = await Promise.allSettled(sources.map((s) => queueSource(s, jobs[s])));
   const papers = [];
   const seen = new Set();
   settled.forEach((res, i) => {
     if (res.status === "rejected") {
-      console.warn(`[${sources[i]}] ${res.reason?.message || res.reason}`);
       return;
     }
-    for (const paper of res.value) {
-      const key = paper.doi || normId(paper.title);
+    for (const paper of res.value.papers) {
+      const key = paperKey(paper);
       if (!key) continue;
-      const existing = papers.find((item) => (item.doi || normId(item.title)) === key);
+      const existing = papers.find((item) => paperKey(item) === key);
       if (existing) {
         mergePaperRecord(existing, paper);
         continue;
@@ -838,19 +950,31 @@ async function runSources(q, sources, perSource, fromYear, toYear, sourceCredent
 }
 
 export async function searchPapers(q, opts = {}) {
+  return searchContext.run({ deadline: Date.now() + 60000 }, () => executeSearch(q, opts));
+}
+
+function paperKey(paper) {
+  return paper.doi ? String(normalizeDoi(paper.doi)).toLowerCase() : normId(paper.title);
+}
+
+async function executeSearch(q, opts) {
   const limit = Math.max(5, Math.min(100, Number(opts.limit) || 30));
   const selectedSources = [...new Set((opts.sources || ["arxiv", "openalex", "semanticscholar", "pubmed", "crossref", "cnki"]).filter((s) => PAPER_SOURCE_IDS.includes(s)))];
   const sourceCredentials = opts.sourceCredentials || {};
-  const sources = selectedSources.filter((s) => !["ieee", "wos"].includes(s) || sourceCredentials[s]?.enabled !== false);
+  const sources = selectedSources.filter((s) => sourceCredentials[s]?.enabled !== false && (!["ieee", "wos"].includes(s) || String(sourceCredentials[s]?.apiKey || "").trim()));
   const perSource = Math.max(5, Math.min(16, Math.ceil((limit + 5) / Math.max(1, sources.length)) + 2));
   let queries = Array.isArray(opts.queries) && opts.queries.length
-    ? [...new Set(opts.queries.map((x) => String(x).trim()).filter(Boolean))].slice(0, 6)
+    ? selectLanguageQueries(opts.queries)
     : await expandQuery(q, opts.config);
   if (!queries.length) queries = [q];
   const merged = [];
   const seen = new Set();
   const status = selectedSources.map((s) => ({ id: s, ok: false, count: 0, error: sourceCredentials[s]?.enabled === false ? "该来源已在设置中停用" : null, access: ["ieee", "wos"].includes(s) ? "api-key" : "public", portal: PAPER_SOURCE_PORTALS[s]?.home || "", configured: !["ieee", "wos"].includes(s) || Boolean(sourceCredentials[s]?.apiKey), enabled: sourceCredentials[s]?.enabled !== false }));
   const statusIndex = new Map(selectedSources.map((s, i) => [s, i]));
+  for (const st of status) {
+    Object.assign(st, { attemptedQueries: 0, successfulQueries: 0, failedQueries: 0, attempts: 0, errors: [], elapsedMs: 0 });
+    if (!st.configured && st.enabled) st.error = "未配置 API Key；可从搜索页打开门户";
+  }
   const cjkQueries = queries.filter(hasCjk);
   const latinQueries = queries.filter((query) => !hasCjk(query));
 
@@ -866,20 +990,28 @@ export async function searchPapers(q, opts = {}) {
     const { papers, settled } = await runSources(query, querySources, perSource, opts.fromYear, opts.toYear, sourceCredentials);
     settled.forEach((res, i) => {
       const st = status[statusIndex.get(querySources[i])];
+      st.attemptedQueries++;
+      st.elapsedMs += res.status === "fulfilled" ? res.value.elapsedMs : res.reason?.elapsedMs || 0;
       if (res.status === "fulfilled") {
         st.ok = true;
-        st.count += (res.value || []).length;
-      } else if (!st.error) {
-        st.error = redactSensitiveError(res.reason?.message || res.reason, [
+        st.successfulQueries++;
+        st.attempts += res.value.attempts;
+        st.count += res.value.papers.length;
+      } else {
+        st.failedQueries++;
+        st.attempts += res.reason?.attempts || 0;
+        const message = redactSensitiveError(res.reason?.message || res.reason, [
           sourceCredentials?.[querySources[i]]?.apiKey,
           opts.config?.apiKey
-        ]);
+        ]).slice(0, 240);
+        st.error ||= message;
+        st.errors.push({ queryIndex: queries.indexOf(query), ...classifySourceError(res.reason), message });
       }
     });
     for (const paper of papers) {
-      const key = paper.doi || normId(paper.title);
+      const key = paperKey(paper);
       if (!key) continue;
-      const existing = merged.find((item) => (item.doi || normId(item.title)) === key);
+      const existing = merged.find((item) => paperKey(item) === key);
       if (existing) {
         mergePaperRecord(existing, paper);
         continue;
@@ -890,7 +1022,8 @@ export async function searchPapers(q, opts = {}) {
     }
   });
 
-  const scored = scoreMergedPapers(merged, queries);
+  const yearFiltered = merged.filter((paper) => (!opts.fromYear || paper.year && Number(paper.year) >= Number(opts.fromYear)) && (!opts.toYear || paper.year && Number(paper.year) <= Number(opts.toYear)));
+  const scored = scoreMergedPapers(yearFiltered, queries);
   const sort = opts.sort || "relevance";
   let ordered;
   if (sort === "authority") {
@@ -903,7 +1036,17 @@ export async function searchPapers(q, opts = {}) {
       return b.relevance - a.relevance || b.year - a.year;
     });
   }
-  return { query: q, queries, total: scored.length, papers: ordered.slice(0, limit), sourceStatus: status };
+  const papers = ordered.slice(0, limit);
+  const completedAt = new Date().toISOString();
+  for (const st of status) {
+    const belongs = (paper) => (paper.sources || [paper.source]).includes(st.id);
+    st.uniqueCount = merged.filter(belongs).length;
+    st.filteredCount = scored.filter(belongs).length;
+    st.displayedCount = papers.filter(belongs).length;
+    st.state = summarizeSourceStatus(st);
+    st.completedAt = completedAt;
+  }
+  return { query: q, queries, total: scored.length, papers, sourceStatus: status, completedAt };
 }
 
 function sourceStatus(settled, sources) {
@@ -1111,19 +1254,13 @@ const cnkiCache = new Map();
 const CNKI_CACHE_TTL = 10 * 60 * 1000;
 
 async function searchCnki(q, limit, fromYear, toYear) {
-  const cacheKey = `${q}|${fromYear || ""}|${toYear || ""}`;
+  if (searchContext.getStore()?.connectivityCheck) return fetchCnki(q, limit, fromYear, toYear);
+  const cacheKey = `${q}|${fromYear || ""}|${toYear || ""}|${limit}`;
   const hit = cnkiCache.get(cacheKey);
-  if (hit && Date.now() - hit.time < CNKI_CACHE_TTL) return hit.data;
-  try {
-    const data = await fetchCnki(q, limit, fromYear, toYear);
-    cnkiCache.set(cacheKey, { data, time: Date.now() });
-    return data;
-  } catch (err) {
-    await sleep(800);
-    const data = await fetchCnki(q, limit, fromYear, toYear);
-    cnkiCache.set(cacheKey, { data, time: Date.now() });
-    return data;
-  }
+  if (hit && Date.now() - hit.time < CNKI_CACHE_TTL) return structuredClone(hit.data);
+  const data = await fetchCnki(q, limit, fromYear, toYear);
+  cnkiCache.set(cacheKey, { data: structuredClone(data), time: Date.now() });
+  return data;
 }
 
 async function fetchCnki(q, limit, fromYear, toYear) {
@@ -1151,7 +1288,7 @@ async function fetchCnki(q, limit, fromYear, toYear) {
     },
     body: form.toString()
   });
-  const items = Array.isArray(json?.articleList) ? json.articleList : [];
+  const items = requireSourceArray(json?.articleList, "知网 CNKI");
   return items
     .map((item, i) => {
       const year = Number(item.year) || Number(String(item.publishTime || "").slice(0, 4)) || null;

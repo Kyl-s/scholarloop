@@ -18,3 +18,5 @@ CONTINUE.md
 .DS_Store
 __pycache__/
 *.pyc
+
+data/zotero-state.json*

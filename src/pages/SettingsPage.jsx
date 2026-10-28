@@ -5,9 +5,11 @@ import { useData } from "../store.jsx";
 import { Badge, Button, SectionHead } from "../components/ui.jsx";
 import ApiConfigForm from "../components/ApiConfigForm.jsx";
 import UsageStats from "../components/UsageStats.jsx";
+import ZoteroSettings from "../components/ZoteroSettings.jsx";
+import SourceConnectivity, { SourceConnectionBadge } from "../components/SourceConnectivity.jsx";
 
 export default function SettingsPage({ onNavigate }) {
-  const { meta, library, path, drafts, refresh, updatePath, settings, updateSettings } = useData();
+  const { meta, library, path, drafts, refresh, updatePath, settings, updateSettings, sourceConnectivity } = useData();
   const fileRef = useRef(null);
   const [msg, setMsg] = useState("");
   const [pdfMathStatus, setPdfMathStatus] = useState({ loading: true, available: false, command: "", installHint: "", install: null });
@@ -27,17 +29,19 @@ export default function SettingsPage({ onNavigate }) {
   };
 
   useEffect(() => {
+    setPaperSourceChecks({});
     setPaperSourceDraft({ ieee: { enabled: true, apiKey: "", ...(settings?.paperSources?.ieee || {}) }, wos: { enabled: true, apiKey: "", database: "WOS", ...(settings?.paperSources?.wos || {}) } });
   }, [settings?.paperSources]);
 
   const savePaperSources = async () => {
     await updateSettings({ paperSources: paperSourceDraft });
+    sourceConnectivity.reset();
     setMsg("IEEE / Web of Science 配置已保存到本机");
   };
   const checkPaperSource = async (id) => {
     setPaperSourceChecks((current) => ({ ...current, [id]: { loading: true, message: "" } }));
     try {
-      const result = await api.checkPaperSource(id);
+      const result = await sourceConnectivity.check(id);
       setPaperSourceChecks((current) => ({ ...current, [id]: { loading: false, ok: result.ok, message: result.ok ? `连接正常（返回 ${result.count || 0} 条）` : (result.error || "连接失败") } }));
     } catch (err) {
       setPaperSourceChecks((current) => ({ ...current, [id]: { loading: false, ok: false, message: err.message || "连接失败" } }));
@@ -135,6 +139,7 @@ export default function SettingsPage({ onNavigate }) {
       <SectionHead title="设置" desc="配置 API、管理数据、查看数据源与了解使用限制" />
 
       <div className="settings-grid">
+        <ZoteroSettings />
         <section className="panel settings-panel api-settings-panel">
           <div className="settings-head"><KeyRound size={17} /> API 配置</div>
           <p className="institution-intro">可添加多个 OpenAI 兼容供应商（DeepSeek、Kimi、通义等），随时切换当前启用的一套。Agent、PDF 翻译与解读、AI 检索都使用当前启用的配置。</p>
@@ -149,7 +154,9 @@ export default function SettingsPage({ onNavigate }) {
         </section>
 
         <section className="panel settings-panel">
-          <div className="settings-head"><Server size={17} /> 数据源状态</div>
+          <div className="settings-head"><Server size={17} /> 数据源接入与授权</div>
+          <p className="settings-note-text">通过真实检索请求检测连接，自动更新各来源是否可用；授权配置与连接状态分别显示。</p>
+          <SourceConnectivity sources={meta?.sources || []} connectivity={sourceConnectivity} />
           <div className="source-table">
             {(meta?.sources || []).map((s) => (
               <div className="source-line" key={s.id}>
@@ -157,7 +164,11 @@ export default function SettingsPage({ onNavigate }) {
                   <strong>{s.label}</strong>
                   <span>{s.desc}</span>
                 </div>
-                <Badge tone={s.authRequired && !s.configured ? "neutral" : "ok"}>{s.authRequired && !s.configured ? "需授权" : "可用"}</Badge>
+                <div className="source-line-status">
+                  <SourceConnectionBadge check={sourceConnectivity.checks[s.id]} now={sourceConnectivity.now} />
+                  <Badge tone="neutral">{s.enabled === false ? "已停用" : !s.authRequired ? "无需授权" : s.configured ? "已配置授权" : "未配置授权"}</Badge>
+                  <button type="button" className="settings-refresh-btn" aria-label={`检测 ${s.label} 连接`} onClick={() => sourceConnectivity.check(s.id)} disabled={sourceConnectivity.checks[s.id]?.loading}><RefreshCw size={13} /></button>
+                </div>
               </div>
             ))}
           </div>
@@ -169,9 +180,12 @@ export default function SettingsPage({ onNavigate }) {
 
         <section className="panel settings-panel source-auth-panel">
           <div className="settings-head"><KeyRound size={17} /> IEEE / Web of Science 授权</div>
-          <p className="settings-note-text">仅在本机保存 API Key，用于官方 API 聚合；未填写时仍可从论文搜索页打开门户登录。</p>
+          <p className="settings-note-text">IEEE：<a href="https://developer.ieee.org/member/register" target="_blank" rel="noopener noreferrer">注册开发者账号</a>，验证邮箱后申请 Metadata API Key，等待审核（<a href="https://developer.ieee.org/getting_started" target="_blank" rel="noopener noreferrer">官方步骤</a>）。申请用途可填写：ScholarLoop 本地桌面科研助手，用于个人学术元数据检索与原文链接跳转。</p>
+          <p className="settings-note-text">Web of Science：<a href="https://developer.clarivate.com/apis/wos-starter" target="_blank" rel="noopener noreferrer">进入 Starter API 申请页</a>，注册 / 登录后创建 Application，为应用订阅 Starter API，并在订阅页获取 Key（<a href="https://developer.clarivate.com/help/application" target="_blank" rel="noopener noreferrer">官方步骤</a>）。无机构订阅可选择 Free Trial Plan：50 次 / 天、1 次 / 秒，不含引用次数；具体试用期限及条款以申请页面为准。请申请 Starter，本软件目前对接此接口。</p>
+          <p className="settings-note-text">取得 Key 后在本机下方输入 → 保存本机配置 → 检测连接。WoS 自动探测已关闭，避免消耗试用配额；Key 不代表付费全文权限，无需发送到聊天。</p>
+          <p className="settings-note-text">仅在本机保存 API Key，用于官方 API 聚合；未填写时仍可从论文搜索页打开门户登录。检测连接使用已保存的配置；输入新 Key 后请先保存，再检测。</p>
           <label className="proxy-field"><span><strong>IEEE Xplore API Key</strong><em>需 IEEE 审核通过；留空则仅门户访问。</em></span><input type="password" value={paperSourceDraft.ieee.apiKey} onChange={(e) => setPaperSourceDraft((v) => ({ ...v, ieee: { ...v.ieee, apiKey: e.target.value } }))} placeholder="已配置则留空以保留；输入新 Key 覆盖" /><Button size="sm" variant="secondary" onClick={() => checkPaperSource("ieee")} disabled={paperSourceChecks.ieee?.loading}>{paperSourceChecks.ieee?.loading ? "检测中…" : "检测连接"}</Button>{paperSourceChecks.ieee?.message ? <em className={paperSourceChecks.ieee.ok ? "source-check-ok" : "source-check-error"}>{paperSourceChecks.ieee.message}</em> : null}</label>
-          <label className="proxy-field"><span><strong>Web of Science API Key</strong><em>需 Clarivate / 机构授权；留空则仅门户访问。</em></span><input type="password" value={paperSourceDraft.wos.apiKey} onChange={(e) => setPaperSourceDraft((v) => ({ ...v, wos: { ...v.wos, apiKey: e.target.value } }))} placeholder="已配置则留空以保留；输入新 Key 覆盖" /><Button size="sm" variant="secondary" onClick={() => checkPaperSource("wos")} disabled={paperSourceChecks.wos?.loading}>{paperSourceChecks.wos?.loading ? "检测中…" : "检测连接"}</Button>{paperSourceChecks.wos?.message ? <em className={paperSourceChecks.wos.ok ? "source-check-ok" : "source-check-error"}>{paperSourceChecks.wos.message}</em> : null}</label>
+          <label className="proxy-field"><span><strong>Web of Science API Key</strong><em>支持 Starter 试用或机构订阅；留空则仅门户访问。</em></span><input type="password" value={paperSourceDraft.wos.apiKey} onChange={(e) => setPaperSourceDraft((v) => ({ ...v, wos: { ...v.wos, apiKey: e.target.value } }))} placeholder="已配置则留空以保留；输入新 Key 覆盖" /><Button size="sm" variant="secondary" onClick={() => checkPaperSource("wos")} disabled={paperSourceChecks.wos?.loading}>{paperSourceChecks.wos?.loading ? "检测中…" : "检测连接"}</Button>{paperSourceChecks.wos?.message ? <em className={paperSourceChecks.wos.ok ? "source-check-ok" : "source-check-error"}>{paperSourceChecks.wos.message}</em> : null}</label>
           <div className="institution-actions"><Button variant="secondary" icon={ShieldCheck} onClick={savePaperSources}>保存本机配置</Button></div>
         </section>
 
@@ -325,7 +339,7 @@ export default function SettingsPage({ onNavigate }) {
 
         <section className="panel settings-panel">
           <div className="settings-head"><ShieldCheck size={17} /> 本地优先</div>
-          <p className="privacy-text">所有文献、笔记、学习路径和论文草稿都保存在本机 <code>data/store.json</code>，不会上传到任何服务器。聚合检索只在点击搜索时访问公开学术 API。</p>
+          <p className="privacy-text">文献、笔记、学习路径和论文草稿默认保存在本机 <code>data/store.json</code>。启用 Zotero 同步后，文献条目及 PDF 会上传到你的 Zotero 账号；聚合检索会访问公开学术 API。</p>
         </section>
       </div>
 
