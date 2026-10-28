@@ -22,7 +22,10 @@ import {
   MousePointer2,
   PanelRightClose,
   PanelRightOpen,
-  StickyNote
+  StickyNote,
+  ChevronDown,
+  CircleHelp,
+  Flag
 } from "lucide-react";
 import * as pdfjsLib from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
@@ -32,11 +35,12 @@ import { IconButton, Segmented } from "./ui.jsx";
 import { renderMarkdown } from "./markdown.jsx";
 import { normalizePdfSelection, normalizedSelectionAnchor } from "../pdfTranslation.js";
 import { attachPdfTextLayerSelection, isPdfSelectionOverlayTarget, pickSelectionAnchorRect, reorderPdfTextLayerForSelection } from "../pdfTextSelection.js";
-import { createPendingFollowup, settleFollowup } from "../pdfChat.js";
+import { appendDialogMessage, createPendingFollowup, settleFollowup } from "../pdfChat.js";
 import { applySampledLineAppearance, buildPdfTextLayout, extractReadablePdfText, PDF_TEXT_LAYOUT_VERSION } from "../pdfText.js";
 import { buildLayoutTranslationPrompt, joinLayoutTranslation, parseLayoutTranslation } from "../pdfLayoutTranslation.js";
 import {
   canSelectLayoutDisplayMode,
+  canRestoreLayoutTranslation,
   canRestoreCachedDisplayMode,
   initialPdfDisplayMode,
   layoutVariantForDisplayMode,
@@ -50,7 +54,13 @@ import {
   recognizeOcrImage,
   restoreProtectedText
 } from "../pdfOcr.js";
-import { createSavedInterpretation, interpretationStorageKey, normalizeSavedInterpretation } from "../pdfInterpretation.js";
+import {
+  createGuidedSession,
+  createSavedInterpretation,
+  interpretationStorageKey,
+  normalizeGuidedState,
+  normalizeSavedInterpretation
+} from "../pdfInterpretation.js";
 import { openPdfExternal } from "../openPdfExternal.js";
 import { getReadingNoteContent, normalizeReadingNotes, readReadingNotes, updateReadingNote } from "../readingNotes.js";
 import { fileToBase64, insertAtCursor, pastedFiles } from "../noteAttachments.js";
@@ -107,15 +117,15 @@ function layoutAssistStatusLabel(result, pageNumber) {
     completed: "视觉分析已完成",
     complete: "视觉分析已完成",
     ready: "视觉分析已完成",
-    fallback: "视觉分析失败",
-    failed: "视觉分析失败"
+    fallback: "本页视觉辅助未完成，已使用普通版式翻译",
+    failed: "本页视觉分析失败"
   };
   const label = labels[status] || `视觉辅助：${String(rawStatus).trim()}`;
   const detail = String(pageAssist?.error || jobAssist?.error || "").trim();
   const stageNames = { render: "页面准备", request: "请求模型", "response-parse": "解析响应", "schema-validate": "校验结构" };
   const stage = stageNames[pageAssist?.stage] || "";
-  if (!detail && !stage) return label;
-  return `${label}${stage ? `（${stage}）` : ""}${detail ? `：${detail}` : ""}`;
+  if (!detail && !stage) return `第 ${pageNumber} 页：${label}`;
+  return `第 ${pageNumber} 页：${label}${stage ? `（${stage}）` : ""}${detail ? `：${detail}` : ""}`;
 }
 
 function normalizedPdfMathBaseUrl(value) {
@@ -386,6 +396,115 @@ function EvidenceLinks({ items, onJump }) {
   );
 }
 
+const GUIDE_VERDICT_LABELS = {
+  good: "理解到位",
+  partial: "部分到位",
+  off: "建议再读",
+  skipped: "已跳过"
+};
+
+/** 引导式精读：某一步的批改内容（我的回答 + AI 反馈 + 参考答案 + 依据） */
+function GuidedReviewBody({ record, onJump }) {
+  if (!record) return null;
+  return (
+    <div className="pdf-ai-guided-review">
+      {record.answer ? (
+        <div className="pdf-ai-message user">
+          <span className="pdf-ai-message-label">我的回答</span>
+          <p className="pdf-ai-q">{record.answer}</p>
+        </div>
+      ) : (
+        <p className="pdf-ai-guided-skipped">这一步被跳过了，随时可以重走一遍巩固理解。</p>
+      )}
+      {record.strengths?.length ? (
+        <ul className="pdf-ai-guided-strengths">
+          {record.strengths.map((s, i) => (
+            <li key={i}>👍 {s}</li>
+          ))}
+        </ul>
+      ) : null}
+      {record.feedback ? (
+        <div className="pdf-ai-guided-feedback">
+          <span className="pdf-ai-message-label"><Sparkles size={13} /> 导师点评</span>
+          <div className="pdf-ai-a">{renderMarkdown(record.feedback)}</div>
+        </div>
+      ) : null}
+      {record.reference ? (
+        <details className="pdf-ai-guided-reference">
+          <summary>参考答案</summary>
+          <div className="pdf-ai-a">{renderMarkdown(record.reference)}</div>
+        </details>
+      ) : null}
+      <EvidenceLinks items={record.evidence} onJump={onJump} />
+    </div>
+  );
+}
+
+/** 引导式精读：某一步下的持续对话（可反复追问，记录随解读持久化） */
+function GuideDialogThread({ record, busy, disabled, draft, onDraftChange, onSend, onJump }) {
+  const dialog = Array.isArray(record?.dialog) ? record.dialog : [];
+  const listRef = useRef(null);
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    list.scrollTop = list.scrollHeight;
+  }, [dialog.length, busy]);
+  return (
+    <div className="pdf-ai-guide-dialog">
+      {dialog.length || busy ? (
+        <div className="pdf-ai-guide-dialog-list" ref={listRef}>
+          {dialog.map((m, i) => (
+            <div key={i} className={`pdf-ai-message ${m.role === "user" ? "user" : "assistant"} ${m.error ? "error" : ""}`}>
+              <span className="pdf-ai-message-label">
+                {m.role === "user" ? "你" : <><Sparkles size={13} /> 导师</>}
+              </span>
+              <div className="pdf-ai-a">{renderMarkdown(m.text)}</div>
+              {m.role === "assistant" && !m.error && m.evidence?.length ? (
+                <EvidenceLinks items={m.evidence} onJump={onJump} />
+              ) : null}
+            </div>
+          ))}
+          {busy ? (
+            <div className="pdf-ai-message assistant">
+              <span className="pdf-ai-message-label"><Sparkles size={13} /> 导师</span>
+              <div className="pdf-ai-thinking" role="status" aria-live="polite">
+                <Loader2 size={15} className="spin" />
+                正在思考…
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <p className="pdf-ai-guide-dialog-empty">对这一步还有疑问？在这里继续和导师聊，记录会一直保留。</p>
+      )}
+      <div className="pdf-ai-guide-dialog-input">
+        <textarea
+          rows={2}
+          value={draft}
+          maxLength={4000}
+          placeholder="继续追问这一步…（Enter 发送，Shift+Enter 换行）"
+          disabled={disabled}
+          onChange={(e) => onDraftChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              onSend();
+            }
+          }}
+        />
+        <button
+          type="button"
+          onClick={onSend}
+          disabled={disabled || !draft.trim()}
+          aria-label="发送"
+        >
+          {busy ? <Loader2 size={13} className="spin" /> : <Send size={13} />}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPortal, initialPage, initialTab }) {
   const { settings } = useData();
   const config = useAgentConfig();
@@ -513,6 +632,18 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const [askInput, setAskInput] = useState("");
   const [askLoading, setAskLoading] = useState(false);
 
+  // 引导式精读：预设计划一步步放出，进度随解读持久化
+  const [guided, setGuided] = useState(null); // { plan, index, answers }
+  const [guideDraft, setGuideDraft] = useState("");
+  const [guideBusy, setGuideBusy] = useState(false);
+  const [guideError, setGuideError] = useState("");
+  // 引导步骤内的持续对话：每一步都可以反复追问，记录随解读持久化
+  const [guideDialogDrafts, setGuideDialogDrafts] = useState({});
+  const [guideDialogBusyId, setGuideDialogBusyId] = useState("");
+  const [showFullInterpretation, setShowFullInterpretation] = useState(false);
+  const [openGuidedStepId, setOpenGuidedStepId] = useState("");
+  const guidedRef = useRef(null);
+
   const setPdfMathResultForCurrentConfig = (result, matchesConfig = pdfMathResultMatchesConfig(result, config)) => {
     pdfMathResultConfigKeyRef.current = result ? (matchesConfig ? pdfMathConfigKey : "__mismatch__") : "";
     setPdfMathResult(result);
@@ -569,9 +700,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const layoutAssistResultConfigMatches = Boolean(pdfMathResultConfigKeyRef.current)
     && pdfMathResultConfigKeyRef.current === pdfMathConfigKey;
   const layoutAssistModeMatches = Boolean(pdfMathResult)
-    && layoutAssistResultEnabled !== null
-    && layoutAssistResultEnabled === layoutAssistEnabled
-    && layoutAssistResultConfigMatches;
+    && (layoutAssistResultEnabled === true) === layoutAssistEnabled;
   const layoutAssistModeMismatch = hasAnyPdfMathResult && !layoutAssistModeMatches;
   const currentModePdfMathResult = layoutAssistModeMismatch ? null : pdfMathResult;
   const layoutPageResolved = useMemo(
@@ -610,6 +739,13 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     && layoutIncompleteCount === 0;
   const hasAnyLayoutResult = layoutCompletedCount > 0 || Boolean(currentModePdfMathResult?.monoUrl || currentModePdfMathResult?.dualUrl);
   const currentLayoutPage = useMemo(() => layoutPageStatus(currentModePdfMathResult, pageNum), [currentModePdfMathResult, pageNum]);
+  const layoutAssistSummary = useMemo(() => {
+    const pages = currentModePdfMathResult?.pages || [];
+    return {
+      ready: pages.filter((page) => ["ready", "completed", "complete"].includes(page.assist?.status)).length,
+      fallback: pages.filter((page) => ["fallback", "failed"].includes(page.assist?.status)).length
+    };
+  }, [currentModePdfMathResult]);
   const layoutAssistStatus = useMemo(
     () => layoutAssistModeMismatch
       ? "当前模式未生成译文"
@@ -617,8 +753,13 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     [currentModePdfMathResult, layoutAssistEnabled, layoutAssistModeMismatch, pageNum]
   );
 
-  const persistInterpretation = useCallback(async ({ result, meta, followups }) => {
-    const payload = createSavedInterpretation({ result, meta, followups });
+  const persistInterpretation = useCallback(async ({ result, meta, followups, guided }) => {
+    const payload = createSavedInterpretation({
+      result,
+      meta,
+      followups,
+      guided: guided === undefined ? guidedRef.current : guided
+    });
     if (!payload) return null;
     setSaveInterpretationStatus("saving");
     setSaveInterpretationError("");
@@ -832,7 +973,6 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     expectedAssistEnabled = layoutAssistEnabled,
     sourceSha256 = "",
     identityHash = "",
-    configFingerprint = "",
     allowModeDiscovery = false,
     restoreSeq = 0
   } = {}) => {
@@ -842,18 +982,15 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     const hasCompletedPage = (job.pages || []).some((page) => page.status === "completed" && (page.monoUrl || page.dualUrl));
     const hasWholeFile = Boolean(job.monoUrl || job.dualUrl);
     if (!hasCompletedPage && !hasWholeFile) return false;
-    // 旧快照没有 identity 时只允许查看，不能把它当成当前配置的成品。
-    const matchesConfig = pdfMathResultMatchesConfig(job, config);
-    const matchesMode = allowModeDiscovery || job?.layoutAssist?.enabled === Boolean(expectedAssistEnabled);
-    const matchesSource = Boolean(sourceSha256) && String(job.sourceSha256 || "") === String(sourceSha256);
-    const matchesIdentity = !identityHash || String(job.identityHash || "") === String(identityHash);
-    const matchesFingerprint = !configFingerprint || String(job.identity?.configFingerprint || "") === configFingerprint;
-    if (!matchesConfig || !matchesMode || !matchesSource || !matchesIdentity || !matchesFingerprint) return false;
+    if (!canRestoreLayoutTranslation(job, {
+      paperId, sourceSha256, identityHash,
+      layoutAssist: expectedAssistEnabled, allowModeDiscovery
+    })) return false;
     const resolvedAssistEnabled = allowModeDiscovery ? job.layoutAssist?.enabled === true : Boolean(expectedAssistEnabled);
     layoutAssistEnabledRef.current = resolvedAssistEnabled;
     setLayoutAssistEnabled(resolvedAssistEnabled);
     setPdfMathJobId(job.jobId);
-    setPdfMathResultForCurrentConfig(job, true);
+    setPdfMathResultForCurrentConfig(job);
     rememberLayoutTranslationJob(job, { activeMode: resolvedAssistEnabled });
     setPdfMathProgress(job.progress || "已从本地恢复版式译文");
     setPdfMathError(job.status === "failed" && !hasCompletedPage ? (job.error || "版式翻译失败") : "");
@@ -874,24 +1011,29 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     const expectedAssistEnabled = Boolean(options.expectedAssistEnabled ?? layoutAssistEnabled);
     const sourceSha256 = String(options.sourceSha256 || "");
     const identityHash = String(options.identityHash || "");
-    const configFingerprint = String(options.configFingerprint || await pdfMathConfigFingerprint(config));
     try {
+      // The paper index can retain an older task with more completed pages than
+      // the latest cached job. Restore the best saved progress before that hint.
+      try {
+        const job = await api.getPdfLayoutTranslation(paperId, config, {
+          layoutAssist: expectedAssistEnabled,
+          sourceSha256,
+          sourceLang: "en",
+          targetLang: "zh",
+          restoreOnly: true
+        });
+        if (applyRestoredPdfMathJob(job, { expectedAssistEnabled, sourceSha256, restoreSeq })) return job;
+      } catch {
+        /* Older caches may only have a direct job reference. */
+      }
       if (preferredJobId) {
         try {
-          const job = await api.pdfMathTranslateJob(preferredJobId, { validateEngine: true });
-          if (applyRestoredPdfMathJob(job, { expectedAssistEnabled, sourceSha256, identityHash, configFingerprint, allowModeDiscovery: options.allowModeDiscovery, restoreSeq })) return job;
+          const job = await api.pdfMathTranslateJob(preferredJobId);
+          if (applyRestoredPdfMathJob(job, { expectedAssistEnabled, sourceSha256, identityHash, allowModeDiscovery: options.allowModeDiscovery, restoreSeq })) return job;
         } catch {
           /* 再试 paper 级索引 */
         }
       }
-      const job = await api.getPdfLayoutTranslation(paperId, config, {
-        layoutAssist: expectedAssistEnabled,
-        sourceSha256,
-        identityHash,
-        configFingerprint,
-        restoreSeq
-      });
-      if (applyRestoredPdfMathJob(job, { expectedAssistEnabled, sourceSha256, identityHash, configFingerprint, restoreSeq })) return job;
     } catch {
       /* 无本地版式译文时静默 */
     }
@@ -1076,6 +1218,12 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       if (bytes.length < 5 || magic !== "%PDF-") {
         throw new Error("该链接不是可直接下载的 PDF 文件（可能是网页或需要登录），请用系统浏览器打开");
       }
+      // PDF.js transfers this buffer to its worker. Hash and count bytes before
+      // getDocument detaches it, otherwise restoring always gets an empty hash.
+      const sourceByteLength = bytes.byteLength;
+      const computedSourceSha256 = !isTranslatedVariant ? await sha256ArrayBuffer(data) : "";
+      if (sourceLoadSeq !== sourceLoadSeqRef.current) return;
+      if (!isTranslatedVariant) pdfSourceSha256Ref.current = computedSourceSha256;
 
       setPdfSourceBase64(sourceBase64);
       if (!isTranslatedVariant) {
@@ -1148,8 +1296,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         const localPdfUrl = sourceInfo.pdfUrl || (sourceUrl.startsWith("/api/pdf/file/") ? sourceUrl : "");
         if (requestedUrl || cache?.sourceUrl) cachePatch.sourceUrl = requestedUrl || cache.sourceUrl;
         if (localPdfUrl) cachePatch.pdfUrl = localPdfUrl;
-        if (sourceInfo.sourceSha256 || cache?.sourceSha256) cachePatch.sourceSha256 = sourceInfo.sourceSha256 || cache.sourceSha256;
-        if (sourceInfo.bytes || cache?.bytes || bytes.length) cachePatch.bytes = sourceInfo.bytes || cache?.bytes || bytes.length;
+        if (computedSourceSha256) cachePatch.sourceSha256 = computedSourceSha256;
+        cachePatch.bytes = sourceByteLength;
         const cacheNeedsSave = !cache
           || !hasCompleteTextCache
           || Number(cache?.textLayoutVersion) !== PDF_TEXT_LAYOUT_VERSION
@@ -1169,8 +1317,6 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
           const assistEnabled = cache?.layoutAssistEnabled === true;
           const mode = layoutTranslationModeKey(assistEnabled);
           const cachedJob = savedCache?.layoutTranslationJobs?.[mode] || cache?.layoutTranslationJobs?.[mode];
-          const computedSourceSha256 = await sha256ArrayBuffer(data);
-          pdfSourceSha256Ref.current = computedSourceSha256;
           const sourceSha256 = computedSourceSha256;
           const legacyJobId = cache?.layoutTranslationJobId || savedCache?.layoutTranslationJobId || "";
           const hasCachedLayoutJob = Boolean(cachedJob?.jobId || legacyJobId);
@@ -1356,6 +1502,13 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       const restoredFollowups = saved.followups || [];
       followupsRef.current = restoredFollowups;
       setFollowups(restoredFollowups);
+      // 引导进度优先恢复；旧数据没有 guided 时回退为“从第 1 步重新引导”
+      const restoredGuided = normalizeGuidedState(saved.guided, saved.result);
+      guidedRef.current = restoredGuided;
+      setGuided(restoredGuided);
+      setGuideDraft("");
+      setGuideError("");
+      setShowFullInterpretation(false);
       setSaveInterpretationStatus("saved");
     };
 
@@ -1731,27 +1884,6 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     panelRef.current?.scrollTo({ top: 0 });
     translateShellRef.current?.scrollTo({ top: 0 });
   }, [pageNum, panelTab]);
-
-  // 版式翻译进行中翻页：只通知服务端「当前阅读页」；已译完的页不会重译
-  useEffect(() => {
-    if (pdfMathState !== "working" || !pdfMathJobId || !pageNum) return undefined;
-    // 本页版式已就绪时仍同步优先页，便于后台预取下一页，但不会触发重译
-    let cancelled = false;
-    const sourceLoadSeq = sourceLoadSeqRef.current;
-    const requestedJobId = pdfMathJobId;
-    const prioritySeq = Date.now();
-    void api.prioritizePdfMathTranslate(pdfMathJobId, pageNum, { prioritySeq })
-      .then((job) => {
-        if (cancelled || !job || sourceLoadSeq !== sourceLoadSeqRef.current || requestedJobId !== pdfMathJobId) return;
-        setPdfMathResultForCurrentConfig(job);
-        if (typeof job?.layoutAssist?.enabled === "boolean") setLayoutAssistEnabled(job.layoutAssist.enabled);
-        if (job.progress) setPdfMathProgress(job.progress);
-      })
-      .catch(() => {
-        /* 任务已结束或不存在时忽略 */
-      });
-    return () => { cancelled = true; };
-  }, [pageNum, pdfMathJobId, pdfMathState]);
 
   // Ctrl / ⌘ + 滚轮缩放（需 passive:false 才能拦截浏览器默认缩放）
   useEffect(() => {
@@ -2192,12 +2324,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     const cacheGeneration = pdfCacheGenerationRef.current;
     setTranslatingAll(true);
     setDisplayModeAndPersist("translated");
-    // 阅读顺序：当前页 → 向后 → 再补前面；一页一页串行全力
-    const startPage = Math.min(Math.max(1, pageNum || 1), Math.max(1, numPages));
-    const readingOrder = [
-      ...Array.from({ length: Math.max(0, numPages - startPage + 1) }, (_, index) => startPage + index),
-      ...Array.from({ length: Math.max(0, startPage - 1) }, (_, index) => index + 1)
-    ];
+    // 全文默认从第一页顺序翻译，浏览翻页不改变队列。
+    const readingOrder = Array.from({ length: Math.max(0, numPages) }, (_, index) => index + 1);
     const queue = readingOrder.filter((i) => !pageTranslations[i] || isTranslationError(pageTranslations[i]));
     let completed = 0;
     for (const i of queue) {
@@ -2242,16 +2370,16 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
 
   /**
    * 版式翻译：统一心智模型
-   * - 默认「译完全部未完成页」，已完成自动跳过
+    * - 默认从第一页顺序译完全部未完成页，已完成自动跳过
    * - force 才整本重来
-   * - 进行中翻页只改优先，不重开任务
+    * - 仅启动时可明确选择从当前页开始，末尾回补前页；翻页不改变队列
    */
-  const translateWithPdfMath = async ({ force = false } = {}) => {
+  const translateWithPdfMath = async ({ force = false, priorityPage = 1, retranslatePage = 0 } = {}) => {
     if (!pdfSourceBase64 || !config || !pdfMathStatus.available) return;
     if (pdfMathState === "working") return;
     const sourceLoadSeq = sourceLoadSeqRef.current;
     const isCurrentSource = () => sourceLoadSeq === sourceLoadSeqRef.current;
-    if (!force && layoutAllDone) {
+    if (!force && !retranslatePage && layoutAllDone) {
       setPdfMathProgress(`全部 ${layoutCompletedCount} 页已完成`);
       setPdfMathState("ready");
       return;
@@ -2270,7 +2398,6 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
           ? `继续翻译，已完成 ${layoutCompletedCount} 页将跳过…`
           : "正在开始版式翻译…"
     );
-    const priorityPage = pageNum || 1;
     try {
       const configFingerprint = await pdfMathConfigFingerprint(config);
       const started = await api.pdfMathTranslate({
@@ -2282,8 +2409,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         progressive: true,
         priorityPage,
         paperId: paperId || "",
-        jobId: (!force && layoutAssistModeMatches && pdfMathJobId) ? pdfMathJobId : "",
+        jobId: (!force && layoutAssistModeMatches && layoutAssistResultConfigMatches && pdfMathJobId) ? pdfMathJobId : "",
         force: Boolean(force),
+        retranslatePage: Number(retranslatePage) || 0,
         // 主路径始终续译全部未完成页，避免「译两页就停」让人摸不着头脑
         continueAll: !force,
         layoutAssist: { enabled: Boolean(layoutAssistEnabled) },
@@ -2311,10 +2439,11 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         const hasCompletedPage = (job.pages || []).some((page) => page.status === "completed" && (page.monoUrl || page.dualUrl));
         const incomplete = (job.pages || []).filter((page) => !(page.status === "completed" && (page.monoUrl || page.dualUrl))).length;
         if (job.status === "completed" && hasCompletedPage && incomplete === 0) {
+          if (retranslatePage) setLayoutReloadToken((token) => token + 1);
           setPdfMathState("ready");
           return;
         }
-        if (hasCompletedPage && incomplete > 0 && !force) {
+        if (hasCompletedPage && incomplete > 0 && !force && !retranslatePage) {
           const resumed = await api.pdfMathTranslate({
             data: pdfSourceBase64,
             config,
@@ -2335,6 +2464,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
           if (typeof resumed?.layoutAssist?.enabled === "boolean") setLayoutAssistEnabled(resumed.layoutAssist.enabled);
           setPdfMathJobId(resumed.jobId || started.jobId || "");
         } else if (hasCompletedPage || job.monoUrl || job.dualUrl) {
+          if (retranslatePage) setLayoutReloadToken((token) => token + 1);
           setPdfMathState("ready");
           return;
         } else {
@@ -2373,6 +2503,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         throw new Error(job.error || "PDF 排版翻译没有生成译文 PDF");
       }
       setPdfMathResultForCurrentConfig(job);
+      if (retranslatePage) setLayoutReloadToken((token) => token + 1);
       setPdfMathState("ready");
       if (paperId && job.jobId) rememberLayoutTranslationJob(job);
     } catch (err) {
@@ -2620,6 +2751,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       setInterpretProgress(resolved === "full" ? "完全解读：正在阅读全文要点…" : "快速解读：正在提取摘要与结论…");
       followupsRef.current = [];
       setFollowups([]);
+      setShowFullInterpretation(false);
+      setOpenGuidedStepId("");
       try {
         const data = await api.interpretPdf({
           title: title || "",
@@ -2635,9 +2768,14 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
           usage: data.usage,
           model: data.model || config?.model || ""
         };
+        const nextGuided = createGuidedSession(nextResult);
+        guidedRef.current = nextGuided;
+        setGuided(nextGuided);
+        setGuideDraft("");
+        setGuideError("");
         setInterpretResult(nextResult);
         setInterpretMeta(nextMeta);
-        await persistInterpretation({ result: nextResult, meta: nextMeta, followups: [] });
+        await persistInterpretation({ result: nextResult, meta: nextMeta, followups: [], guided: nextGuided });
         setInterpretProgress("");
       } catch (err) {
         setInterpretError(err.message || "解读失败");
@@ -2705,6 +2843,212 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     if (!interpretResult) return;
     persistInterpretation({ result: interpretResult, meta: interpretMeta, followups });
   };
+
+  // 引导式精读：页码跳转保持面板打开，问题仍可见，方便边读边答
+  const jumpToPageForGuide = useCallback((page) => {
+    const target = Number(page) || 0;
+    if (!target) return;
+    setPageNum(Math.max(1, Math.min(numPages || target, target)));
+  }, [numPages]);
+
+  const applyGuided = (next) => {
+    guidedRef.current = next;
+    setGuided(next);
+  };
+
+  const submitGuidedAnswer = async (skip = false) => {
+    const current = guidedRef.current;
+    if (!current || guideBusy) return;
+    const step = current.plan[current.index];
+    if (!step) return;
+    const userAnswer = skip ? "" : guideDraft.trim();
+    if (!skip && !userAnswer) return;
+
+    if (skip) {
+      const nextGuided = {
+        ...current,
+        answers: {
+          ...current.answers,
+          [step.id]: {
+            answer: "",
+            verdict: "skipped",
+            feedback: "",
+            reference: "",
+            strengths: [],
+            evidence: [],
+            answeredAt: new Date().toISOString()
+          }
+        }
+      };
+      applyGuided(nextGuided);
+      setGuideDraft("");
+      setGuideError("");
+      void persistInterpretation({
+        result: interpretResult,
+        meta: interpretMeta,
+        followups: followupsRef.current,
+        guided: nextGuided
+      });
+      return;
+    }
+
+    setGuideBusy(true);
+    setGuideError("");
+    try {
+      const data = await api.interpretGuide({
+        title: title || "",
+        mode: interpretMeta?.mode || "quick",
+        config,
+        pages: pagesPayload(effectiveTextByPage),
+        step: { ...step, index: current.index, total: current.plan.length },
+        userAnswer,
+        prior: interpretResult
+      });
+      applyGuided({
+        ...current,
+        answers: {
+          ...current.answers,
+          [step.id]: {
+            answer: userAnswer,
+            verdict: data.verdict || "partial",
+            feedback: data.feedback || "",
+            reference: data.reference || "",
+            strengths: data.strengths || [],
+            evidence: data.evidence || [],
+            answeredAt: new Date().toISOString()
+          }
+        }
+      });
+      const nextMeta = data.usage
+        ? { ...interpretMeta, usage: data.usage, model: data.model || interpretMeta?.model || config?.model || "" }
+        : interpretMeta;
+      if (nextMeta !== interpretMeta) setInterpretMeta(nextMeta);
+      await persistInterpretation({
+        result: interpretResult,
+        meta: nextMeta,
+        followups: followupsRef.current,
+        guided: guidedRef.current
+      });
+    } catch (err) {
+      setGuideError(`批改失败：${err.message}`);
+    } finally {
+      setGuideBusy(false);
+    }
+  };
+
+  const advanceGuidedStep = () => {
+    const current = guidedRef.current;
+    if (!current) return;
+    if (current.index >= current.plan.length) return;
+    if (!current.answers[current.plan[current.index].id]) return;
+    const next = { ...current, index: Math.min(current.plan.length, current.index + 1) };
+    applyGuided(next);
+    setGuideDraft("");
+    setGuideError("");
+    void persistInterpretation({ result: interpretResult, meta: interpretMeta, followups: followupsRef.current, guided: next });
+  };
+
+  const restartGuided = () => {
+    const current = guidedRef.current;
+    if (!current) return;
+    const next = { ...current, index: 0, answers: {} };
+    applyGuided(next);
+    setGuideDraft("");
+    setGuideError("");
+    setOpenGuidedStepId("");
+    setGuideDialogDrafts({});
+    setGuideDialogBusyId("");
+    void persistInterpretation({ result: interpretResult, meta: interpretMeta, followups: followupsRef.current, guided: next });
+  };
+
+  // 引导步骤内的持续追问：把消息追加进该步的对话记录，回复后一起持久化
+  const sendGuideDialog = async (stepId) => {
+    const current = guidedRef.current;
+    if (!current || guideDialogBusyId) return;
+    const stepIndex = current.plan.findIndex((s) => s.id === stepId);
+    if (stepIndex < 0) return;
+    const step = current.plan[stepIndex];
+    const record = current.answers[stepId];
+    if (!record || !config) return;
+    const text = String(guideDialogDrafts[stepId] || "").trim();
+    if (!text) return;
+
+    const withUser = appendDialogMessage(record, { role: "user", text });
+    applyGuided({
+      ...current,
+      answers: { ...current.answers, [stepId]: { ...record, dialog: withUser } }
+    });
+    setGuideDialogDrafts((prev) => ({ ...prev, [stepId]: "" }));
+    setGuideDialogBusyId(stepId);
+    try {
+      const data = await api.interpretGuideDialog({
+        title: title || "",
+        mode: interpretMeta?.mode || "quick",
+        config,
+        pages: pagesPayload(effectiveTextByPage),
+        step: { ...step, index: stepIndex, total: current.plan.length },
+        record: { answer: record.answer, feedback: record.feedback, reference: record.reference },
+        messages: withUser,
+        prior: interpretResult
+      });
+      const latest = guidedRef.current;
+      const latestRecord = latest?.answers[stepId];
+      if (!latestRecord) return;
+      const withReply = appendDialogMessage(latestRecord, {
+        role: "assistant",
+        text: data.reply || "（导师没有返回内容）",
+        evidence: Array.isArray(data.evidence) ? data.evidence : []
+      });
+      applyGuided({
+        ...latest,
+        answers: { ...latest.answers, [stepId]: { ...latestRecord, dialog: withReply } }
+      });
+      const nextMeta = data.usage
+        ? { ...interpretMeta, usage: data.usage, model: data.model || interpretMeta?.model || config?.model || "" }
+        : interpretMeta;
+      if (nextMeta !== interpretMeta) setInterpretMeta(nextMeta);
+      await persistInterpretation({
+        result: interpretResult,
+        meta: nextMeta,
+        followups: followupsRef.current,
+        guided: guidedRef.current
+      });
+    } catch (err) {
+      const latest = guidedRef.current;
+      const latestRecord = latest?.answers[stepId];
+      if (latestRecord) {
+        applyGuided({
+          ...latest,
+          answers: {
+            ...latest.answers,
+            [stepId]: {
+              ...latestRecord,
+              dialog: appendDialogMessage(latestRecord, { role: "assistant", text: `回复失败：${err.message}`, error: true })
+            }
+          }
+        });
+        void persistInterpretation({ result: interpretResult, meta: interpretMeta, followups: followupsRef.current, guided: guidedRef.current });
+      }
+    } finally {
+      setGuideDialogBusyId("");
+    }
+  };
+
+  const guideDialogProps = (stepId) => ({
+    record: guidedRef.current?.answers[stepId] || guided?.answers[stepId],
+    busy: guideDialogBusyId === stepId,
+    disabled: !config || guideDialogBusyId === stepId,
+    draft: guideDialogDrafts[stepId] || "",
+    onDraftChange: (value) => setGuideDialogDrafts((prev) => ({ ...prev, [stepId]: value })),
+    onSend: () => void sendGuideDialog(stepId),
+    onJump: jumpToEvidence
+  });
+
+  const guidedHeadRef = useRef(null);
+  useEffect(() => {
+    if (!guided) return;
+    guidedHeadRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [guided?.index]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const jumpToEvidence = useCallback((item) => {
     const targetPage = Number(item?.page) || 0;
@@ -2779,6 +3123,10 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   }, [aiFocus, interpretResult, numPages, onClose, openAiPanel, runInterpret]);
 
   const prereqs = interpretResult?.prerequisites || [];
+  const guidedPlan = guided?.plan || [];
+  const guidedCurrentStep = guided && guided.index < guided.plan.length ? guided.plan[guided.index] : null;
+  const guidedAnsweredCount = guided ? guided.plan.filter((step) => guided.answers[step.id]).length : 0;
+  const guidedAllDone = Boolean(guided) && guided.index >= guided.plan.length;
   const currentParagraphTranslations = useMemo(
     () => Object.entries(paragraphTranslations)
       .filter(([key, value]) => key.startsWith(`${pageNum}:`) && value && !value.startsWith("翻译失败"))
@@ -3224,7 +3572,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                   <div className="pdf-layout-primary-head">
                     <div>
                       <strong>版式翻译</strong>
-                      <p>保留原排版生成中文。一点开始/继续，已译过的页自动跳过；翻页会优先译你正在看的页。</p>
+                      <p>默认从第 1 页顺序翻译，已完成页自动跳过，无需逐页切换。翻页不改变翻译顺序；也可停止后选择从当前页开始，译到末尾再补前页。</p>
                     </div>
                     <em className={
                       layoutAssistModeMismatch ? "mismatch"
@@ -3259,16 +3607,17 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                       <Sparkles size={14} />
                       <span>页面图片辅助翻译</span>
                     </label>
-                    <p>仅辅助文本层 PDF 的术语、图注与上下文理解，不直接重建排版。</p>
+                    <p>页面图片用于分析栏数、阅读顺序和区域，提供版式上下文，不直接重排页面。</p>
                     <p>会发送页面图片，增加耗时与模型用量。<span>模型：{config?.model || "未配置"}</span></p>
                     <div className="pdf-layout-assist-status" role="status" aria-live="polite">
-                      {pdfMathState === "working" && layoutAssistEnabled ? <Loader2 size={12} className="spin" /> : <Sparkles size={12} />}
+                      {pdfMathState === "working" && layoutAssistEnabled && ["queued", "running", "analyzing", "rendering"].includes(currentLayoutPage.page?.assist?.status) ? <Loader2 size={12} className="spin" /> : <Sparkles size={12} />}
                       <span>
                         {layoutAssistStatus || (layoutAssistEnabled
                           ? (pdfMathState === "working" ? "已请求页面图片辅助" : "页面图片辅助已启用")
                           : "未启用页面图片辅助")}
                       </span>
                     </div>
+                    {layoutAssistEnabled && !layoutAssistModeMismatch && (layoutAssistSummary.ready || layoutAssistSummary.fallback) ? <p>视觉分析成功 {layoutAssistSummary.ready} 页 · 普通版式回退 {layoutAssistSummary.fallback} 页。回退仅影响对应页，全文翻译继续。</p> : null}
                   </div>
 
                   <div className={`pdf-layout-status-card${pdfMathState === "working" ? " is-working" : ""}${layoutAllDone ? " is-done" : ""}${layoutAssistModeMismatch ? " is-mismatch" : ""}`} role="status">
@@ -3287,7 +3636,23 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                       {currentLayoutPage.running ? (
                         <span className="is-busy">本页翻译中</span>
                       ) : currentLayoutPage.done ? (
-                        <span className="is-ok">本页已完成 · 可切「译文」</span>
+                        <>
+                          <span className="is-ok">本页已完成 · 可切「译文」</span>
+                          {pdfMathState !== "working" ? (
+                            <button
+                              type="button"
+                              className="pdf-layout-rerun-page-btn"
+                              onClick={() => {
+                                if (window.confirm(`将重新翻译第 ${pageNum} 页并覆盖该页已有译文，确定吗？`)) {
+                                  void translateWithPdfMath({ retranslatePage: pageNum, priorityPage: pageNum });
+                                }
+                              }}
+                              disabled={!pdfSourceBase64 || !config || !pdfMathStatus.available || (!pdfMathJobId && !paperId)}
+                            >
+                              重新翻译此页
+                            </button>
+                          ) : null}
+                        </>
                       ) : hasAnyLayoutResult || pdfMathState === "working" ? (
                         <span className="is-wait">本页未完成</span>
                       ) : (
@@ -3318,9 +3683,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                         disabled={layoutPrimaryAction.disabled || !pdfMathStatus.available}
                         title={
                           layoutPrimaryAction.kind === "continue"
-                            ? "接着译没做完的页，已完成的不会重来"
+                            ? "从第 1 页顺序检查未完成页，已完成的不会重来"
                             : layoutPrimaryAction.kind === "start"
-                              ? (layoutPrimaryAction.force ? "为当前模式启动新的 PDFMath 版式任务" : "从当前页优先，依次译完全部未完成页")
+                              ? (layoutPrimaryAction.force ? "为当前模式启动新的 PDFMath 版式任务" : "从第 1 页开始，依次译完全部未完成页")
                               : undefined
                         }
                       >
@@ -3330,6 +3695,18 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                         {layoutPrimaryAction.label}
                       </button>
                     )}
+
+                    {pdfMathState !== "working" && pageNum > 1 && !layoutPrimaryAction.disabled ? (
+                      <button
+                        type="button"
+                        className="pdf-layout-primary-btn"
+                        onClick={() => translateWithPdfMath({ force: layoutPrimaryAction.force, priorityPage: pageNum })}
+                        disabled={!pdfMathStatus.available}
+                        title={`从第 ${pageNum} 页向后翻译，到末尾再补前页；已完成页自动跳过`}
+                      >
+                        从当前第 {pageNum} 页开始
+                      </button>
+                    ) : null}
 
                     {(hasAnyPdfMathResult || layoutAllDone) && pdfMathState !== "working" ? (
                       <details className="pdf-layout-more">
@@ -3719,7 +4096,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                   </button>
                 </div>
                 <p className="pdf-ai-hint">
-                  快速：摘要/引言/结论要点 · 完全：更广正文 + 基础知识分层。
+                  解读后 AI 会给出概述，并一步步抛出引导问题带你精读：作答后导师批改、点「下一步」继续，进度自动保存。
                   快捷键 Ctrl+I / Ctrl+Shift+I · 放大侧栏 Ctrl+Shift+F
                 </p>
                 <UsageMeter
@@ -3765,109 +4142,280 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
 
                   {interpretResult ? (
                     <div className="pdf-ai-result">
-                      {interpretResult.oneSentence ? (
-                        <section className="pdf-ai-card">
-                          <h4>一句话概括</h4>
-                          <p>{interpretResult.oneSentence}</p>
-                        </section>
+                      <section className="pdf-ai-card pdf-ai-overview">
+                        <h4>论文概述</h4>
+                        {interpretResult.oneSentence ? (
+                          <p className="pdf-ai-overview-sentence">{interpretResult.oneSentence}</p>
+                        ) : null}
+                        {interpretResult.problem ? (
+                          <p className="pdf-ai-overview-problem">
+                            <strong>核心问题：</strong>
+                            {interpretResult.problem}
+                          </p>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="pdf-ai-fold-toggle"
+                          onClick={() => setShowFullInterpretation((v) => !v)}
+                        >
+                          <ChevronDown size={13} className={`pdf-ai-fold-chevron ${showFullInterpretation ? "up" : ""}`} />
+                          {showFullInterpretation ? "收起完整解读" : "查看完整解读"}
+                        </button>
+                      </section>
+
+                      {showFullInterpretation ? (
+                        <div className="pdf-ai-full">
+                          {prereqs.length ? (
+                            <section className="pdf-ai-card">
+                              <h4>理解本文所需基础知识</h4>
+                              <ul className="pdf-ai-prereq-list">
+                                {prereqs.map((p, i) => (
+                                  <li key={`${p.name}-${i}`}>
+                                    <div className="pdf-ai-prereq-head">
+                                      <strong>{p.name}</strong>
+                                      <span className={`pdf-ai-level ${p.level === "加分" ? "bonus" : "must"}`}>
+                                        {p.level || "必备"}
+                                      </span>
+                                    </div>
+                                    {p.why ? <p className="pdf-ai-why">{p.why}</p> : null}
+                                    {p.hint ? <p className="pdf-ai-hint-line">补齐建议：{p.hint}</p> : null}
+                                  </li>
+                                ))}
+                              </ul>
+                            </section>
+                          ) : null}
+
+                          {interpretResult.background ? (
+                            <section className="pdf-ai-card">
+                              <h4>研究背景</h4>
+                              <div className="pdf-ai-md">{renderMarkdown(interpretResult.background)}</div>
+                            </section>
+                          ) : null}
+
+                          {interpretResult.problem ? (
+                            <section className="pdf-ai-card">
+                              <h4>核心问题</h4>
+                              <div className="pdf-ai-md">{renderMarkdown(interpretResult.problem)}</div>
+                            </section>
+                          ) : null}
+
+                          {interpretResult.method ? (
+                            <section className="pdf-ai-card">
+                              <h4>方法要点</h4>
+                              <div className="pdf-ai-md">{renderMarkdown(interpretResult.method)}</div>
+                            </section>
+                          ) : null}
+
+                          {interpretResult.contributions?.length ? (
+                            <section className="pdf-ai-card">
+                              <h4>主要贡献</h4>
+                              <ul className="pdf-ai-bullets">
+                                {interpretResult.contributions.map((c, i) => (
+                                  <li key={i}>{c}</li>
+                                ))}
+                              </ul>
+                            </section>
+                          ) : null}
+
+                          {interpretResult.experiments ? (
+                            <section className="pdf-ai-card">
+                              <h4>实验与证据</h4>
+                              <div className="pdf-ai-md">{renderMarkdown(interpretResult.experiments)}</div>
+                            </section>
+                          ) : null}
+
+                          {interpretResult.findings ? (
+                            <section className="pdf-ai-card">
+                              <h4>主要结论</h4>
+                              <div className="pdf-ai-md">{renderMarkdown(interpretResult.findings)}</div>
+                            </section>
+                          ) : null}
+
+                          {interpretResult.limitations ? (
+                            <section className="pdf-ai-card">
+                              <h4>局限</h4>
+                              <div className="pdf-ai-md">{renderMarkdown(interpretResult.limitations)}</div>
+                            </section>
+                          ) : null}
+
+                          {interpretResult.takeaways?.length ? (
+                            <section className="pdf-ai-card">
+                              <h4>精炼要点</h4>
+                              <ul className="pdf-ai-bullets">
+                                {interpretResult.takeaways.map((t, i) => (
+                                  <li key={i}>{t}</li>
+                                ))}
+                              </ul>
+                            </section>
+                          ) : null}
+
+                          {interpretResult.conceptPath?.length ? (
+                            <section className="pdf-ai-card">
+                              <h4>概念学习路径</h4>
+                              <ol className="pdf-ai-steps">
+                                {interpretResult.conceptPath.map((s, i) => (
+                                  <li key={i}>{s}</li>
+                                ))}
+                              </ol>
+                            </section>
+                          ) : null}
+
+                          {interpretResult.readingTips ? (
+                            <section className="pdf-ai-card">
+                              <h4>阅读建议</h4>
+                              <div className="pdf-ai-md">{renderMarkdown(interpretResult.readingTips)}</div>
+                            </section>
+                          ) : null}
+                        </div>
                       ) : null}
 
-                      {prereqs.length ? (
-                        <section className="pdf-ai-card">
-                          <h4>理解本文所需基础知识</h4>
-                          <ul className="pdf-ai-prereq-list">
-                            {prereqs.map((p, i) => (
-                              <li key={`${p.name}-${i}`}>
-                                <div className="pdf-ai-prereq-head">
-                                  <strong>{p.name}</strong>
-                                  <span className={`pdf-ai-level ${p.level === "加分" ? "bonus" : "must"}`}>
-                                    {p.level || "必备"}
+                      {guidedPlan.length ? (
+                        <section className="pdf-ai-guided" aria-label="引导式精读">
+                          <div className="pdf-ai-guided-head" ref={guidedHeadRef}>
+                            <h4><CircleHelp size={14} /> 引导式精读</h4>
+                            <span className="pdf-ai-guided-progress">
+                              {guidedAllDone ? `已完成 ${guided.plan.length} 步` : `第 ${guided.index + 1} / ${guided.plan.length} 步`}
+                            </span>
+                          </div>
+                          <div className="pdf-ai-guided-track" aria-hidden="true">
+                            {guided.plan.map((step, i) => (
+                              <span
+                                key={step.id}
+                                className={[
+                                  "pdf-ai-guided-dot",
+                                  i < guided.index || guidedAllDone ? "done" : "",
+                                  i === guided.index && !guidedAllDone ? "current" : ""
+                                ].filter(Boolean).join(" ")}
+                              />
+                            ))}
+                          </div>
+
+                          {guided.plan.slice(0, guided.index).map((step, i) => {
+                            const record = guided.answers[step.id];
+                            return (
+                              <div key={step.id} className={`pdf-ai-guided-done ${openGuidedStepId === step.id ? "open" : ""}`}>
+                                <button
+                                  type="button"
+                                  className="pdf-ai-guided-done-head"
+                                  onClick={() => setOpenGuidedStepId(openGuidedStepId === step.id ? "" : step.id)}
+                                >
+                                  <span className="pdf-ai-guided-step-no">第 {i + 1} 步</span>
+                                  <strong>{step.title}</strong>
+                                  {record ? (
+                                    <span className={`pdf-ai-verdict ${record.verdict}`}>
+                                      {GUIDE_VERDICT_LABELS[record.verdict] || "已回答"}
+                                    </span>
+                                  ) : null}
+                                  <ChevronDown size={14} className="pdf-ai-guided-done-chevron" />
+                                </button>
+                                {openGuidedStepId === step.id ? (
+                                  <div className="pdf-ai-guided-done-body">
+                                    <p className="pdf-ai-guided-question">{step.question}</p>
+                                    <GuidedReviewBody record={record} onJump={jumpToEvidence} />
+                                    <GuideDialogThread {...guideDialogProps(step.id)} />
+                                  </div>
+                                ) : null}
+                              </div>
+                            );
+                          })}
+
+                          {guidedCurrentStep ? (
+                            <div className="pdf-ai-card pdf-ai-guided-step">
+                              <div className="pdf-ai-guided-step-head">
+                                <span className="pdf-ai-guided-step-no">第 {guided.index + 1} 步</span>
+                                <strong>{guidedCurrentStep.title}</strong>
+                                {guidedCurrentStep.stage ? <em className="pdf-ai-guided-stage">{guidedCurrentStep.stage}</em> : null}
+                              </div>
+                              {guidedCurrentStep.goal ? <p className="pdf-ai-guided-goal">{guidedCurrentStep.goal}</p> : null}
+                              {guidedCurrentStep.pages?.length ? (
+                                <p className="pdf-ai-guided-pages">
+                                  建议阅读：
+                                  {guidedCurrentStep.pages.map((p) => (
+                                    <button key={p} type="button" onClick={() => jumpToPageForGuide(p)}>
+                                      第 {p} 页
+                                    </button>
+                                  ))}
+                                </p>
+                              ) : null}
+                              {guidedCurrentStep.hint ? <p className="pdf-ai-hint-line">{guidedCurrentStep.hint}</p> : null}
+                              <p className="pdf-ai-guided-question">{guidedCurrentStep.question}</p>
+
+                              {guided.answers[guidedCurrentStep.id] ? (
+                                <>
+                                  <span className={`pdf-ai-verdict ${guided.answers[guidedCurrentStep.id].verdict}`}>
+                                    {GUIDE_VERDICT_LABELS[guided.answers[guidedCurrentStep.id].verdict] || "已回答"}
                                   </span>
-                                </div>
-                                {p.why ? <p className="pdf-ai-why">{p.why}</p> : null}
-                                {p.hint ? <p className="pdf-ai-hint-line">补齐建议：{p.hint}</p> : null}
-                              </li>
-                            ))}
-                          </ul>
+                                  <GuidedReviewBody record={guided.answers[guidedCurrentStep.id]} onJump={jumpToEvidence} />
+                                  <GuideDialogThread {...guideDialogProps(guidedCurrentStep.id)} />
+                                  <div className="pdf-ai-guided-actions">
+                                    <button
+                                      type="button"
+                                      className="pdf-ai-guided-next"
+                                      onClick={advanceGuidedStep}
+                                      disabled={guideBusy}
+                                    >
+                                      {guided.index + 1 < guided.plan.length ? "下一步" : "完成引导"}
+                                      <ChevronRight size={14} />
+                                    </button>
+                                  </div>
+                                </>
+                              ) : (
+                                <>
+                                  <textarea
+                                    className="pdf-ai-guided-input"
+                                    rows={aiFocus ? 4 : 3}
+                                    value={guideDraft}
+                                    maxLength={4000}
+                                    placeholder="读完建议页码后，用自己的话写下你的理解。写多少都可以，说错了也没关系——导师会给出点评。"
+                                    disabled={!config || guideBusy}
+                                    onChange={(e) => setGuideDraft(e.target.value)}
+                                  />
+                                  {guideError ? <div className="pdf-config-hint">{guideError}</div> : null}
+                                  <div className="pdf-ai-guided-actions">
+                                    <button
+                                      type="button"
+                                      className="pdf-ai-guided-skip"
+                                      onClick={() => submitGuidedAnswer(true)}
+                                      disabled={!config || guideBusy}
+                                    >
+                                      跳过本步
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="pdf-ai-guided-submit"
+                                      onClick={() => submitGuidedAnswer(false)}
+                                      disabled={!config || guideBusy || !guideDraft.trim()}
+                                    >
+                                      {guideBusy ? <Loader2 size={14} className="spin" /> : <Check size={14} />}
+                                      {guideBusy ? "导师批改中…" : "提交回答"}
+                                    </button>
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="pdf-ai-card pdf-ai-guided-finish">
+                              <h4><Flag size={14} /> 引导阅读完成</h4>
+                              <p>
+                                你走完了这 {guided.plan.length} 步，回答了 {guidedAnsweredCount} 个引导问题。这篇论文值得带走的要点：
+                              </p>
+                              {interpretResult.takeaways?.length ? (
+                                <ul className="pdf-ai-bullets">
+                                  {interpretResult.takeaways.map((t, i) => (
+                                    <li key={i}>{t}</li>
+                                  ))}
+                                </ul>
+                              ) : null}
+                              <p className="pdf-ai-hint-line">想继续深挖可在下方自由追问；展开上面任意一步还能继续和导师聊；点「重新开始」可以再走一遍巩固理解。</p>
+                              <div className="pdf-ai-guided-actions">
+                                <button type="button" className="pdf-ai-guided-skip" onClick={restartGuided}>
+                                  重新开始
+                                </button>
+                              </div>
+                            </div>
+                          )}
                         </section>
-                      ) : null}
-
-                      {interpretResult.background ? (
-                        <section className="pdf-ai-card">
-                          <h4>研究背景</h4>
-                          <div className="pdf-ai-md">{renderMarkdown(interpretResult.background)}</div>
-                        </section>
-                      ) : null}
-
-                      {interpretResult.problem ? (
-                        <section className="pdf-ai-card">
-                          <h4>核心问题</h4>
-                          <div className="pdf-ai-md">{renderMarkdown(interpretResult.problem)}</div>
-                        </section>
-                      ) : null}
-
-                      {interpretResult.method ? (
-                        <section className="pdf-ai-card">
-                          <h4>方法要点</h4>
-                          <div className="pdf-ai-md">{renderMarkdown(interpretResult.method)}</div>
-                        </section>
-                      ) : null}
-
-                      {interpretResult.contributions?.length ? (
-                        <section className="pdf-ai-card">
-                          <h4>主要贡献</h4>
-                          <ul className="pdf-ai-bullets">
-                            {interpretResult.contributions.map((c, i) => (
-                              <li key={i}>{c}</li>
-                            ))}
-                          </ul>
-                        </section>
-                      ) : null}
-
-                      {interpretResult.experiments ? (
-                        <section className="pdf-ai-card">
-                          <h4>实验与证据</h4>
-                          <div className="pdf-ai-md">{renderMarkdown(interpretResult.experiments)}</div>
-                        </section>
-                      ) : null}
-
-                      {interpretResult.findings ? (
-                        <section className="pdf-ai-card">
-                          <h4>主要结论</h4>
-                          <div className="pdf-ai-md">{renderMarkdown(interpretResult.findings)}</div>
-                        </section>
-                      ) : null}
-
-                      {interpretResult.limitations ? (
-                        <section className="pdf-ai-card">
-                          <h4>局限</h4>
-                          <div className="pdf-ai-md">{renderMarkdown(interpretResult.limitations)}</div>
-                        </section>
-                      ) : null}
-
-                      {interpretResult.takeaways?.length ? (
-                        <section className="pdf-ai-card">
-                          <h4>精炼要点</h4>
-                          <ul className="pdf-ai-bullets">
-                            {interpretResult.takeaways.map((t, i) => (
-                              <li key={i}>{t}</li>
-                            ))}
-                          </ul>
-                        </section>
-                      ) : null}
-
-                      {interpretResult.conceptPath?.length ? (
-                        <section className="pdf-ai-card">
-                          <h4>概念学习路径</h4>
-                          <ol className="pdf-ai-steps">
-                            {interpretResult.conceptPath.map((s, i) => (
-                              <li key={i}>{s}</li>
-                            ))}
-                          </ol>
-                        </section>
-                      ) : null}
-
-                      {interpretResult.questions?.length ? (
+                      ) : interpretResult.questions?.length ? (
                         <section className="pdf-ai-card">
                           <h4>精读五问</h4>
                           <ol className="pdf-ai-steps">
@@ -3877,17 +4425,11 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                           </ol>
                         </section>
                       ) : null}
-
-                      {interpretResult.readingTips ? (
-                        <section className="pdf-ai-card">
-                          <h4>阅读建议</h4>
-                          <div className="pdf-ai-md">{renderMarkdown(interpretResult.readingTips)}</div>
-                        </section>
-                      ) : null}
                     </div>
                   ) : !interpretLoading && !interpretError ? (
                     <p className="pdf-no-text">
-                      点「快速解读」或按 Ctrl+I，让 AI 先读文章并列出理解所需基础知识。
+                      点「快速解读」或按 Ctrl+I，AI 会先读论文给出概述，
+                      再用一个个引导问题带你逐步读懂这篇文章，进度自动保存、随时继续。
                       需要更大阅读区时，点「放大」。
                     </p>
                   ) : null}

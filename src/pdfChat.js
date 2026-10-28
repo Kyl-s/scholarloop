@@ -26,3 +26,19 @@ export function settleFollowup(followups, id, answer, status = "done", evidence 
   if (found) return next;
   return [...next, { ...settled, q: settled.q || "（追问）" }];
 }
+
+/**
+ * 引导步骤内的持续对话：在某个回答记录上追加一条消息（用户或导师）
+ */
+export function appendDialogMessage(record, { role, text, evidence = [], error = false, at = "" } = {}) {
+  const isAssistant = role === "assistant";
+  const message = {
+    role: isAssistant ? "assistant" : "user",
+    text: String(text || ""),
+    evidence: isAssistant && Array.isArray(evidence) ? evidence : [],
+    error: isAssistant ? Boolean(error) : false,
+    at: String(at || new Date().toISOString())
+  };
+  const dialog = Array.isArray(record?.dialog) ? record.dialog : [];
+  return [...dialog, message];
+}

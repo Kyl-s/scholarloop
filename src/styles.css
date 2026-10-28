@@ -2286,13 +2286,13 @@ code {
 }
 
 .library-table {
-  /* 操作列多了「外部打开」，略加宽避免横向滚动条 */
-  min-width: 960px;
+  /* 留足标题和操作区空间，窄屏通过容器横向滚动 */
+  min-width: 920px;
 }
 
 .lib-row {
   display: grid;
-  grid-template-columns: minmax(300px, 1.8fr) 150px 100px 130px 110px 152px;
+  grid-template-columns: minmax(300px, 1.8fr) 150px 100px 130px 152px;
   align-items: center;
   gap: 12px;
   padding: 12px 16px;
@@ -2349,19 +2349,6 @@ code {
   font-style: normal;
   font-size: 11px;
   color: var(--muted);
-}
-
-.review-cell {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.review-cell.overdue {
-  color: var(--red);
-  font-weight: 600;
 }
 
 .lib-actions {
@@ -4620,6 +4607,27 @@ code {
   color: #9a5b00;
 }
 
+.pdf-layout-rerun-page-btn {
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid #c8d7ff;
+  border-radius: 999px;
+  background: #f4f7ff;
+  color: #2856d8;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.pdf-layout-rerun-page-btn:hover:not(:disabled) {
+  background: #e8efff;
+}
+
+.pdf-layout-rerun-page-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .pdf-layout-status-detail {
   margin: 0;
   font-size: 12px;
@@ -5566,6 +5574,487 @@ code {
 .pdf-ai-ask-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+/* AI 解读：精简概述 + 折叠完整解读 */
+.pdf-ai-overview {
+  border-left: 3px solid #2a58c9;
+}
+
+.pdf-ai-overview-sentence {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.7;
+  color: #1a2f55;
+}
+
+.pdf-ai-overview-problem {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #4a5d7a;
+}
+
+.pdf-ai-overview-problem strong {
+  color: #1e3a6e;
+}
+
+.pdf-ai-fold-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  border: none;
+  background: none;
+  padding: 2px 0;
+  color: #2a58c9;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pdf-ai-fold-toggle:hover {
+  text-decoration: underline;
+}
+
+.pdf-ai-fold-chevron {
+  transition: transform 0.15s ease;
+}
+
+.pdf-ai-fold-chevron.up {
+  transform: rotate(180deg);
+}
+
+.pdf-ai-full {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px dashed #d5def2;
+  border-radius: 8px;
+  background: #f9fbff;
+}
+
+/* AI 解读：引导式精读 */
+.pdf-ai-guided {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pdf-ai-guided-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pdf-ai-guided-head h4 {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  font-size: 12.5px;
+  color: #1e3a6e;
+}
+
+.pdf-ai-guided-progress {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #2a58c9;
+}
+
+.pdf-ai-guided-track {
+  display: flex;
+  gap: 5px;
+}
+
+.pdf-ai-guided-dot {
+  flex: 1;
+  height: 4px;
+  border-radius: 999px;
+  background: #dde6f7;
+  transition: background 0.2s ease;
+}
+
+.pdf-ai-guided-dot.done {
+  background: #3568ed;
+}
+
+.pdf-ai-guided-dot.current {
+  background: linear-gradient(90deg, #3568ed, #8fb0f5);
+}
+
+.pdf-ai-guided-step {
+  border-left: 3px solid #3568ed;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pdf-ai-guided-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pdf-ai-guided-step-head strong {
+  font-size: 13px;
+  color: #1a2f55;
+}
+
+.pdf-ai-guided-step-no {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #fff;
+  background: #3568ed;
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.pdf-ai-guided-stage {
+  font-size: 11px;
+  font-style: normal;
+  color: #52678a;
+  border: 1px solid #dbe4f4;
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.pdf-ai-guided-goal {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #4a5d7a;
+}
+
+.pdf-ai-guided-pages {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 0;
+  font-size: 12px;
+  color: #4a5d7a;
+}
+
+.pdf-ai-guided-pages button {
+  border: 1px solid #c9d6f2;
+  background: #fff;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11.5px;
+  color: #2a58c9;
+  cursor: pointer;
+}
+
+.pdf-ai-guided-pages button:hover {
+  background: #eaf1ff;
+  border-color: #6c93e4;
+}
+
+.pdf-ai-guided-question {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.7;
+  color: #1a2f55;
+  background: #f3f7ff;
+  border: 1px solid #e2e9f8;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.pdf-ai-guided-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 64px;
+  border: 1px solid #c9d6f2;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  font-family: inherit;
+  background: #fff;
+}
+
+.pdf-ai-guided-input:focus-visible {
+  outline: 2px solid #9db8f0;
+  outline-offset: 1px;
+}
+
+.pdf-ai-guided-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.pdf-ai-guided-submit,
+.pdf-ai-guided-next {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  border-radius: 8px;
+  padding: 7px 14px;
+  background: #2a58c9;
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.pdf-ai-guided-submit:disabled,
+.pdf-ai-guided-next:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.pdf-ai-guided-skip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #c9d6f2;
+  background: #fff;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: #52678a;
+  cursor: pointer;
+}
+
+.pdf-ai-guided-skip:hover {
+  color: #2a58c9;
+  border-color: #6c93e4;
+}
+
+.pdf-ai-verdict {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.pdf-ai-verdict.good {
+  background: #e8f7ee;
+  color: #1d7a45;
+}
+
+.pdf-ai-verdict.partial {
+  background: #fff6e0;
+  color: #9a6b12;
+}
+
+.pdf-ai-verdict.off {
+  background: #ffe8e0;
+  color: #b23b1a;
+}
+
+.pdf-ai-verdict.skipped {
+  background: #edf1f7;
+  color: #6b7c99;
+}
+
+.pdf-ai-guided-strengths {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: #1d7a45;
+}
+
+.pdf-ai-guided-feedback {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #fff;
+  border: 1px solid #dbe4f4;
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+.pdf-ai-guided-reference {
+  font-size: 13px;
+  border: 1px dashed #d5def2;
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: #f9fbff;
+}
+
+.pdf-ai-guided-reference summary {
+  font-size: 12px;
+  font-weight: 600;
+  color: #2a58c9;
+  cursor: pointer;
+  user-select: none;
+}
+
+.pdf-ai-guided-reference .pdf-ai-a {
+  margin-top: 6px;
+}
+
+.pdf-ai-guided-skipped {
+  margin: 0;
+  font-size: 12px;
+  color: #6b7c99;
+}
+
+.pdf-ai-guided-review {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.pdf-ai-guided-review .pdf-ai-message {
+  max-width: 100%;
+}
+
+.pdf-ai-guided-done {
+  border: 1px solid #e2e9f8;
+  border-radius: 8px;
+  background: #fbfcff;
+  overflow: hidden;
+}
+
+.pdf-ai-guided-done-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.pdf-ai-guided-done-head strong {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: #1a2f55;
+}
+
+.pdf-ai-guided-done-chevron {
+  flex-shrink: 0;
+  color: #6b7c99;
+  transition: transform 0.15s ease;
+}
+
+.pdf-ai-guided-done.open .pdf-ai-guided-done-chevron {
+  transform: rotate(180deg);
+}
+
+.pdf-ai-guided-done-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+
+.pdf-ai-guided-done-body .pdf-ai-guided-question {
+  font-weight: 500;
+  color: #4a5d7a;
+  background: #f3f6fc;
+}
+
+.pdf-ai-guided-finish {
+  border-left: 3px solid #1d7a45;
+}
+
+.pdf-ai-guided-finish h4 {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* 引导步骤内的持续对话：每一步都可以反复追问 */
+.pdf-ai-guide-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px dashed #dde5f3;
+  padding-top: 8px;
+}
+
+.pdf-ai-guide-dialog-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.pdf-ai-guide-dialog .pdf-ai-message {
+  max-width: 100%;
+}
+
+.pdf-ai-guide-dialog-empty {
+  margin: 0;
+  font-size: 12px;
+  color: #6b7c99;
+}
+
+.pdf-ai-guide-dialog-input {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.pdf-ai-guide-dialog-input textarea {
+  flex: 1;
+  resize: vertical;
+  border: 1px solid #d8e1f2;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #1a2f55;
+  background: #fff;
+}
+
+.pdf-ai-guide-dialog-input textarea:focus {
+  outline: none;
+  border-color: #3b6ef5;
+}
+
+.pdf-ai-guide-dialog-input textarea:disabled {
+  background: #f4f7fc;
+  color: #8a99b3;
+}
+
+.pdf-ai-guide-dialog-input button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 8px;
+  background: #3b6ef5;
+  color: #fff;
+  cursor: pointer;
+}
+
+.pdf-ai-guide-dialog-input button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* AI 解读：侧栏内壳 */
@@ -8594,15 +9083,19 @@ code {
     padding: 14px;
   }
 
+  .library-table {
+    min-width: 600px;
+  }
+
   .lib-row {
-    grid-template-columns: minmax(240px, 1fr) 120px 90px;
+    grid-template-columns: minmax(240px, 1fr) 120px 152px;
   }
 
   .lib-head {
     display: none;
   }
 
-  .lib-row > span:nth-child(4), .lib-row > span:nth-child(5) {
+  .lib-row > span:nth-child(4) {
     display: none;
   }
 
@@ -10047,3 +10540,20 @@ body {
     align-items: flex-start;
   }
 }
+.source-status .partial i { background: #d69a16; }
+.source-status .muted i { background: #94a3b8; }
+
+.source-connectivity { margin: 12px 0; padding: 12px 14px; border: 1px solid #e1e7f0; border-radius: 10px; background: #f8faff; }
+.source-connectivity-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; font-size: 12px; }
+.source-connectivity-head > span, .source-connectivity small { color: #64748b; }
+.source-connectivity-head button { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; padding: 5px 8px; border: 1px solid #dbe3f0; border-radius: 6px; background: white; color: #315edb; cursor: pointer; }
+.source-connectivity-head button:disabled { opacity: .6; cursor: wait; }
+.source-connectivity-list { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 10px 0; }
+.source-connectivity-item { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; }
+.source-connection-badge { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 12px; color: #64748b; }
+.source-connection-badge i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.source-connection-badge.ok { color: #078369; }
+.source-connection-badge.warn { color: #a46b08; }
+.source-connection-badge.fail { color: #c24141; }
+.source-connectivity small { display: block; font-size: 11px; line-height: 1.6; }
+.source-line-status { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }

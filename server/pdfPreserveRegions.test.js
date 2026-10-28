@@ -8,12 +8,15 @@ import { fileURLToPath } from "node:url";
 import {
   buildPreservePythonEnv,
   classifyPreserveLine,
+  collectEquationRegionBoxes,
   collectFormulaLeakBoxes,
   collectPreserveBoxes,
+  countUntranslatedClusters,
   isAffiliationLine,
   isAuthorLine,
   isFormulaLikeLine,
   isMetaLine,
+  isUntranslatedBodyLine,
   resolvePreservePython,
   restorePreservedRegions
 } from "./pdfPreserveRegions.js";
@@ -97,6 +100,82 @@ test("marks leaked formula lines for restore", () => {
   );
   assert.equal(leaks.length, 1);
   assert.equal(leaks[0].reason, "formula-leak");
+});
+
+test("treats long math-dense prose+formula lines as formula-like", () => {
+  const mixed = "where the TD loss, an approximate dynamic programming approach for learning the value function along trajectories, is L_{TD}(θ) = E_{(s,a,s′)∼D}[R(s,a) + γE_{a∗∼π}Q_θ(s′,a∗) − Q_θ(s,a)]";
+  assert.ok(mixed.length > 160);
+  assert.equal(isFormulaLikeLine(mixed), true);
+  const prose = "We also assume that we are given a set of skills where each skill performs a short task in the environment described by the natural language instruction provided by the user.";
+  assert.ok(prose.length > 160);
+  assert.equal(isFormulaLikeLine(prose), false);
+});
+
+test("formula leak detection tolerates reflowed translations but not other columns", () => {
+  const src = { text: "E1(x, y) = A sin(2πf1 t)", x0: 80, y0: 200, x1: 240, y1: 212 };
+  // 译文行被重排下移：重叠不足 40%，但行中心落在源行 ±3pt 带内 → 命中
+  const shifted = collectFormulaLeakBoxes(
+    [src],
+    [{ text: "E1(x, y) 等于振幅正弦", x0: 80, y0: 209, x1: 240, y1: 221 }]
+  );
+  assert.equal(shifted.length, 1);
+  // 另一栏同一水平线上的中文行：水平无重叠 → 不命中
+  const otherColumn = collectFormulaLeakBoxes(
+    [src],
+    [{ text: "右栏译文内容", x0: 300, y0: 200, x1: 450, y1: 212 }]
+  );
+  assert.equal(otherColumn.length, 0);
+  // 远离源行的中文行：不命中
+  const farAway = collectFormulaLeakBoxes(
+    [src],
+    [{ text: "远处的中文行", x0: 80, y0: 224, x1: 240, y1: 236 }]
+  );
+  assert.equal(farAway.length, 0);
+});
+
+test("maps vision equation regions onto source line boxes", () => {
+  const sourceLines = [
+    { text: "L_{TD}(θ) = E[R(s,a) + γQ]", x0: 80, y0: 100, x1: 300, y1: 112 },
+    { text: "We now describe the SayCan approach.", x0: 80, y0: 130, x1: 300, y1: 142 },
+    { text: "p(c_π|s, ℓ_π) ∝ p(c_π|s) p(ℓ_π|i) (2)", x0: 80, y0: 160, x1: 300, y1: 172 }
+  ];
+  const boxes = collectEquationRegionBoxes(sourceLines, [
+    ["L_{TD}(θ) = E[R(s,a) + γQ]"],
+    ["p(c_π|s, ℓ_π) ∝ p(c_π|s) p(ℓ_π|i)"]
+  ]);
+  assert.equal(boxes.length, 2);
+  assert.ok(boxes.every((box) => box.reason === "vision-equation"));
+  assert.ok(boxes[0].y1 < 130);
+  assert.ok(boxes[1].y0 > 142);
+  // 源文本里没有的行 → 空结果
+  const missing = collectEquationRegionBoxes(sourceLines, [["Q(s′,a∗) = some unseen line"]]);
+  assert.equal(missing.length, 0);
+  assert.deepEqual(collectEquationRegionBoxes(sourceLines, []), []);
+});
+
+test("counts clusters of untranslated English body lines", () => {
+  assert.equal(isUntranslatedBodyLine("We also assume that we are given a set of skills where each skill performs a short task."), true);
+  assert.equal(isUntranslatedBodyLine("在本工作中，我们利用基于 TD 的方法学习上述价值函数，该函数还以语言指令为附加条件。"), false);
+  assert.equal(isUntranslatedBodyLine("A. Brohan et al. Do as I can not as i say grounding language in robotic affordances 2023."), false);
+  assert.equal(isUntranslatedBodyLine("3 S SayCan: Do As I Can"), false);
+  const lines = [
+    { text: "在本工作中，我们利用基于 TD 的方法学习上述价值函数，并利用这些价值函数判断给定指令是否可行。", x0: 80, y0: 100, x1: 500, y1: 112 },
+    { text: "We also assume that we are given a set of skills where each skill performs a short", x0: 80, y0: 130, x1: 500, y1: 142 },
+    { text: "task in the environment and the natural language instruction provided by the user", x0: 80, y0: 144, x1: 500, y1: 156 },
+    { text: "describes what the robot should do in that particular state of the world today", x0: 80, y0: 158, x1: 500, y1: 170 },
+    { text: "将大型语言模型与机器人连接。大型语言模型虽然能够利用从海量文本中学到的丰富知识。", x0: 80, y0: 200, x1: 500, y1: 212 },
+    { text: "This corresponds to the task-grounding function that scores which skills are useful", x0: 80, y0: 240, x1: 500, y1: 252 },
+    { text: "for making progress towards completing the instruction given by the user here", x0: 80, y0: 254, x1: 500, y1: 266 }
+  ];
+  assert.equal(countUntranslatedClusters(lines), 2);
+  // 单行不成簇
+  assert.equal(countUntranslatedClusters([lines[1]]), 0);
+  // 整页参考文献式的英文行（et al 过滤后只剩少量）不会算成散发漏译
+  const refs = Array.from({ length: 10 }, (_, i) => ({
+    text: `A. Author et al. Title of reference number ${i} journal series volume pages ${2000 + i}.`,
+    x0: 80, y0: 100 + i * 14, x1: 500, y1: 112 + i * 14
+  }));
+  assert.equal(countUntranslatedClusters(refs), 0);
 });
 
 test("academic prompt forbids translating author blocks and formulas", async () => {

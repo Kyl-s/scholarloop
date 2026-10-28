@@ -117,7 +117,7 @@ test("builds PDFMathTranslate-next args without legacy flags or API keys", () =>
   assert.equal(args[args.indexOf("--lang-in") + 1], "en");
   assert.equal(args[args.indexOf("--lang-out") + 1], "zh");
   assert.ok(args.includes("--openai"));
-  assert.equal(args[args.indexOf("--openai-timeout") + 1], "45");
+  assert.equal(args[args.indexOf("--openai-timeout") + 1], "90");
   assert.equal(args[args.indexOf("--qps") + 1], "12");
   assert.equal(args[args.indexOf("--pool-max-workers") + 1], "8");
   assert.ok(args.includes("--no-auto-extract-glossary"));
@@ -190,21 +190,23 @@ test("allows a provider-specific PDFMathTranslate speed profile", () => {
   assert.equal(invocation.args[workersIndex + 1], "6");
 });
 
-test("orders progressive pages in reading order from the current page", () => {
-  // 当前页 → 向后 → 再补前面（兼容/展示用）
+test("orders progressive pages from page one by default or an explicit starting page", () => {
+  assert.deepEqual(buildPdfMathPageOrder(5), [1, 2, 3, 4, 5]);
+  assert.deepEqual(buildPdfMathPageOrder(0), []);
+  // 显式起始页 → 向后 → 再补前面
   assert.deepEqual(buildPdfMathPageOrder(5, 3), [3, 4, 5, 1, 2]);
   assert.deepEqual(buildPdfMathPageOrder(3, 1), [1, 2, 3]);
   assert.deepEqual(buildPdfMathPageOrder(1, 9), [1]);
   assert.deepEqual(buildPdfMathPageOrder(4, 4), [4, 1, 2, 3]);
 });
 
-test("work window is only current page plus next-page prefetch", () => {
+test("retains the legacy work-window helper without limiting the translation queue", () => {
   assert.deepEqual(buildPdfMathWorkWindow(10, 2), [2, 3]);
   assert.deepEqual(buildPdfMathWorkWindow(3, 3), [3]);
   assert.deepEqual(buildPdfMathWorkWindow(5, 1), [1, 2]);
 });
 
-test("picks only within the reading window and never redoes completed pages", () => {
+test("legacy reading-window jobs now continue sequentially and never redo completed pages", () => {
   const job = {
     pageCount: 4,
     priorityPage: 2,
@@ -221,10 +223,13 @@ test("picks only within the reading window and never redoes completed pages", ()
   assert.equal(next.status, "running");
   assert.equal(job.pages[1].status, "running");
 
-  // 当前页+下一页都完成后，不应再去抢第 4 页
+  // 旧窗口完成后继续第 4 页，再回到第 1 页，不等待浏览翻页。
   job.pages[1] = { page: 2, status: "completed", monoFile: "page-002.zh.mono.pdf", dualFile: "" };
   job.pages[2] = { page: 3, status: "completed", monoFile: "page-003.zh.mono.pdf", dualFile: "" };
-  assert.equal(pickNextPdfMathPage(job), null);
+  assert.equal(pickNextPdfMathPage(job).page, 4);
+  job.pages[3] = { page: 4, status: "completed", monoFile: "page-004.zh.mono.pdf", dualFile: "" };
+  assert.equal(pickNextPdfMathPage(job).page, 1);
+  job.pages[0] = { page: 1, status: "completed", monoFile: "page-001.zh.mono.pdf", dualFile: "" };
 
   // 已有产物的页即使 status 被弄脏也绝不重译
   job.priorityPage = 2;
@@ -236,6 +241,26 @@ test("picks only within the reading window and never redoes completed pages", ()
   job.pages[1] = { page: 2, status: "running", monoFile: "page-002.zh.mono.pdf", dualFile: "" };
   assert.equal(pageIsDone(job.pages[1]), false);
   assert.equal(pickNextPdfMathPage(job), null);
+});
+
+test("default queue starts at page one and resumes in order while skipping existing output", () => {
+  const job = {
+    pageCount: 5,
+    pages: Array.from({ length: 5 }, (_, index) => ({ page: index + 1, status: "queued", monoFile: "", dualFile: "" }))
+  };
+  const first = pickNextPdfMathPage(job);
+  assert.equal(first.page, 1);
+  Object.assign(first, { status: "completed", monoFile: "page-001.zh.mono.pdf" });
+  // 模拟续译：中间一页已完成，另一页已有产物但状态残留。
+  Object.assign(job.pages[2], { status: "completed", monoFile: "page-003.zh.mono.pdf" });
+  Object.assign(job.pages[3], { status: "queued", monoFile: "page-004.zh.mono.pdf" });
+  const resumed = [];
+  for (let page = pickNextPdfMathPage(job); page; page = pickNextPdfMathPage(job)) {
+    resumed.push(page.page);
+    Object.assign(page, { status: "completed", monoFile: `page-${page.page}.zh.mono.pdf` });
+  }
+  assert.deepEqual(resumed, [2, 5]);
+  assert.equal(job.pages[3].status, "completed");
 });
 
 test("all-remaining mode continues incomplete pages and skips completed ones", () => {
@@ -259,6 +284,8 @@ test("all-remaining mode continues incomplete pages and skips completed ones", (
   job.pages[3] = { page: 4, status: "completed", monoFile: "page-004.zh.mono.pdf", dualFile: "" };
   const third = pickNextPdfMathPage(job);
   assert.equal(third.page, 1);
+  Object.assign(third, { status: "completed", monoFile: "page-001.zh.mono.pdf" });
+  assert.equal(pickNextPdfMathPage(job), null);
 });
 
 test("can skip dual PDF generation for faster mono-only output", () => {
@@ -384,6 +411,52 @@ test("publishes the first completed page while later pages are still running", a
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     fs.rmSync(path.join(process.cwd(), "data", "pdf-translations", started.jobId), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("progressive jobs finish the whole queue in default or explicit starting-page order", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scholarloop-pdfmath-order-"));
+  try {
+    for (const priorityPage of [undefined, 3]) {
+      const orderFile = path.join(dir, `order-${priorityPage || "default"}.txt`);
+      const command = path.join(dir, process.platform === "win32" ? "ordered.cmd" : "ordered");
+      fs.writeFileSync(command, process.platform === "win32"
+        ? [
+          "@echo off",
+          `>> "${orderFile}" echo %~3`,
+          'if not exist "%~3" mkdir "%~3"',
+          '> "%~3\\source.zh.mono.pdf" echo %%PDF-1.4',
+          '>> "%~3\\source.zh.mono.pdf" echo %%EOF',
+          "exit /b 0", ""
+        ].join("\r\n")
+        : `#!/bin/sh\nprintf '%s\\n' "$3" >> '${orderFile}'\nmkdir -p "$3"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > "$3/source.zh.mono.pdf"\n`,
+      { mode: 0o755 });
+      const started = startPdfMathTranslation({
+        data: Buffer.from("%PDF-1.7\n").toString("base64"),
+        binary: command,
+        pageCount: 4,
+        ...(priorityPage === undefined ? {} : { priorityPage }),
+        config: { baseUrl: "http://127.0.0.1:1", apiKey: "test-secret", model: "test-model" }
+      });
+      let job = started;
+      try {
+        for (let attempt = 0; attempt < 200 && !["completed", "failed", "canceled"].includes(job.status); attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          job = getPdfMathTranslationJob(started.jobId);
+        }
+        assert.equal(job.status, "completed", job.error || job.progress);
+        assert.equal(job.completedPages, 4);
+        assert.equal(job.priorityPage, priorityPage || 1);
+        assert.equal(job.translateMode, "all-remaining");
+        const order = [...fs.readFileSync(orderFile, "utf8").matchAll(/page-(\d+)/g)].map((match) => Number(match[1]));
+        assert.deepEqual(order, priorityPage ? [3, 4, 1, 2] : [1, 2, 3, 4]);
+      } finally {
+        if (!["completed", "failed", "canceled"].includes(job.status)) cancelPdfMathTranslation(started.jobId);
+        fs.rmSync(path.join(process.cwd(), "data", "pdf-translations", started.jobId), { recursive: true, force: true });
+      }
+    }
+  } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -786,7 +859,7 @@ test("视觉准备阶段取消时不启动 PDFMathTranslate", async () => {
   }
 });
 
-test("视觉准备阶段抢占时让出页面且继续处理新阅读页", async () => {
+test("视觉准备阶段显式抢占后优先翻译指定页并续译被让出的页面", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scholarloop-pdfmath-visual-preempt-"));
   const command = path.join(dir, process.platform === "win32" ? "fake-visual-preempt.cmd" : "fake-visual-preempt");
   const script = process.platform === "win32"
@@ -795,6 +868,7 @@ test("视觉准备阶段抢占时让出页面且继续处理新阅读页", async
   fs.writeFileSync(command, script, { mode: 0o755 });
   let firstVisionStarted;
   let visionCalls = 0;
+  const visionPages = [];
   const firstStarted = new Promise((resolve) => { firstVisionStarted = resolve; });
   const makeContext = (page) => ({ version: "page-context-v1", page, textLayer: true, columns: 1, readingOrder: [0], regions: [{ kind: "text", order: 0, lineIndexes: [0], confidence: 1 }], notes: "" });
   const started = startPdfMathTranslation({
@@ -808,6 +882,7 @@ test("视觉准备阶段抢占时让出页面且继续处理新阅读页", async
       renderer: () => ({ textLayer: true, image: "data:image/png;base64,AA==", lines: [{ text: "Title" }] }),
       vision: ({ page, signal }) => {
         visionCalls += 1;
+        visionPages.push(page);
         if (visionCalls === 1) {
           firstVisionStarted();
           return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("vision preempted")), { once: true }));
@@ -821,16 +896,20 @@ test("视觉准备阶段抢占时让出页面且继续处理新阅读页", async
     await firstStarted;
     setPdfMathTranslationPriority(started.jobId, 2);
     let job = getPdfMathTranslationJob(started.jobId);
-    for (let attempt = 0; attempt < 100 && job.pages[1].status !== "completed"; attempt += 1) {
+    for (let attempt = 0; attempt < 100 && !["completed", "failed", "canceled"].includes(job.status); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 25));
       job = getPdfMathTranslationJob(started.jobId);
     }
-    assert.equal(job.pages[0].status, "queued");
-    assert.equal(job.pages[0].assist.status, "queued");
-    assert.equal(job.pages[0].assist.context, null);
+    assert.equal(job.status, "completed", job.error || job.progress);
+    assert.deepEqual(visionPages, [1, 2, 1]);
+    assert.equal(job.pages[0].status, "completed");
     assert.equal(job.pages[1].status, "completed", job.error || job.progress);
   } finally {
     cancelPdfMathTranslation(started.jobId);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (["completed", "failed", "canceled"].includes(getPdfMathTranslationJob(started.jobId)?.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
     fs.rmSync(path.join(process.cwd(), "data", "pdf-translations", started.jobId), { recursive: true, force: true });
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -140,6 +140,30 @@ function extractJsonObject(text) {
   }
 }
 
+function normalizeGuidedSteps(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((step) => {
+      if (typeof step === "string") {
+        return { stage: "", title: "", goal: "", question: step.trim(), hint: "", pages: [] };
+      }
+      const pages = (Array.isArray(step?.pages) ? step.pages : [step?.page])
+        .map((p) => Number(p) || 0)
+        .filter((p) => p > 0)
+        .slice(0, 6);
+      return {
+        stage: String(step?.stage || "").trim(),
+        title: String(step?.title || step?.name || "").trim(),
+        goal: String(step?.goal || step?.aim || "").trim(),
+        question: String(step?.question || step?.ask || "").trim(),
+        hint: String(step?.hint || step?.tip || "").trim(),
+        pages
+      };
+    })
+    .filter((step) => step.question)
+    .slice(0, 8);
+}
+
 function normalizeEvidence(value) {
   if (!Array.isArray(value)) return [];
   return value
@@ -205,7 +229,8 @@ function normalizeResult(parsed, mode) {
     takeaways: list(obj.takeaways),
     questions: list(obj.questions),
     readingTips: String(obj.readingTips || "").trim(),
-    evidence: normalizeEvidence(obj.evidence)
+    evidence: normalizeEvidence(obj.evidence),
+    guidedSteps: normalizeGuidedSteps(obj.guidedSteps)
   };
 
   if (mode === "full") {
@@ -248,6 +273,16 @@ async function callChat({ baseUrl, apiKey, model, system, user, maxTokens = 5000
 }
 
 function systemPrompt(mode) {
+  const guidedStepsSpec = `  "guidedSteps": [
+    {"stage":"阶段标签(如:整体印象)","title":"步骤标题(简短)","goal":"这一步帮读者建立什么理解(一句话)","pages":[1,2],"question":"抛给读者的引导问题","hint":"阅读提示:先读哪里、关注什么"}
+  ]`;
+
+  const guidedStepsRules = `5) guidedSteps 是「引导式精读计划」，5-7 步，按「整体印象 → 核心问题 → 方法思路 → 关键细节 → 实验证据 → 结论与自己的判断」由浅入深设计：
+   - 第一步必须简单热身：凭摘要就能答出，帮读者建立信心；最后一步引导读者给出自己的评价、质疑或收获；
+   - question 必须具体、能从正文中找到依据，用开放式提问，不要是非题；一次只问一个点；
+   - hint 面向零基础读者，语气友好，告诉TA先读哪里、关注什么、暂时可以跳过什么；
+   - pages 只能使用正文摘录标题「[第 N 页]」中出现的页码，没有合适页码时给空数组。`;
+
   if (mode === "full") {
     return `你是面向科研新手的论文导师。请仔细阅读用户提供的论文正文摘录（可能不完整），用简洁中文输出一个 JSON 对象，不要 Markdown，不要解释。
 
@@ -270,7 +305,8 @@ function systemPrompt(mode) {
   "readingTips": "给新手的阅读顺序建议",
   "evidence": [
     {"page": 3, "label": "第 3 页", "reason": "该页支持某个关键判断", "quote": "正文中的短语，可为空"}
-  ]
+  ],
+${guidedStepsSpec}
 }
 
 规则：
@@ -278,7 +314,8 @@ function systemPrompt(mode) {
 2) 文中未明确的内容写「文中未明确」，不要编造实验数字。
 3) 专有名词可保留英文。
 4) evidence 最多 8 条；page 必须是正文摘录标题「[第 N 页]」中出现的页码；quote 不超过 80 字，不要编造原文。
-5) 只输出 JSON。`;
+${guidedStepsRules}
+6) 只输出 JSON。`;
   }
 
   return `你是面向科研新手的论文导师。请阅读用户提供的论文正文摘录，用简洁中文输出一个 JSON 对象，不要 Markdown，不要解释。
@@ -299,14 +336,16 @@ function systemPrompt(mode) {
   "readingTips": "阅读建议",
   "evidence": [
     {"page": 1, "label": "第 1 页", "reason": "该页支持某个关键判断", "quote": "正文中的短语，可为空"}
-  ]
+  ],
+${guidedStepsSpec}
 }
 
 规则：
 1) prerequisites 4-8 条，优先「必备」。
 2) 不确定处标明「文中未明确」。
 3) evidence 最多 8 条；page 必须是正文摘录标题「[第 N 页]」中出现的页码；quote 不超过 80 字，不要编造原文。
-4) 只输出 JSON。`;
+${guidedStepsRules}
+5) 只输出 JSON。`;
 }
 
 function followupSystem() {
@@ -319,6 +358,256 @@ function followupSystem() {
   ]
 }
 要求：1) 优先依据提供的材料；2) 材料不足时明确说明；3) evidence 只能引用正文摘录中明确出现的页码；4) 最多给 4 条证据；5) quote 不超过 80 字，不要编造原文。`;
+}
+
+function guideSystem() {
+  return `你是耐心的论文精读导师，正在带一位科研新手一步一步读论文。学员刚回答了其中一个引导问题，请批改这份回答。
+只输出一个 JSON 对象，不要 Markdown，不要输出 JSON 以外的解释，格式：
+{
+  "verdict": "good 或 partial 或 off",
+  "strengths": ["学员答对或想到的点，可为空数组"],
+  "feedback": "先肯定做得好的地方，再指出偏差或遗漏，最后用一个追问引导继续思考",
+  "reference": "参考答案要点，2-4 句，具体可对照原文",
+  "evidence": [
+    {"page": 2, "label": "第 2 页", "reason": "该页有支持参考答案的内容", "quote": "正文中的短语，可为空"}
+  ]
+}
+要求：
+1) verdict 口径：good=抓住了问题核心，partial=部分正确但遗漏关键，off=理解偏差较大或答非所问。
+2) feedback 语气友好鼓励，绝不居高临下；学员回答很简短或只是尝试时，也要先肯定其投入，再温和补充。
+3) 学员回答为空时，feedback 直接给出这一步该怎么读的建议。
+4) 不要编造正文没有的数字；evidence 只能引用正文摘录标题「[第 N 页]」中出现的页码，最多 3 条；quote 不超过 80 字。
+5) 只输出 JSON。`;
+}
+
+function normalizeGuideReview(parsed, fallbackText) {
+  if (!parsed || typeof parsed !== "object") {
+    return {
+      verdict: "partial",
+      strengths: [],
+      feedback: String(fallbackText || "").trim(),
+      reference: "",
+      evidence: []
+    };
+  }
+  const verdict = ["good", "partial", "off"].includes(parsed.verdict) ? parsed.verdict : "partial";
+  const strengths = (Array.isArray(parsed.strengths) ? parsed.strengths : [])
+    .map((s) => String(s || "").trim())
+    .filter(Boolean)
+    .slice(0, 5);
+  return {
+    verdict,
+    strengths,
+    feedback: String(parsed.feedback || "").trim(),
+    reference: String(parsed.reference || parsed.answer || "").trim(),
+    evidence: normalizeEvidence(parsed.evidence)
+  };
+}
+
+/**
+ * 引导式精读：批改学员对某一步引导问题的回答
+ */
+export async function reviewGuidedAnswer({
+  title = "",
+  mode = "quick",
+  config = {},
+  pages = [],
+  step = {},
+  userAnswer = "",
+  prior = null
+} = {}) {
+  const baseUrl = String(config.baseUrl || "").trim().replace(/\/+$/, "");
+  const apiKey = String(config.apiKey || "").trim();
+  const model = String(config.model || "").trim();
+  if (!baseUrl || (!apiKey && !isChatGptModelUrl(baseUrl)) || !model) {
+    throw new Error("请先在设置中配置 API Key");
+  }
+
+  const resolvedMode = mode === "full" ? "full" : "quick";
+  const { corpus, pageCoverage, pageNums } = buildPdfCorpus(pages, resolvedMode);
+  if (!corpus.trim()) {
+    throw new Error("扫描版 PDF 无可提取文字，暂不支持 OCR");
+  }
+
+  const stepIndex = Number(step?.index);
+  const stepTotal = Number(step?.total);
+  const stepLabel = [
+    Number.isInteger(stepIndex) && stepIndex >= 0 ? `第 ${stepIndex + 1} 步` : "",
+    Number.isInteger(stepTotal) && stepTotal > 0 ? `共 ${stepTotal} 步` : ""
+  ].filter(Boolean).join(" / ");
+  const priorText = prior ? JSON.stringify(prior).slice(0, 6000) : "";
+  const answer = String(userAnswer || "").trim();
+
+  const user = [
+    `论文标题：${title || "（未知）"}`,
+    `解读模式：${resolvedMode}`,
+    priorText ? `已有结构化解读：\n${priorText}` : "",
+    `正文摘录（页码 ${pageCoverage}）：\n${corpus.slice(0, resolvedMode === "full" ? 20000 : 10000)}`,
+    `当前引导步骤：${stepLabel}${step?.title ? ` · ${step.title}` : ""}`,
+    step?.goal ? `这一步的目标：${step.goal}` : "",
+    `引导问题：${step?.question || "（缺失）"}`,
+    answer ? `学员的回答：\n${answer}` : "学员的回答：（空，学员跳过了本步）"
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const usages = [];
+  const attempt = async () => {
+    const out = await callChat({
+      baseUrl,
+      apiKey,
+      model,
+      system: guideSystem(),
+      user,
+      maxTokens: 3000,
+      temperature: 0.3
+    });
+    if (out?.usage) usages.push(out.usage);
+    return out.content;
+  };
+
+  let content;
+  try {
+    content = await attempt();
+  } catch (error) {
+    if (isChatGptModelUrl(baseUrl)) throw error;
+    await new Promise((r) => setTimeout(r, 800));
+    content = await attempt();
+  }
+
+  const review = normalizeGuideReview(extractJsonObject(content), content);
+  return {
+    ...review,
+    evidence: review.evidence.filter((item) => pageNums.includes(item.page)),
+    usage: mergeUsages(usages),
+    model
+  };
+}
+
+function guideDialogSystem() {
+  return `你是耐心的论文精读导师。学员已完成某一步引导问题并得到你的批改，现在想就这一步继续和你讨论。请结合学员最初的回答、你此前的批改与参考答案、以及你们已经聊过的内容，回应学员的新消息。
+只输出一个 JSON 对象，不要 Markdown，不要输出 JSON 以外的解释，格式：
+{
+  "reply": "直接回应学员的新消息，简洁友好，可用短段落和列表",
+  "evidence": [
+    {"page": 2, "label": "第 2 页", "reason": "该页支持本条回应", "quote": "正文中的短语，可为空"}
+  ]
+}
+要求：
+1) 围绕这一步的引导问题和论文正文展开；学员问到正文摘录之外的内容时，明确说明材料不足，不要编造。
+2) 语气友好鼓励，把概念讲透，但不直接替学员完成后续步骤的思考。
+3) evidence 只能引用正文摘录标题「[第 N 页]」中出现的页码，最多 3 条；quote 不超过 80 字，不要编造原文。
+4) 只输出 JSON。`;
+}
+
+function normalizeDialogTurnMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+  return messages
+    .map((m) => ({
+      role: m?.role === "assistant" ? "assistant" : "user",
+      text: String(m?.text || "").trim()
+    }))
+    .filter((m) => m.text);
+}
+
+/**
+ * 引导式精读：某一步批改完成后的持续追问（多轮对话，聊天记录随解读持久化）
+ */
+export async function guideDialogTurn({
+  title = "",
+  mode = "quick",
+  config = {},
+  pages = [],
+  step = {},
+  record = {},
+  messages = [],
+  prior = null
+} = {}) {
+  const baseUrl = String(config.baseUrl || "").trim().replace(/\/+$/, "");
+  const apiKey = String(config.apiKey || "").trim();
+  const model = String(config.model || "").trim();
+  if (!baseUrl || (!apiKey && !isChatGptModelUrl(baseUrl)) || !model) {
+    throw new Error("请先在设置中配置 API Key");
+  }
+
+  const resolvedMode = mode === "full" ? "full" : "quick";
+  const { corpus, pageCoverage, pageNums } = buildPdfCorpus(pages, resolvedMode);
+  if (!corpus.trim()) {
+    throw new Error("扫描版 PDF 无可提取文字，暂不支持 OCR");
+  }
+
+  const dialog = normalizeDialogTurnMessages(messages);
+  const lastUser = [...dialog].reverse().find((m) => m.role === "user");
+  const newMessage = String(lastUser?.text || "").trim();
+  if (!newMessage) {
+    throw new Error("缺少要回复的消息");
+  }
+
+  const stepIndex = Number(step?.index);
+  const stepTotal = Number(step?.total);
+  const stepLabel = [
+    Number.isInteger(stepIndex) && stepIndex >= 0 ? `第 ${stepIndex + 1} 步` : "",
+    Number.isInteger(stepTotal) && stepTotal > 0 ? `共 ${stepTotal} 步` : ""
+  ].filter(Boolean).join(" / ");
+  const priorText = prior ? JSON.stringify(prior).slice(0, 6000) : "";
+  const originalAnswer = String(record?.answer || "").trim();
+  const transcript = dialog
+    .slice(-12)
+    .map((m) => `${m.role === "user" ? "学员" : "导师"}：${m.text}`)
+    .join("\n\n");
+
+  const user = [
+    `论文标题：${title || "（未知）"}`,
+    `解读模式：${resolvedMode}`,
+    priorText ? `已有结构化解读：\n${priorText}` : "",
+    `正文摘录（页码 ${pageCoverage}）：\n${corpus.slice(0, resolvedMode === "full" ? 20000 : 10000)}`,
+    `当前引导步骤：${stepLabel}${step?.title ? ` · ${step.title}` : ""}`,
+    step?.goal ? `这一步的目标：${step.goal}` : "",
+    `引导问题：${step?.question || "（缺失）"}`,
+    `学员最初的回答：\n${originalAnswer || "（空，学员跳过了本步）"}`,
+    record?.feedback ? `导师的批改：\n${String(record.feedback).slice(0, 3000)}` : "",
+    record?.reference ? `参考答案：\n${String(record.reference).slice(0, 3000)}` : "",
+    transcript ? `到目前为止的对话：\n${transcript}` : "",
+    `学员的新消息：\n${newMessage}`
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const usages = [];
+  const attempt = async () => {
+    const out = await callChat({
+      baseUrl,
+      apiKey,
+      model,
+      system: guideDialogSystem(),
+      user,
+      maxTokens: 3000,
+      temperature: 0.3
+    });
+    if (out?.usage) usages.push(out.usage);
+    return out.content;
+  };
+
+  let content;
+  try {
+    content = await attempt();
+  } catch (error) {
+    if (isChatGptModelUrl(baseUrl)) throw error;
+    await new Promise((r) => setTimeout(r, 800));
+    content = await attempt();
+  }
+
+  const parsed = extractJsonObject(content);
+  const reply = parsed && typeof parsed.reply === "string" && parsed.reply.trim()
+    ? parsed.reply.trim()
+    : content.trim();
+  const evidence = parsed ? normalizeEvidence(parsed.evidence) : [];
+  return {
+    reply,
+    evidence: evidence.filter((item) => pageNums.includes(item.page)).slice(0, 4),
+    usage: mergeUsages(usages),
+    model
+  };
 }
 
 /**
@@ -443,7 +732,7 @@ export async function interpretPdf({
       model,
       system: systemPrompt(resolvedMode),
       user,
-      maxTokens: resolvedMode === "full" ? 7000 : 4500,
+      maxTokens: resolvedMode === "full" ? 8000 : 6000,
       temperature: 0.2
     });
 
@@ -470,7 +759,12 @@ export async function interpretPdf({
     model,
     result: {
       ...normalized,
-      evidence: normalized.evidence.filter((item) => pageNums.includes(item.page))
+      evidence: normalized.evidence.filter((item) => pageNums.includes(item.page)),
+      // 引导步骤的建议页码只保留真实出现在语料中的页，避免跳转到不存在的页
+      guidedSteps: normalized.guidedSteps.map((step) => ({
+        ...step,
+        pages: step.pages.filter((page) => pageNums.includes(page))
+      }))
     }
   };
 }

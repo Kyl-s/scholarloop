@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { Plus, Search, Trash2, FileText, Link2, Braces, ExternalLink, AppWindow, Loader2, BookOpen, CalendarClock } from "lucide-react";
+import { Plus, Search, Trash2, FileText, Link2, Braces, ExternalLink, AppWindow, Loader2, BookOpen } from "lucide-react";
 import { api } from "../api.js";
 import { useData } from "../store.jsx";
 import PaperDetail from "../components/PaperDetail.jsx";
+import { ZoteroLibrarySync } from "../components/ZoteroSettings.jsx";
 import { Badge, Button, EmptyState, IconButton, Modal, Segmented, SourceTag, Stars, TextArea, formatDate } from "../components/ui.jsx";
 import { openPdfExternal } from "../openPdfExternal.js";
 import { loadAgentConfig } from "../agentConfig.js";
@@ -30,7 +31,8 @@ export default function LibraryPage({ focusPaper, onFocusCleared, onReadPdf }) {
     try {
       await openPdfExternal({
         paperId: paper.id || "",
-        pdfUrl: paper.pdfUrl || "",
+        pdfUrl: paper.pdfUrl || paper.url || "",
+        doi: paper.doi || "",
         title: paper.title || "paper",
         chooseApp: Boolean(chooseApp)
       });
@@ -83,6 +85,8 @@ export default function LibraryPage({ focusPaper, onFocusCleared, onReadPdf }) {
         <Button icon={Plus} onClick={() => setImportOpen(true)}>导入文献</Button>
       </section>
 
+      <ZoteroLibrarySync empty={!library.length} />
+
       {filtered.length ? (
         <section className="library-table-wrap">
           <div className="library-table">
@@ -91,12 +95,9 @@ export default function LibraryPage({ focusPaper, onFocusCleared, onReadPdf }) {
               <span>来源 / 年份</span>
               <span>状态</span>
               <span>理解</span>
-              <span>复习</span>
               <span />
             </div>
-            {filtered.map((p) => {
-              const overdue = p.reviewDue && p.reviewDue <= new Date().toISOString().slice(0, 10) && p.status !== "retold";
-              return (
+            {filtered.map((p) => (
                 <div className="lib-row" key={p.id}>
                   <button className="lib-title" onClick={() => setSelected(p)}>
                     <strong>{p.title}</strong>
@@ -108,31 +109,22 @@ export default function LibraryPage({ focusPaper, onFocusCleared, onReadPdf }) {
                   </span>
                   <span><Badge tone={p.status}>{({ todo: "待读", reading: "在读", understood: "已懂", retold: "已复述" })[p.status]}</Badge></span>
                   <span><Stars value={p.understanding || 1} /></span>
-                  <span className={`review-cell ${overdue ? "overdue" : ""}`}>
-                    {overdue ? <CalendarClock size={13} /> : null}
-                    {p.reviewDue || "-"}
-                  </span>
                   <span className="lib-actions">
                     <IconButton icon={FileText} label="打开解读" onClick={() => setSelected(p)} />
-                    {(p.pdfUrl || p.localPdf) ? (
                       <IconButton
                         icon={AppWindow}
-                        label="内置阅读器"
-                        onClick={() => onReadPdf?.(p.pdfUrl, p.title, p.doi, p.id)}
+                        label={p.pdfUrl || p.localPdf ? "内置阅读器" : "内置阅读器 · 尝试获取 PDF"}
+                        onClick={() => onReadPdf?.(p.pdfUrl || p.url || "", p.title, p.doi, p.id)}
                       />
-                    ) : null}
-                    {(p.pdfUrl || p.localPdf) ? (
                       <IconButton
                         icon={ExternalLink}
                         label="用其他软件打开"
                         onClick={() => openWithExternalApp(p, true)}
                       />
-                    ) : null}
                     <IconButton icon={Trash2} label="删除" onClick={() => remove(p)} />
                   </span>
                 </div>
-              );
-            })}
+            ))}
           </div>
         </section>
       ) : (

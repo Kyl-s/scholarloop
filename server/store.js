@@ -13,6 +13,8 @@ import {
 import { clearPdfCache, deletePdfSource } from "./pdfCache.js";
 import { normalizeDoi } from "./pdfResolve.js";
 import { parseNoteAttachments, stripNoteAttachments } from "../src/noteAttachments.js";
+import { hasUsage, normalizeUsage } from "../src/llmUsage.js";
+import { normalizeGuidedState } from "../src/pdfInterpretation.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, "..", "data");
@@ -205,13 +207,17 @@ export function normalizeSavedInterpretation(value) {
         }))
         .filter((item) => item.q)
     : [];
+  const guided = normalizeGuidedState(value.guided, result);
   return {
     version: 1,
     mode: value.mode === "full" ? "full" : "quick",
     usedChars: Number(value.usedChars) || 0,
     pageCoverage: String(value.pageCoverage || ""),
+    usage: hasUsage(value.usage) ? normalizeUsage(value.usage) : undefined,
+    model: String(value.model || "").trim(),
     result,
     followups,
+    guided: guided || undefined,
     savedAt: String(value.savedAt || new Date().toISOString())
   };
 }

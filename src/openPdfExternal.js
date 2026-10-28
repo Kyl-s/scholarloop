@@ -6,7 +6,7 @@ function hasElectronOpen() {
 
 /**
  * 用系统默认或自选程序打开 PDF。
- * @param {{ paperId?: string, pdfUrl?: string, data?: string, title?: string, chooseApp?: boolean }} opts
+ * @param {{ paperId?: string, pdfUrl?: string, doi?: string, data?: string, title?: string, chooseApp?: boolean }} opts
  * - paperId: 文献库条目（优先用已缓存的本地文件）
  * - data: base64 PDF（阅读器当前原文）
  * - chooseApp: true 时弹出「打开方式」让用户选软件（Windows / macOS）
@@ -14,6 +14,7 @@ function hasElectronOpen() {
 export async function openPdfExternal({
   paperId = "",
   pdfUrl = "",
+  doi = "",
   data = "",
   title = "",
   chooseApp = false
@@ -27,6 +28,22 @@ export async function openPdfExternal({
     } catch {
       filePath = "";
     }
+  }
+
+  if (!filePath && !data && (pdfUrl || doi)) {
+    const response = await fetch(pdfUrl.startsWith("/api/") ? pdfUrl : api.pdfUrl(pdfUrl, "", doi));
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(detail.error || `PDF 下载失败（${response.status}），可在内置阅读器中重试或登录原文门户。`);
+    }
+    const blob = await response.blob();
+    if (await blob.slice(0, 5).text() !== "%PDF-") throw new Error("下载结果不是 PDF，请在内置阅读器中打开原文门户或附加本地 PDF。");
+    data = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || "").split(",")[1] || "");
+      reader.onerror = () => reject(new Error("读取下载的 PDF 失败"));
+      reader.readAsDataURL(blob);
+    });
   }
 
   if (!filePath && data) {

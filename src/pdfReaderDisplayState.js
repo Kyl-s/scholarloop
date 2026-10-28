@@ -1,5 +1,16 @@
 const PDF_DISPLAY_MODES = new Set(["original", "translated", "bilingual"]);
 
+/** Saved PDFs remain readable after changing the translator configuration. */
+export function canRestoreLayoutTranslation(job, { paperId, sourceSha256, layoutAssist = false, identityHash = "", allowModeDiscovery = false } = {}) {
+  if (!job?.jobId || !paperId || String(job.paperId || "") !== String(paperId)) return false;
+  if (!sourceSha256 || job.sourceSha256 !== sourceSha256) return false;
+  if (identityHash && job.identityHash !== identityHash) return false;
+  if (!allowModeDiscovery && (job.layoutAssist?.enabled === true) !== Boolean(layoutAssist)) return false;
+  return Boolean(job.monoUrl || job.dualUrl || (job.pages || []).some(
+    (page) => page.status === "completed" && (page.monoUrl || page.dualUrl)
+  ));
+}
+
 export function normalizePdfDisplayMode(mode) {
   return PDF_DISPLAY_MODES.has(mode) ? mode : "original";
 }

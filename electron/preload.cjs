@@ -21,7 +21,7 @@ function safeHttpUrl(value) {
 const pdfDownloadApi = {
   /**
    * 订阅内嵌浏览器捕获的 PDF 下载事件。
-   * payload: { downloadId, url, filename, sourceUrl, cookies }
+   * payload: { downloadId, url, filename, sourceUrl, state, receivedBytes, totalBytes, error? }
    * 返回取消订阅函数。
    */
   onPdfDownload: (listener) => {
@@ -30,7 +30,15 @@ const pdfDownloadApi = {
     ipcRenderer.on("pdf-download-captured", handler);
     return () => ipcRenderer.removeListener("pdf-download-captured", handler);
   },
-  /** 用户选择「仍另存到磁盘」：主进程用原始 URL 重新下载并弹保存对话框 */
+  readCapturedPdf: (downloadId) => ipcRenderer.invoke("pdf-download-read", downloadId),
+  downloadPortalPdf: (url, sourceUrl) => ipcRenderer.invoke("pdf-portal-download", url, sourceUrl),
+  onPdfPortalStatus: (listener) => {
+    if (typeof listener !== "function") return () => {};
+    const handler = (_event, payload) => listener(payload);
+    ipcRenderer.on("pdf-portal-status", handler);
+    return () => ipcRenderer.removeListener("pdf-portal-status", handler);
+  },
+  /** 另存已接管的原始 PDF，不重放下载请求。 */
   savePdfAs: (downloadId) => ipcRenderer.invoke("pdf-download-save-as", downloadId),
   /**
    * 订阅「另存 PDF」结果事件。
@@ -46,6 +54,17 @@ const pdfDownloadApi = {
 };
 
 contextBridge.exposeInMainWorld("scholarloop", {
+  // Synchronous persistence keeps existing save/activate actions atomic and
+  // restores the selection before React renders, regardless of server port.
+  readAgentConfig: () => {
+    const result = ipcRenderer.sendSync("agent-config-store", "read");
+    if (!result?.ok) throw new Error(result?.error || "模型配置读取失败");
+    return result.value;
+  },
+  writeAgentConfig: (value) => {
+    const result = ipcRenderer.sendSync("agent-config-store", "write", value);
+    if (!result?.ok) throw new Error(result?.error || "模型配置保存失败");
+  },
   pdfFetch: (url) => ipcRenderer.invoke("pdf-fetch", url),
   openInstitution: (url) => ipcRenderer.invoke("institution-open", url),
   /** Subscribe to safe popup requests from the embedded institution browser. */

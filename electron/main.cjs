@@ -1,8 +1,10 @@
-const { app, BrowserWindow, dialog, shell, Tray, Menu, nativeImage, net, ipcMain, session } = require("electron");
+const { app, BrowserWindow, dialog, shell, Tray, Menu, nativeImage, net, ipcMain, session, safeStorage } = require("electron");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const { randomUUID } = require("node:crypto");
 const { createInstitutionPopupHandler, safeHttpUrl } = require("./institutionPopup.cjs");
+const { createAgentConfigVault } = require("./agentConfigVault.cjs");
 
 const ROOT = path.join(__dirname, "..");
 const PRELOAD = path.join(__dirname, "preload.cjs");
@@ -146,7 +148,7 @@ function startServer() {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [path.join(ROOT, "server", "index.js")], {
       cwd: ROOT,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", PORT: "61578" },
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", PORT: "0" },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true
     });
@@ -158,7 +160,7 @@ function startServer() {
         settled = true;
         reject(new Error("本地服务启动超时"));
       }
-    }, 15000);
+    }, 60000);
 
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
@@ -224,6 +226,21 @@ if (!gotLock) {
       });
 
       mainWindow.setMenuBarVisibility(false);
+      const configVault = createAgentConfigVault(path.join(app.getPath("userData"), "agent-config.enc"), safeStorage);
+      const rendererOrigin = `http://127.0.0.1:${port}`;
+      ipcMain.on("agent-config-store", (event, operation, value) => {
+        try {
+          if (event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame ||
+              new URL(event.senderFrame.url).origin !== rendererOrigin) throw new Error("模型配置访问被拒绝");
+          if (operation === "read") event.returnValue = { ok: true, value: configVault.read() };
+          else if (operation === "write") {
+            configVault.write(value);
+            event.returnValue = { ok: true };
+          } else throw new Error("未知配置操作");
+        } catch {
+          event.returnValue = { ok: false, error: "无法读取或保存本机模型配置" };
+        }
+      });
       mainWindow.loadURL(`http://127.0.0.1:${port}/`);
 
       // 所有机构页面的弹窗都交由主渲染进程创建内嵌标签页，避免产生未受控原生窗口。
@@ -237,11 +254,35 @@ if (!gotLock) {
       mainWindow.webContents.on("did-attach-webview", (_event, guestContents) => {
         // 给 webview 实际使用的 session 挂 PDF 下载接管（内部按 session 去重，不会重复触发）
         attachPdfDownloadHandler(guestContents.session);
+        guestContents.on("dom-ready", () => {
+          // Annual Reviews uses empty POST forms around href="#" PDF buttons.
+          // Its /deliver/fulltext PDF endpoint accepts GET as well (verified in-app).
+          // Route only this observed, same-origin, field-free form through native downloads.
+          guestContents.executeJavaScript(`(() => {
+            if (!/(^|\\.)annualreviews\\.org$/i.test(location.hostname)) return;
+            document.addEventListener('click', event => {
+              const control = event.target.closest?.('a,button');
+              const form = control?.closest('form');
+              if (!form || !control.matches('[aria-label="Download PDF"],.access-options-icon')) return;
+              const action = new URL(form.action, location.href);
+              if (action.origin !== location.origin || !/^\\/deliver\\/fulltext\\/.+\\.pdf$/i.test(action.pathname) || form.querySelector('input[name],select[name],textarea[name]')) return;
+              event.preventDefault();
+              event.stopImmediatePropagation();
+              location.assign(action.href);
+            }, true);
+          })()`).catch(() => { /* guest navigated before installation */ });
+        });
         guestContents.setWindowOpenHandler(createInstitutionPopupHandler({
-          notify: forwardInstitutionPopup
+          notify: (url) => {
+            if (!capturePdfNavigation(guestContents, url)) forwardInstitutionPopup(url);
+          },
+          onRejected: () => sendPortalStatus({ state: "failed", error: "站点尝试打开无法接管的临时窗口，请使用页面中的直接 PDF 链接或在外部浏览器下载后导入。" })
         }));
         guestContents.on("will-navigate", (event, url) => {
-          if (!safeHttpUrl(url)) event.preventDefault();
+          if (!safeHttpUrl(url)) {
+            event.preventDefault();
+            sendPortalStatus({ state: "failed", error: "该临时文件链接无法直接打开，请在外部浏览器下载 PDF 后导入。" });
+          } else if (capturePdfNavigation(guestContents, url)) event.preventDefault();
         });
       });
 
@@ -277,7 +318,7 @@ if (!gotLock) {
       // 其实际 session 即 pdfSession；按 session 用 WeakSet 去重挂载 will-download，
       // 避免多个 webview / 重复 attach 造成同一 session 上处理器叠加触发。
       const pdfDownloadAttachedSessions = new WeakSet();
-      /** downloadId -> { url, filename, cookies, referer }，供「另存为」回退重新下载 */
+      /** downloadId -> original browser download state and app-owned temporary PDF. */
       const pdfDownloads = new Map();
       let pdfDownloadSeq = 0;
 
@@ -338,125 +379,198 @@ if (!gotLock) {
         return String(item.getFilename?.() || "download.pdf");
       }
 
-      /** 给指定 session 挂 will-download（去重）；非 PDF 下载保持默认行为 */
+      const maxCapturedPdfBytes = 100 * 1024 * 1024;
+      const pendingPortalDownloads = new Map();
+      const capturedPdfDir = fs.mkdtempSync(path.join(app.getPath("temp"), "ScholarLoop-pdf-"));
+      app.once("will-quit", () => {
+        const target = path.resolve(capturedPdfDir);
+        const tempRoot = path.resolve(app.getPath("temp"));
+        if (path.dirname(target) !== tempRoot || !path.basename(target).startsWith("ScholarLoop-pdf-")) return;
+        try { fs.rmSync(target, { recursive: true, force: true }); } catch { /* app-owned temp only */ }
+      });
+      function sendPortalStatus(payload) {
+        const state = payload.state === "error" ? "failed" : payload.state;
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("pdf-portal-status", { ...payload, state, message: payload.message || payload.error });
+      }
+      function beginPortalDownload(contents, target, referer) {
+        const previous = pendingPortalDownloads.get(target);
+        if (previous) clearTimeout(previous.timer);
+        const timer = setTimeout(() => {
+          pendingPortalDownloads.delete(target);
+          sendPortalStatus({ state: "failed", url: target, error: "站点未开始 PDF 下载，请确认已登录，或在外部浏览器下载后导入。" });
+        }, 45000);
+        timer.unref();
+        pendingPortalDownloads.set(target, { timer, sourceUrl: referer || "" });
+        sendPortalStatus({ state: "connecting", url: target, message: "正在请求站点 PDF…" });
+        try { contents.downloadURL(target, referer ? { headers: { Referer: referer } } : undefined); }
+        catch (error) {
+          clearTimeout(timer);
+          pendingPortalDownloads.delete(target);
+          sendPortalStatus({ state: "failed", url: target, error: error.message || "无法开始下载 PDF" });
+          throw error;
+        }
+      }
+      function capturePdfNavigation(contents, url) {
+        const target = safeHttpUrl(url);
+        if (!target) return false;
+        const pathname = new URL(target).pathname;
+        if (!(/\.pdf(?:$|\/)/i.test(pathname) || /\/(?:doi\/(?:e?pdf)|pdf|pdfdirect)\//i.test(pathname) || /\/content\/journals\/.*\/pdf$/i.test(pathname))) return false;
+        try {
+          // Preserve the originating browser session and its authenticated request.
+          beginPortalDownload(contents, target, safeHttpUrl(contents.getURL()));
+        } catch { /* beginPortalDownload reports the error */ }
+        return true;
+      }
+      function assertDownloadSender(event) {
+        if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents ||
+            event.senderFrame !== mainWindow.webContents.mainFrame || new URL(event.senderFrame.url).origin !== rendererOrigin) {
+          throw new Error("PDF 下载访问被拒绝");
+        }
+      }
+      function publishCapturedPdf(meta) {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        const { downloadId, url, filename, sourceUrl, state, receivedBytes, totalBytes, error } = meta;
+        mainWindow.webContents.send("pdf-download-captured", { downloadId, url, filename, sourceUrl, state, receivedBytes, totalBytes, error });
+      }
+      /** Retain the original authenticated download, including POST and temporary URLs. */
       function attachPdfDownloadHandler(sess) {
         if (!sess || pdfDownloadAttachedSessions.has(sess)) return;
         pdfDownloadAttachedSessions.add(sess);
-        sess.on("will-download", (event, item, webContents) => {
-          if (!isPdfDownloadItem(item)) return; // 非 PDF：不拦截
-          event.preventDefault();
+        sess.on("will-download", (_event, item, webContents) => {
+          const chain = item.getURLChain();
+          let requested = false;
+          let requestedSourceUrl = "";
+          for (const url of chain) {
+            const pending = pendingPortalDownloads.get(url);
+            if (pending) {
+              requested = true;
+              requestedSourceUrl = pending.sourceUrl;
+              clearTimeout(pending.timer);
+              pendingPortalDownloads.delete(url);
+            }
+          }
+          if (!isPdfDownloadItem(item)) {
+            if (requested) {
+              _event.preventDefault();
+              sendPortalStatus({ state: "failed", error: "站点返回的不是 PDF，请确认已登录或使用外部浏览器下载。" });
+            }
+            return;
+          }
           const downloadId = ++pdfDownloadSeq;
-          const url = String(item.getURL?.() || "");
-          const filename = recommendPdfFilename(item);
-          // 发起下载的页面 URL：preventDefault 后 downloadItem 终止，
-          // 但 webContents 仍可用，先同步采集
-          let sourceUrl = "";
-          try {
-            if (webContents && !webContents.isDestroyed()) sourceUrl = String(webContents.getURL() || "");
-          } catch { /* ignore */ }
-          // cookies 读取是异步的，必须等它完成后才能 send，
-          // 否则渲染层拿到空登录态；失败时传空字符串并照常通知
-          (async () => {
-            let cookies = "";
-            try {
-              cookies = (await sess.cookies.get({}))
-                .map((c) => `${c.name}=${c.value}`)
-                .join("; ");
-            } catch {
-              cookies = "";
-            }
-            pdfDownloads.set(downloadId, { url, filename, cookies, referer: sourceUrl });
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send("pdf-download-captured", {
-                downloadId,
-                url,
-                filename,
-                sourceUrl,
-                cookies
-              });
-            }
-          })();
-        });
-      }
-
-      /** 用 net.request 手动跟随重定向，把 PDF 流式写盘（「另存为」回退用） */
-      function downloadPdfToPath(targetUrl, destPath, cookieStr, referer) {
-        return new Promise((resolve, reject) => {
-          const request = (url, hops) => {
-            if (hops > 5) {
-              reject(new Error("重定向次数过多"));
+          let sourceUrl = requestedSourceUrl;
+          try { if (webContents && !webContents.isDestroyed()) sourceUrl = webContents.getURL() || sourceUrl; } catch { /* closed tab */ }
+          const meta = {
+            downloadId, url: String(item.getURL() || ""),
+            filename: path.basename(recommendPdfFilename(item)).replace(/[<>:"/\\|?*\x00-\x1f]/g, "_") || "download.pdf",
+            sourceUrl, state: "downloading", receivedBytes: 0, totalBytes: item.getTotalBytes(),
+            filePath: path.join(capturedPdfDir, `${randomUUID()}.pdf`)
+          };
+          pdfDownloads.set(downloadId, meta);
+          item.setSavePath(meta.filePath);
+          publishCapturedPdf(meta);
+          let lastPublished = 0;
+          const fail = (message) => {
+            meta.state = "failed";
+            meta.error = message;
+            publishCapturedPdf(meta);
+          };
+          let stalledTimer;
+          const watchDownload = () => {
+            clearTimeout(stalledTimer);
+            stalledTimer = setTimeout(() => {
+              fail("PDF 下载长时间没有进展，请回到门户重试或另用浏览器下载。");
+              item.cancel();
+            }, 90000);
+            stalledTimer.unref();
+          };
+          watchDownload();
+          item.on("updated", (_event, state) => {
+            meta.receivedBytes = item.getReceivedBytes();
+            meta.totalBytes = item.getTotalBytes();
+            if (meta.state === "failed") return;
+            watchDownload();
+            if (meta.receivedBytes > maxCapturedPdfBytes || meta.totalBytes > maxCapturedPdfBytes) {
+              fail("PDF 超过 100 MB，请在外部浏览器下载后导入。");
+              item.cancel();
               return;
             }
-            const req = net.request({ method: "GET", url });
-            req.setHeader("User-Agent", browserUserAgent);
-            if (cookieStr) req.setHeader("Cookie", cookieStr);
-            if (referer) req.setHeader("Referer", referer);
-            req.on("response", (res) => {
-              const status = res.statusCode || 0;
-              if (status >= 300 && status < 400) {
-                const loc = Array.isArray(res.headers.location) ? res.headers.location[0] : res.headers.location;
-                if (!loc) {
-                  reject(new Error(`重定向目标缺失（${status}）`));
-                  return;
-                }
-                try {
-                  request(new URL(loc, url).toString(), hops + 1);
-                } catch (err) {
-                  reject(err);
-                }
-                return;
-              }
-              if (status < 200 || status >= 300) {
-                reject(new Error(`${status} ${res.statusMessage || ""}`.trim()));
-                return;
-              }
-              const file = fs.createWriteStream(destPath);
-              res.on("error", (err) => {
-                file.destroy();
-                reject(err);
-              });
-              res.pipe(file);
-              file.on("error", reject);
-              file.on("finish", () => resolve(destPath));
-            });
-            req.on("error", reject);
-            req.end();
-          };
-          request(targetUrl, 0);
+            const now = Date.now();
+            if (now - lastPublished >= 250) {
+              lastPublished = now;
+              meta.error = state === "interrupted" ? "下载连接中断，正在等待恢复…" : undefined;
+              publishCapturedPdf(meta);
+            }
+          });
+          item.once("done", (_event, state) => {
+            clearTimeout(stalledTimer);
+            if (meta.state !== "failed") {
+              try {
+                if (state !== "completed") throw new Error(state === "cancelled" ? "PDF 下载已取消" : "PDF 下载中断，请重试或使用外部浏览器下载。");
+                const stat = fs.statSync(meta.filePath);
+                if (stat.size > maxCapturedPdfBytes) throw new Error("PDF 超过 100 MB");
+                const fd = fs.openSync(meta.filePath, "r");
+                const header = Buffer.alloc(5);
+                let count;
+                try { count = fs.readSync(fd, header, 0, header.length, 0); } finally { fs.closeSync(fd); }
+                if (count != 5 || !header.equals(Buffer.from("%PDF-"))) throw new Error("站点返回的不是 PDF，可能需要登录或重新获取下载链接。");
+                meta.receivedBytes = stat.size;
+                meta.state = "ready";
+                meta.error = undefined;
+                publishCapturedPdf(meta);
+              } catch (error) { fail(error.message || "PDF 下载失败"); }
+            }
+            if (meta.state === "failed") {
+              try { fs.unlinkSync(meta.filePath); } catch { /* no partial file */ }
+            }
+          });
+          if (meta.totalBytes > maxCapturedPdfBytes) {
+            fail("PDF 超过 100 MB，请在外部浏览器下载后导入。");
+            item.cancel();
+          }
         });
       }
-
-      /** 回退：用户选择仍把该 PDF 另存到磁盘 */
-      ipcMain.handle("pdf-download-save-as", async (_event, downloadId) => {
+      attachPdfDownloadHandler(pdfSession);
+      ipcMain.handle("pdf-portal-download", (event, url, sourceUrl) => {
+        assertDownloadSender(event);
+        const target = safeHttpUrl(url);
+        if (!target) throw new Error("PDF 链接不合法");
+        const referer = safeHttpUrl(sourceUrl);
+        try {
+          beginPortalDownload(pdfSession, target, referer);
+          return { ok: true };
+        } catch (error) {
+          const message = error.message || "无法开始下载 PDF";
+          return { ok: false, error: message };
+        }
+      });
+      ipcMain.handle("pdf-download-read", async (event, downloadId) => {
+        assertDownloadSender(event);
+        const meta = pdfDownloads.get(Number(downloadId));
+        if (!meta || meta.state !== "ready") throw new Error("PDF 尚未下载完成，请稍候或重试。");
+        const stat = await fs.promises.stat(meta.filePath);
+        if (stat.size > maxCapturedPdfBytes) throw new Error("PDF 超过 100 MB");
+        return { data: (await fs.promises.readFile(meta.filePath)).toString("base64"), filename: meta.filename };
+      });
+      ipcMain.handle("pdf-download-save-as", async (event, downloadId) => {
+        assertDownloadSender(event);
         const id = Number(downloadId);
         const meta = pdfDownloads.get(id);
-        if (!meta) throw new Error("下载记录不存在或已过期");
-        const picked = await dialog.showSaveDialog(mainWindow || undefined, {
-          title: "另存 PDF",
-          defaultPath: meta.filename || "download.pdf",
+        const result = (payload) => {
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("pdf-download-saved", { downloadId: id, ...payload });
+          return payload;
+        };
+        if (!meta || meta.state !== "ready") return result({ ok: false, error: "PDF 尚未下载完成，请稍候或重试。" });
+        const picked = await dialog.showSaveDialog(mainWindow, {
+          title: "另存 PDF", defaultPath: meta.filename,
           filters: [{ name: "PDF 文件", extensions: ["pdf"] }]
         });
-        if (picked.canceled || !picked.filePath) {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send("pdf-download-saved", { downloadId: id, ok: false, error: "canceled" });
-          }
-          return { ok: false, canceled: true };
-        }
+        if (picked.canceled || !picked.filePath) return result({ ok: false, canceled: true, error: "canceled" });
         try {
-          await downloadPdfToPath(meta.url, picked.filePath, meta.cookies, meta.referer);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send("pdf-download-saved", { downloadId: id, ok: true, path: picked.filePath });
-          }
-          return { ok: true, path: picked.filePath };
-        } catch (err) {
-          // 写一半失败时清理残留文件
-          try {
-            if (fs.existsSync(picked.filePath)) fs.unlinkSync(picked.filePath);
-          } catch { /* ignore */ }
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send("pdf-download-saved", { downloadId: id, ok: false, error: err.message || String(err) });
-          }
-          return { ok: false, error: err.message || String(err) };
+          // Never overwrite or remove a pre-existing user file, even after a failed copy.
+          await fs.promises.copyFile(meta.filePath, picked.filePath, fs.constants.COPYFILE_EXCL);
+          return result({ ok: true, path: picked.filePath });
+        } catch (error) {
+          return result({ ok: false, error: error.code === "EEXIST" ? "文件已存在，请选择其他文件名。" : error.message || "另存失败" });
         }
       });
 
@@ -489,8 +603,14 @@ if (!gotLock) {
         institutionWindow.setMenuBarVisibility(false);
         institutionWindow.webContents.setUserAgent(browserUserAgent);
         institutionWindow.webContents.setWindowOpenHandler(createInstitutionPopupHandler({
-          notify: forwardInstitutionPopup
+          notify: (url) => {
+            if (!capturePdfNavigation(institutionWindow.webContents, url)) forwardInstitutionPopup(url);
+          },
+          onRejected: () => sendPortalStatus({ state: "failed", error: "站点打开了无法接管的临时窗口，请使用直接 PDF 链接或外部浏览器。" })
         }));
+        institutionWindow.webContents.on("will-navigate", (event, url) => {
+          if (capturePdfNavigation(institutionWindow.webContents, url)) event.preventDefault();
+        });
         institutionWindow.on("closed", () => {
           institutionWindow = null;
         });
@@ -537,11 +657,9 @@ if (!gotLock) {
         if (!/^https?:\/\//i.test(target)) throw new Error("PDF 链接不合法");
         try {
           // 复用内嵌浏览器登录态（persist:scholarloop 分区的 cookie），解决需登录站点的 403/重定向循环
-          const res = await net.fetch(target, {
+          const res = await pdfSession.fetch(target, {
             headers: pdfHeaders,
-            redirect: "follow",
-            session: pdfSession,
-            useSessionCookies: true
+            redirect: "follow"
           });
           if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
           const buf = Buffer.from(await res.arrayBuffer());

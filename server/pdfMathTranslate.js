@@ -11,7 +11,10 @@ import {
 import { fetchWithFallback, getProxyUrl } from "./proxy.js";
 import { applyPdfMathLlmProxyEnv } from "./pdfMathLlmProxy.js";
 import { applyPdf2zhListMarkerPatch } from "./pdfListMarkers.js";
-import { restorePreservedPageOutputs } from "./pdfPreserveRegions.js";
+import {
+  countUntranslatedClusters,
+  restorePreservedPageOutputs
+} from "./pdfPreserveRegions.js";
 import { renderPdfPage, getPdfPageCount } from "./pdfPageRender.js";
 import {
   compileLayoutAssistPrompt,
@@ -194,6 +197,7 @@ function serializePageState(page, layoutAssist) {
     status: String(page?.status || "queued"),
     progress: String(page?.progress || ""),
     error: String(page?.error || ""),
+    retriedOnce: page?.retriedOnce === true,
     monoFile: String(page?.monoFile || ""),
     dualFile: String(page?.dualFile || ""),
     assist: {
@@ -217,7 +221,15 @@ function jobHasUsablePages(job) {
 export function hasUsablePdfMathOutput(job) {
   return jobHasUsablePages(job);
 }
-function hydratePagesFromOutputDir(job) {
+export function getPdfMathCompletedOutputCount(job) {
+  if (!job) return 0;
+  const completed = (job.pages || []).filter((page) => page.status === "completed" && pageHasValidOutput(job, page)).length;
+  if (jobOutputLooksLikePdf(job, job.result?.monoFile) || jobOutputLooksLikePdf(job, job.result?.dualFile)) {
+    return Math.max(completed, Number(job.pageCount) || 0);
+  }
+  return completed;
+}
+function hydratePagesFromOutputDir(job, { skipPage = 0 } = {}) {
   if (!job?.jobId) return job;
   const outputDir = path.join(JOBS_DIR, job.jobId, "output");
   if (!fs.existsSync(outputDir)) return job;
@@ -241,6 +253,7 @@ function hydratePagesFromOutputDir(job) {
     if (!match) continue;
     if (!fileLooksLikePdf(outputFilePath(outputDir, name))) continue;
     const page = Number(match[1]);
+    if (page === Number(skipPage)) continue;
     const kind = match[2].toLowerCase();
     const current = pageMap.get(page) || {
       page,
@@ -407,7 +420,8 @@ export function getPdfMathTranslationForPaper(paperId, {
   identityHash = "",
   configFingerprint = "",
   model = "",
-  baseUrl = ""
+  baseUrl = "",
+  requireOutput = false
 } = {}) {
   const id = cleanPaperId(paperId);
   if (!id) return null;
@@ -427,12 +441,16 @@ export function getPdfMathTranslationForPaper(paperId, {
       .filter((job) => !sourceLang || !job.sourceLang || job.sourceLang === normalizeLanguage(sourceLang, job.sourceLang))
       .filter((job) => !targetLang || !job.targetLang || job.targetLang === normalizeLanguage(targetLang, job.targetLang))
       .filter((job) => !requestedSource || job.sourceSha256 === requestedSource)
-      .filter((job) => layoutAssist === undefined || job.layoutAssist?.enabled === Boolean(layoutAssist))
+      .filter((job) => layoutAssist === undefined || (requireOutput
+        ? (job.layoutAssist?.enabled === true) === Boolean(layoutAssist)
+        : job.layoutAssist?.enabled === Boolean(layoutAssist)))
       .filter((job) => !requestedIdentity || job.identityHash === requestedIdentity)
       .filter((job) => !configFingerprint || job.identity?.configFingerprint === configFingerprint)
       .filter((job) => !requestedModel || String(job.identity?.model || "").trim() === requestedModel)
       .filter((job) => !requestedBaseUrl || normalizeBaseUrl(job.identity?.baseUrl) === normalizeBaseUrl(requestedBaseUrl))
-      .sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0));
+      .filter((job) => !requireOutput || jobHasUsablePages(job))
+      .sort((a, b) => (requireOutput ? getPdfMathCompletedOutputCount(b) - getPdfMathCompletedOutputCount(a) : 0)
+        || (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0));
     const candidate = jobs[0];
     if (!candidate) return null;
     if (candidate.status === "completed" && !jobHasUsablePages(candidate)) return null;
@@ -767,7 +785,7 @@ function boundedPositiveInt(value, fallback, maximum = 16) {
 // 单页内全力：提高 qps / pool workers；页与页之间默认串行（阅读顺序）
 const DEFAULT_PDFMATH_QPS = 12;
 const DEFAULT_PDFMATH_WORKERS = 8;
-// 阅读策略：同一时刻只全力做 1 页（下一页通过串行队列预取，不并行抢资源）
+// 翻译策略：同一时刻只做 1 页，按固定起始页顺序推进，不跟随阅读翻页。
 const DEFAULT_PDFMATH_PAGE_WORKERS = 1;
 const MAX_PDFMATH_PAGE_WORKERS = 1;
 
@@ -793,8 +811,7 @@ function clampPageNumber(page, pageCount) {
 }
 
 /**
- * 全书阅读顺序（仅用于展示/兼容）：当前页 → 向后 → 再补前面
- * 实际调度见 buildPdfMathWorkWindow：只做当前页 + 下一页预取
+ * 固定翻译顺序：默认从第 1 页开始；显式起始页 → 向后 → 再补前面。
  */
 export function buildPdfMathPageOrder(pageCount, priorityPage = 1) {
   const total = Math.max(0, Number(pageCount) || 0);
@@ -807,7 +824,8 @@ export function buildPdfMathPageOrder(pageCount, priorityPage = 1) {
 }
 
 /**
- * 阅读窗口：只全力做当前阅读页，并最多预取下一页。
+ * 旧阅读窗口辅助函数，仅保留兼容；翻译队列不再受此窗口限制。
+ * 只全力做当前阅读页，并最多预取下一页。
  * 例：priority=2, pageCount=10 → [2, 3]
  * 绝不会在第 2 页已完成后继续「全力」扫第 4、5… 页。
  */
@@ -854,25 +872,18 @@ function pageNeedsWork(pageState) {
 }
 
 /**
- * reading-window：只认领当前页+下一页
- * all-remaining：按阅读顺序认领所有未完成页（跳过已完成，绝不重译）
+ * 按固定起始页认领所有未完成页（含旧 reading-window 任务，跳过已完成，绝不重译）。
  */
 export function pickNextPdfMathPage(job) {
   if (!job?.pages?.length) return null;
   const total = job.pageCount || job.pages.length;
   const priority = job.priorityPage || 1;
-  const order = job.translateMode === "all-remaining"
-    ? buildPdfMathPageOrder(total, priority)
-    : buildPdfMathWorkWindow(total, priority);
+  const order = buildPdfMathPageOrder(total, priority);
   for (const pageNumber of order) {
     const pageState = job.pages[pageNumber - 1];
     if (pageNeedsWork(pageState)) {
       pageState.status = "running";
-      pageState.progress = pageNumber === Number(job.priorityPage)
-        ? `准备全力翻译第 ${pageNumber} 页`
-        : job.translateMode === "all-remaining"
-          ? `准备翻译第 ${pageNumber} 页（续译未完成页）`
-          : `准备预取第 ${pageNumber} 页`;
+      pageState.progress = `准备翻译第 ${pageNumber} 页（已完成页自动跳过）`;
       pageState.error = "";
       // 认领时清掉可能残留的旧文件引用，完成前不得显示就绪
       pageState.monoFile = "";
@@ -893,21 +904,10 @@ function recountCompletedPages(job) {
 }
 
 function describePageWork(job, page) {
-  const reading = Number(job?.priorityPage) || page;
-  if (Number(page) === reading) {
-    return {
-      short: `正在全力翻译第 ${page} 页`,
-      detail: `正在全力翻译第 ${page} / ${job.pageCount || "?"} 页（当前阅读页）`
-    };
-  }
   return {
-    short: `正在预取第 ${page} 页`,
-    detail: `正在预取第 ${page} 页（你当前在第 ${reading} 页，第 ${page} 页尚未就绪）`
+    short: `正在翻译第 ${page} 页`,
+    detail: `正在按顺序翻译第 ${page} / ${job.pageCount || "?"} 页`
   };
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function jobAllPagesCompleted(job) {
@@ -971,6 +971,16 @@ function killProcessTree(child) {
   child.kill("SIGTERM");
 }
 
+/**
+ * spawn 的 shell:true（Windows 上 .cmd/.bat 必须走 shell）不转义参数、原样拼接（DEP0190）。
+ * 批处理按引号切分 %1..%9，参数含空格或引号（视觉语境 JSON、用户自定义 prompt）时
+ * 必须整体加引号、内部引号翻倍，否则批处理解析崩坏会让翻译进程死挂到空闲超时。
+ * 参数里不能出现裸 %（会被批处理当变量展开）；当前 argv（路径/flag/prompt）不含 %。
+ */
+function escapeCmdBatchArg(value) {
+  return `"${String(value).replace(/"/g, '""')}"`;
+}
+
 function runProcess(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const stdout = [];
@@ -978,11 +988,12 @@ function runProcess(command, args, options = {}) {
     let settled = false;
     let idleTimer;
     let idleWarningTimer;
-    const child = spawn(command, args, {
+    const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
+    const child = spawn(command, useShell ? args.map(escapeCmdBatchArg) : args, {
       cwd: options.cwd,
       env: options.env,
       windowsHide: true,
-      shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(command)
+      shell: useShell
     });
     options.onSpawn?.(child);
     const totalTimer = setTimeout(() => {
@@ -1267,6 +1278,9 @@ function safeLayoutAssistError(error) {
     VISION_OUTPUT_TRUNCATED: "视觉模型输出被截断，已重试一次；仍未返回完整结果，已回退普通翻译",
     VISION_TIMEOUT: "视觉模型请求超时，已回退普通翻译",
     VISION_NETWORK: "视觉模型网络请求失败，已回退普通翻译",
+    VISION_STREAM_INTERRUPTED: "视觉响应流中断，重试后仍未收到完整结果；本页已使用普通翻译",
+    VISION_INCOMPLETE: "视觉模型未完成本页分析；本页已使用普通翻译",
+    VISION_REQUEST: "视觉请求未能完成，错误类型未明确；本页已使用普通翻译",
     VISION_EMPTY: "视觉模型返回为空，已回退普通翻译",
     VISION_REASONING_ONLY: "视觉模型只返回了思考过程，已回退普通翻译",
     VISION_INVALID_JSON: "视觉模型返回格式无效，已回退普通翻译",
@@ -1365,6 +1379,11 @@ async function preparePageVisualContext(job, prepared, pageState, { signal } = {
     pageState.assist.stage = "";
     pageState.assist.retryable = false;
     pageState.assist.retryCount = 0;
+    // 与 requestPdfVisualContext 的行提取保持一致（截断+去空行），region 行号按此数组索引；
+    // 仅存内存供译后 equation 区域回贴匹配，不写入 job.json。
+    pageState.assistLineTexts = rendered.lines.slice(0, 160)
+      .map((line) => String(line?.text || "").slice(0, 1200))
+      .filter((text) => String(text).trim());
     persistJob(job);
     return validated;
   } catch (error) {
@@ -1401,6 +1420,23 @@ async function preparePageVisualContext(job, prepared, pageState, { signal } = {
   }
 }
 
+/** 从视觉语境里取 equation 区域的行文本组（行号 → assistLineTexts），供译后整块回贴 */
+function collectVisionEquationGroups(pageState) {
+  const context = pageState?.assist?.context;
+  const texts = Array.isArray(pageState?.assistLineTexts) ? pageState.assistLineTexts : [];
+  if (!context || !Array.isArray(context.regions) || !texts.length) return [];
+  const groups = [];
+  for (const region of context.regions) {
+    if (String(region?.kind) !== "equation") continue;
+    if (Number(region?.confidence) < 0.7) continue;
+    const group = (Array.isArray(region?.lineIndexes) ? region.lineIndexes : [])
+      .map((index) => (Number.isInteger(index) && index >= 0 && index < texts.length ? texts[index] : ""))
+      .filter(Boolean);
+    if (group.length) groups.push(group);
+  }
+  return groups;
+}
+
 async function executePdfMathTranslationPage(job, prepared, pageState) {
   const page = pageState.page;
   // 开始前：仅当非 running 且磁盘已有合法 PDF 才跳过
@@ -1412,7 +1448,7 @@ async function executePdfMathTranslationPage(job, prepared, pageState) {
   pageState.monoFile = "";
   pageState.dualFile = "";
   pageState.error = "";
-  if (promoteExistingPageOutput(job, prepared, pageState, { allowWhileRunning: true })) {
+  if (job.forcedPage !== page && promoteExistingPageOutput(job, prepared, pageState, { allowWhileRunning: true })) {
     recountCompletedPages(job);
     touchJob(job, {
       progress: `第 ${page} 页译文已存在，跳过重译（${job.completedPages} / ${job.pageCount} 页）`
@@ -1504,7 +1540,7 @@ async function executePdfMathTranslationPage(job, prepared, pageState) {
     }
     if (wasPagePreempted(job)) {
       // 抢占后仅当磁盘上已有合法成品才算完成；否则回队列，绝不假装就绪
-      if (promoteExistingPageOutput(job, prepared, pageState, { allowWhileRunning: true })) {
+      if (job.forcedPage !== page && promoteExistingPageOutput(job, prepared, pageState, { allowWhileRunning: true })) {
         job.pagePreemptRequested = false;
         touchJob(job, { progress: `第 ${page} 页已完成，切换到新的阅读页` });
         return "completed";
@@ -1517,7 +1553,7 @@ async function executePdfMathTranslationPage(job, prepared, pageState) {
       return "preempted";
     }
     if (result.code !== 0) {
-      if (promoteExistingPageOutput(job, prepared, pageState, { allowWhileRunning: true })) {
+      if (job.forcedPage !== page && promoteExistingPageOutput(job, prepared, pageState, { allowWhileRunning: true })) {
         touchJob(job, { progress: `第 ${page} 页译文已生成（${job.completedPages} / ${job.pageCount}）` });
         return "completed";
       }
@@ -1528,7 +1564,7 @@ async function executePdfMathTranslationPage(job, prepared, pageState) {
     const monoPath = outputs.mono ? path.join(pageOutputDir, outputs.mono) : "";
     const dualPath = outputs.dual ? path.join(pageOutputDir, outputs.dual) : "";
     if (!fileLooksLikePdf(monoPath) && !fileLooksLikePdf(dualPath)) {
-      if (promoteExistingPageOutput(job, prepared, pageState, { allowWhileRunning: true })) {
+      if (job.forcedPage !== page && promoteExistingPageOutput(job, prepared, pageState, { allowWhileRunning: true })) {
         touchJob(job, { progress: `第 ${page} 页译文已生成（${job.completedPages} / ${job.pageCount}）` });
         return "completed";
       }
@@ -1557,18 +1593,41 @@ async function executePdfMathTranslationPage(job, prepared, pageState) {
     pageState.progress = "本页排版译文已生成";
     pageState.monoFile = finalMono;
     pageState.dualFile = finalDual;
-    restorePreservedPageOutputs(
+    // 漏译检测：pdf2zh 对模型输出校验失败会静默保留英文原文。复用 restore 提取的译文页行，不额外起进程
+    const restoreResults = restorePreservedPageOutputs(
       prepared.inputPath,
       finalMono ? destMono : "",
       finalDual ? destDual : "",
-      page
+      page,
+      { equationTextGroups: collectVisionEquationGroups(pageState) }
     );
+    let untranslatedClusters = 0;
+    try {
+      const monoRestore = restoreResults.find((result) => result.kind === "mono");
+      untranslatedClusters = countUntranslatedClusters(monoRestore?.destLines || []);
+    } catch {
+      untranslatedClusters = 0;
+    }
+    const sporadicLeak = untranslatedClusters >= 2 && untranslatedClusters <= 6;
+    if (sporadicLeak && pageState.retriedOnce !== true && !job.cancelRequested && !job.pagePreemptRequested) {
+      // 散发性漏译：自动重译本页一次；先删掉本页旧产物，否则 promoteExistingPageOutput 会用旧文件短路
+      pageState.retriedOnce = true;
+      pageState.status = "queued";
+      pageState.progress = `检测到 ${untranslatedClusters} 处疑似未翻译段落，自动重译本页`;
+      pageState.monoFile = "";
+      pageState.dualFile = "";
+      if (finalMono) fs.rmSync(destMono, { force: true });
+      if (finalDual) fs.rmSync(destDual, { force: true });
+      recountCompletedPages(job);
+      persistJob(job);
+      return "requeued-untranslated";
+    }
+    if (untranslatedClusters >= 1 && pageState.retriedOnce === true) {
+      pageState.progress = `本页排版译文已生成（重译后仍有 ${untranslatedClusters} 处疑似未翻译段落）`;
+    }
     recountCompletedPages(job);
-    const reading = Number(job.priorityPage) || page;
     touchJob(job, {
-      progress: Number(page) === reading
-        ? `第 ${page} 页已完成，可阅读`
-        : `第 ${page} 页预取完成（你当前在第 ${reading} 页）`
+      progress: `第 ${page} 页已完成，可阅读`
     });
     return "completed";
   } catch (error) {
@@ -1581,7 +1640,7 @@ async function executePdfMathTranslationPage(job, prepared, pageState) {
       return "canceled";
     }
     if (wasPagePreempted(job)) {
-      if (promoteExistingPageOutput(job, prepared, pageState, { allowWhileRunning: true })) {
+      if (job.forcedPage !== page && promoteExistingPageOutput(job, prepared, pageState, { allowWhileRunning: true })) {
         job.pagePreemptRequested = false;
         return "completed";
       }
@@ -1592,7 +1651,7 @@ async function executePdfMathTranslationPage(job, prepared, pageState) {
       persistJob(job);
       return "preempted";
     }
-    if (promoteExistingPageOutput(job, prepared, pageState, { allowWhileRunning: true })) {
+    if (job.forcedPage !== page && promoteExistingPageOutput(job, prepared, pageState, { allowWhileRunning: true })) {
       return "completed";
     }
     pageState.status = "failed";
@@ -1625,24 +1684,6 @@ function finishProgressiveJobSuccess(job, prepared) {
   });
 }
 
-function waitingProgressMessage(job) {
-  const priority = clampPageNumber(job.priorityPage || 1, job.pageCount || 1);
-  const next = priority + 1;
-  const priorityDone = pageIsDone(job.pages?.[priority - 1]);
-  const nextDone = next > (job.pageCount || 0) || pageIsDone(job.pages?.[next - 1]);
-  const active = Number(job.activePage) || 0;
-  if (active) {
-    return describePageWork(job, active).detail;
-  }
-  if (priorityDone && nextDone && next <= (job.pageCount || 0)) {
-    return `第 ${priority}、${next} 页均已完成，翻到新页后继续（已完成 ${job.completedPages}/${job.pageCount}）`;
-  }
-  if (priorityDone) {
-    return `第 ${priority} 页已完成，可阅读；翻页后自动翻译新页（已完成 ${job.completedPages}/${job.pageCount}）`;
-  }
-  return `第 ${priority} 页尚未完成（已完成 ${job.completedPages}/${job.pageCount}）`;
-}
-
 async function executePdfMathTranslationProgressive(job, prepared) {
   if (job.cancelRequested) return;
   // 防止同一任务跑两套循环（否则已完成页会被第二套再次认领）
@@ -1655,23 +1696,17 @@ async function executePdfMathTranslationProgressive(job, prepared) {
     job.priorityEpoch = Number(job.priorityEpoch) || 0;
     // 仅重试失败/取消；已有产物的页会被 mark 为 completed，不会重译
     for (const pageState of job.pages || []) {
-      if (markPageCompletedIfHasFiles(pageState)) continue;
+      if (pageState.page !== job.forcedPage && markPageCompletedIfHasFiles(pageState)) continue;
       if (pageState.status === "failed" || pageState.status === "canceled" || pageState.status === "running") {
         // 残留 running（进程已死）回收为 queued
         requeuePageState(pageState);
       }
       // 磁盘上已有 output 时直接恢复
-      promoteExistingPageOutput(job, prepared, pageState);
+      if (pageState.page !== job.forcedPage) promoteExistingPageOutput(job, prepared, pageState);
     }
-    if (prepared.continueAll || prepared.translateMode === "all-remaining") {
-      job.translateMode = "all-remaining";
-    } else if (!job.translateMode) {
-      job.translateMode = "reading-window";
-    }
+    job.translateMode = "all-remaining";
     recountCompletedPages(job);
-    const modeLabel = job.translateMode === "all-remaining"
-      ? `续译未完成页（从第 ${priorityPage} 页起，已完成页自动跳过）`
-      : `阅读模式：只译当前页并预取下一页（第 ${priorityPage} 页）`;
+    const modeLabel = `按顺序翻译（从第 ${priorityPage} 页起，已完成页自动跳过）`;
     touchJob(job, {
       status: "running",
       startedAt: job.startedAt || Date.now(),
@@ -1691,34 +1726,23 @@ async function executePdfMathTranslationProgressive(job, prepared) {
           finishProgressiveJobSuccess(job, prepared);
           return;
         }
-        // 续译模式：没有可做的页就结束（已完成的不会重来）
-        if (job.translateMode === "all-remaining") {
-          finishProgressiveJobSuccess(job, prepared);
-          return;
-        }
-        // 阅读窗口模式：本页+下一页做完后停住，等翻页或用户点「继续翻译剩余」
-        const epoch = Number(job.priorityEpoch) || 0;
-        const modeEpoch = String(job.translateMode || "reading-window");
         touchJob(job, {
-          status: "running",
-          progress: waitingProgressMessage(job)
+          status: "failed",
+          error: "存在未完成页，但无法认领翻译任务",
+          progress: "翻译队列异常，已保留此前已完成页面"
         });
-        while (
-          !job.cancelRequested
-          && (Number(job.priorityEpoch) || 0) === epoch
-          && String(job.translateMode || "reading-window") === modeEpoch
-        ) {
-          recountCompletedPages(job);
-          if ((job.pages || []).every((p) => pageIsDone(p))) {
-            finishProgressiveJobSuccess(job, prepared);
-            return;
-          }
-          await sleep(250);
-        }
-        continue;
+        return;
       }
 
       const outcome = await executePdfMathTranslationPage(job, prepared, pageState);
+      if (outcome === "completed" && job.forcedPage === pageState.page) {
+        job.forcedPage = 0;
+        touchJob(job, {
+          status: "completed",
+          progress: `第 ${pageState.page} 页已重新翻译`
+        });
+        return;
+      }
       if (outcome === "canceled") {
         touchJob(job, { status: "canceled", progress: "已取消排版翻译" });
         return;
@@ -1742,7 +1766,7 @@ async function executePdfMathTranslationProgressive(job, prepared) {
 }
 
 /**
- * 阅读翻页 / 续译模式切换。
+ * 显式优先页操作（保留 /priority 兼容，不应由浏览翻页调用）。
  * 已完成页只会更新优先指针，绝不会触发重译。
  */
 export function setPdfMathTranslationPriority(jobId, priorityPage, options = {}) {
@@ -1770,7 +1794,7 @@ export function setPdfMathTranslationPriority(jobId, priorityPage, options = {})
   const priorityDone = pageIsDone(job.pages?.[next - 1]);
   const priorityRunning = job.pages?.[next - 1]?.status === "running" || Number(job.activePage) === next;
   const active = Number(job.activePage) || 0;
-  // 仅当「当前阅读页还没真正完成」且后台在做别的页时才抢占
+  // 仅当显式指定页尚未完成且后台在做别的页时才抢占。
   if (!priorityDone && active && active !== next) {
     job.pagePreemptRequested = true;
     job.visualAbortController?.abort(new Error("页面抢占"));
@@ -1780,7 +1804,7 @@ export function setPdfMathTranslationPriority(jobId, priorityPage, options = {})
       killProcessTree(job.child);
     }
     touchJob(job, {
-      progress: `已翻到第 ${next} 页，正在优先全力翻译该页（尚未完成）`
+      progress: `已指定第 ${next} 页，正在优先翻译该页（尚未完成）`
     });
   } else if (job.translateMode === "all-remaining" && options.continueAll) {
     touchJob(job, {
@@ -1792,7 +1816,7 @@ export function setPdfMathTranslationPriority(jobId, priorityPage, options = {})
         ? `第 ${next} 页已完成，可直接阅读`
         : priorityRunning
           ? `第 ${next} 页仍在翻译中…`
-          : `已翻到第 ${next} 页，准备翻译`
+          : `已指定第 ${next} 页，准备翻译`
     });
   } else {
     persistJob(job);
@@ -1962,21 +1986,32 @@ function resumePdfMathTranslation(job, args = {}) {
   job.error = "";
   job.child = null;
   job.children = new Set();
-  job.priorityPage = clampPageNumber(args.priorityPage || job.priorityPage || 1, job.pageCount || Number(args.pageCount) || 1);
+  job.priorityPage = clampPageNumber(args.priorityPage || 1, job.pageCount || Number(args.pageCount) || 1);
   job.activePage = job.activePage || 0;
-  if (args.continueAll || args.translateMode === "all-remaining") {
-    job.translateMode = "all-remaining";
-  } else if (!job.translateMode) {
-    job.translateMode = "reading-window";
+  const retranslatePage = Number(args.retranslatePage) || 0;
+  if (retranslatePage && (!Number.isInteger(retranslatePage) || retranslatePage < 1 || retranslatePage > (job.pageCount || 0))) {
+    throw new Error("指定的页码无效");
   }
-  prepared.continueAll = job.translateMode === "all-remaining";
+  if (retranslatePage) {
+    const pageState = job.pages?.[retranslatePage - 1];
+    if (!pageState) throw new Error("指定的页码无效");
+    job.forcedPage = retranslatePage;
+    pageState.status = "queued";
+    pageState.progress = "准备重新翻译本页";
+    pageState.error = "";
+    pageState.monoFile = "";
+    pageState.dualFile = "";
+    pageState.retriedOnce = false;
+  }
+  job.translateMode = "all-remaining";
+  prepared.continueAll = !retranslatePage;
   prepared.translateMode = job.translateMode;
   if (!Array.isArray(job.pages) || !job.pages.length) {
     const pageCount = Number(args.pageCount) || job.pageCount || 0;
     job.pageCount = pageCount;
     job.pages = createPageStates(pageCount, layoutAssist);
   }
-  hydratePagesFromOutputDir(job);
+  hydratePagesFromOutputDir(job, { skipPage: retranslatePage });
   PDF_MATH_JOBS.set(job.jobId, job);
   persistJob(job);
   void executePdfMathTranslationProgressive(job, prepared);
@@ -1992,7 +2027,8 @@ export function startPdfMathTranslation(args = {}) {
   const from = normalizeLanguage(args.sourceLang, "en");
   const to = normalizeLanguage(args.targetLang, "zh");
   const layoutAssist = normalizeLayoutAssist(args.layoutAssist);
-  const continueAll = Boolean(args.continueAll || args.translateMode === "all-remaining");
+  const retranslatePage = Number(args.retranslatePage) || 0;
+  const continueAll = !retranslatePage;
   let requestedSourceSha256 = "";
   try {
     const probe = Buffer.from(String(args.data || ""), "base64");
@@ -2021,13 +2057,14 @@ export function startPdfMathTranslation(args = {}) {
       hydratePagesFromOutputDir(existing);
       recountCompletedPages(existing);
       if (["queued", "running", "canceling"].includes(existing.status)) {
+        if (retranslatePage) throw new Error("当前翻译任务仍在运行，请等待完成后再重译此页");
         return setPdfMathTranslationPriority(
           existing.jobId,
-          args.priorityPage || existing.priorityPage || 1,
+          args.priorityPage || 1,
           { continueAll }
         ) || publicPdfMathJob(existing);
       }
-      if (jobAllPagesCompleted(existing)) {
+      if (jobAllPagesCompleted(existing) && !retranslatePage) {
         return publicPdfMathJob(existing);
       }
       if (jobHasUsablePages(existing) || jobIncompletePages(existing).length) {
@@ -2051,14 +2088,16 @@ export function startPdfMathTranslation(args = {}) {
           force: false
         });
         if (reusable?.mode === "active") {
-          // 活跃任务：更新优先页；若点了「续译剩余」则切换模式并唤醒等待循环
+          if (retranslatePage) throw new Error("当前翻译任务仍在运行，请等待完成后再重译此页");
+          // 活跃任务：仅显式启动/续译请求可更新起始页，不与浏览页绑定。
           return setPdfMathTranslationPriority(
             reusable.job.jobId,
-            args.priorityPage || reusable.job.priorityPage || 1,
+            args.priorityPage || 1,
             { continueAll }
           ) || publicPdfMathJob(reusable.job);
         }
         if (reusable?.mode === "complete") {
+          if (retranslatePage) return resumePdfMathTranslation(reusable.job, { ...args, continueAll: false });
           return publicPdfMathJob(reusable.job);
         }
         if (reusable?.mode === "resume" && Array.isArray(reusable.job.pages) && reusable.job.pages.length) {
@@ -2073,7 +2112,7 @@ export function startPdfMathTranslation(args = {}) {
   const prepared = preparePdfMathTranslation({ ...args, paperId, layoutAssist, configFingerprint: args.configFingerprint || "" });
   prepared.priorityPage = Number(args.priorityPage) || 1;
   prepared.continueAll = continueAll;
-  prepared.translateMode = continueAll ? "all-remaining" : "reading-window";
+  prepared.translateMode = "all-remaining";
   let requestedPageCount = Number(args.pageCount);
   if (layoutAssist.enabled && (!Number.isInteger(requestedPageCount) || requestedPageCount < 1)) {
     try {
@@ -2099,7 +2138,7 @@ export function startPdfMathTranslation(args = {}) {
     pagePreemptRequested: false,
     priorityPage: clampPageNumber(prepared.priorityPage, progressive ? requestedPageCount : 1),
     activePage: 0,
-    translateMode: continueAll ? "all-remaining" : "reading-window",
+    translateMode: "all-remaining",
     updatedAt: now,
     startedAt: null,
     pageCount: progressive ? requestedPageCount : 0,
@@ -2218,7 +2257,8 @@ export function buildPdfMathTranslateInvocation({ inputPath, outputDir, config =
       to,
       "--openai",
       "--openai-timeout",
-      "45",
+      // 推理型模型单批响应较慢，45s 会让批量请求超时回退、残留英文段落
+      "90",
       "--openai-temperature",
       "0.1",
       // 部分兼容接口不认 temperature；仅在显式开启时发送，避免拒参/重试拖死

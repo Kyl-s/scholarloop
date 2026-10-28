@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useData } from "./store.jsx";
 import Shell from "./components/Shell.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
@@ -25,15 +25,24 @@ export default function App() {
   const [reader, setReader] = useState(null);
   // 捕获到的 PDF 下载（preload 拦截），非空时弹出入库确认对话框
   const [pdfDownload, setPdfDownload] = useState(null);
+  const [portalPdfStatus, setPortalPdfStatus] = useState(null);
+  const backgroundPdfDownload = useRef(null);
   const [toast, setToast] = useState("");
 
   // 订阅 preload 的 PDF 下载拦截；桥接 API 尚未就绪时静默不启用拦截功能
   useEffect(() => {
     const off = getPdfDownloadsBridge()?.onPdfDownload?.((info) => {
-      if (info) setPdfDownload(info);
+      if (info) {
+        if (backgroundPdfDownload.current === info.downloadId && info.state === "downloading") return;
+        backgroundPdfDownload.current = null;
+        setPortalPdfStatus(null);
+        setPdfDownload((current) => current?.downloadId === info.downloadId ? { ...current, ...info } : info);
+      }
     });
+    const offStatus = getPdfDownloadsBridge()?.onPdfPortalStatus?.((info) => setPortalPdfStatus(info));
     return () => {
       if (typeof off === "function") off();
+      if (typeof offStatus === "function") offStatus();
     };
   }, []);
 
@@ -89,6 +98,10 @@ export default function App() {
       quickAgentOpen={quickAgentOpen}
       onQuickAgentChange={setQuickAgentOpen}
     >
+      {portalPdfStatus ? <div className={`page-banner ${portalPdfStatus.state === "failed" ? "error" : ""}`} role="status" aria-live="polite">
+        {portalPdfStatus.message || portalPdfStatus.error || "正在连接 PDF 下载，请稍候…"}
+        <button type="button" onClick={() => setPortalPdfStatus(null)} style={{ marginLeft: 12 }}>关闭提示</button>
+      </div> : null}
       {displayView.page === "dashboard" ? <Dashboard onNavigate={navigate} onOpenPaper={openPaper} /> : null}
       {displayView.page === "search" ? (
         <SearchPage
@@ -100,6 +113,7 @@ export default function App() {
           initialInstitutionOpen={Boolean(displayView.openInstitution)}
           initialPortalUrl={displayView.initialPortalUrl || ""}
           initialPortalTitle={displayView.initialPortalTitle || ""}
+          portalDownloadActive={Boolean(pdfDownload)}
         />
       ) : null}
       {displayView.page === "library" ? (
@@ -138,13 +152,23 @@ export default function App() {
       {/* PDF 下载入库确认对话框（顶层挂载，任何页面捕获到下载都可弹出） */}
       {pdfDownload ? (
         <PdfIngestDialog
+          key={pdfDownload.downloadId}
           download={pdfDownload}
-          onClose={() => setPdfDownload(null)}
+          onClose={() => {
+            if (pdfDownload.state === "downloading") {
+              backgroundPdfDownload.current = pdfDownload.downloadId;
+              setPortalPdfStatus({ state: "connecting", message: "PDF 正在后台下载，完成或失败时会通知你。" });
+            }
+            setPdfDownload(null);
+          }}
           onIngested={(paper) => {
             setPdfDownload(null);
             showToast(`${paper?.attached ? "已附加到已有文献并打开" : "已入库并打开"}：${paper?.title || "文献"}`);
             // 入库成功后自动聚焦该文献：openPaper 切到文献库并高亮对应记录
-            if (paper) openPaper(paper);
+            if (paper) {
+              openPaper(paper);
+              openReader(paper.pdfUrl, paper.title, paper.doi, paper.id);
+            }
           }}
         />
       ) : null}

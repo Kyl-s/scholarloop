@@ -18,6 +18,7 @@ import {
   Wand2
 } from "lucide-react";
 import { api } from "../api.js";
+import { openPdfExternal } from "../openPdfExternal.js";
 import { useData } from "../store.jsx";
 import { Badge, Button, IconButton, Modal, Segmented, SourceTag, Stars, TextArea } from "./ui.jsx";
 
@@ -75,6 +76,15 @@ export default function PaperDetail({ paper: initialPaper, onClose, onSave, save
   const openUrl = (url) => {
     if (!url) return;
     window.open(url, meta?.settings?.openLinksInNewTab === false ? "_self" : "_blank", "noopener");
+  };
+
+  const openExternalPdf = async () => {
+    try {
+      if (onOpenPdfExternal) return await onOpenPdfExternal(paper);
+      await openPdfExternal({ paperId: saved ? paper.id : "", pdfUrl: paper.pdfUrl || paper.url || "", doi: paper.doi || "", title: paper.title, chooseApp: true });
+    } catch (error) {
+      showToast(`${error.message} 可使用内置阅读器重试或附加本地 PDF。`, true);
+    }
   };
 
   const handleSave = async () => {
@@ -178,20 +188,16 @@ export default function PaperDetail({ paper: initialPaper, onClose, onSave, save
             {paper.url ? (
               <Button variant="ghost" size="sm" icon={ExternalLink} onClick={() => openUrl(paper.url)}>原文页面</Button>
             ) : null}
-            {(paper.pdfUrl || paper.localPdf) ? (
-              <Button variant="ghost" size="sm" icon={FileText} onClick={() => onReadPdf?.(paper.pdfUrl, paper.title, paper.doi, paper.id)}>内置阅读器</Button>
-            ) : null}
-            {(paper.pdfUrl || paper.localPdf) ? (
+              <Button variant="ghost" size="sm" icon={FileText} onClick={() => onReadPdf?.(paper.pdfUrl || paper.url || "", paper.title, paper.doi, saved ? paper.id : "")}>{paper.pdfUrl || paper.localPdf ? "内置阅读器" : "尝试获取 PDF / 内置阅读"}</Button>
               <Button
                 variant="ghost"
                 size="sm"
                 icon={ExternalLink}
-                onClick={() => onOpenPdfExternal?.(paper)}
+                onClick={openExternalPdf}
                 title="弹出系统「打开方式」，自选 PDF 软件"
               >
                 用其他软件打开
               </Button>
-            ) : null}
             {paper.doi ? (
               <Button variant="ghost" size="sm" onClick={() => openUrl(`https://doi.org/${paper.doi}`)}>DOI</Button>
             ) : null}

@@ -82,10 +82,12 @@ function isAffiliationContinuation(text) {
 
 export function isFormulaLikeLine(text) {
   const t = normalizeLine(text);
-  if (!t || t.length > 160 || CJK_RE.test(t)) return false;
+  if (!t || CJK_RE.test(t)) return false;
   if (isAuthorLine(t) || isAffiliationLine(t) || isMetaLine(t) || isKeepHeadingLine(t) || isBodyStopLine(t)) return false;
   if (/^(fig(?:ure)?|table|eq(?:uation)?)\.?\s*\d/i.test(t)) return false;
   const math = (t.match(MATH_RE) || []).length;
+  // 散文+公式混排行（如「…for learning L_TD(θ)=E[…]」）同样会把公式译坏，数学符号密集时放宽长度上限
+  if (t.length > (math >= 6 ? 240 : 160)) return false;
   if (/\\[a-zA-Z]+/.test(t) || /\$[^$]+\$/.test(t)) return true;
   if (/^[A-Za-z]\w{0,8}\s*[=≈]/.test(t) && math >= 1) return true;
   if (/\b[A-Za-z]\w?\d*\(\s*[A-Za-z](?:\s*,\s*[A-Za-z])+\s*\)/.test(t)) return true;
@@ -194,19 +196,110 @@ export function collectPreserveBoxes(lines = []) {
 
 /**
  * 原文是公式、译文同位置却出现了汉字时，把该框加入恢复列表。
+ * BabelDOC 重排会把译文行推离原位：垂直重叠占比足够，或译文行中心落回源行 ±3pt 带内都算命中；
+ * 水平无重叠（如另一栏同行）不算。
  */
 export function collectFormulaLeakBoxes(sourceLines = [], destLines = []) {
   const leaks = [];
   for (const src of sourceLines) {
     if (!isFormulaLikeLine(src.text)) continue;
+    const srcH = Math.max(1, Number(src.y1) - Number(src.y0));
     const hit = destLines.some((dst) => {
       if (!CJK_RE.test(String(dst.text || ""))) return false;
-      const overlap = Math.min(Number(src.y1), Number(dst.y1)) - Math.max(Number(src.y0), Number(dst.y0));
-      return overlap > 1;
+      const dstH = Math.max(1, Number(dst.y1) - Number(dst.y0));
+      const hOverlap = Math.min(Number(src.x1), Number(dst.x1)) - Math.max(Number(src.x0), Number(dst.x0));
+      if (hOverlap <= 1) return false;
+      const vOverlap = Math.min(Number(src.y1), Number(dst.y1)) - Math.max(Number(src.y0), Number(dst.y0));
+      const dstCenter = (Number(dst.y0) + Number(dst.y1)) / 2;
+      const centerInBand = dstCenter >= Number(src.y0) - 3 && dstCenter <= Number(src.y1) + 3;
+      const ratio = vOverlap / Math.min(srcH, dstH);
+      return centerInBand || ratio >= 0.4;
     });
     if (hit) leaks.push({ ...unionBox([src], 1.5), reason: "formula-leak" });
   }
   return leaks;
+}
+
+function matchKey(text) {
+  return String(text || "").toLowerCase().replace(/\s+/g, "");
+}
+
+/**
+ * 把视觉辅助识别的 equation 区域行文本映射回源 PDF 行，union 成回贴框。
+ * region 只持久化行号，行文本由调用方在同进程内传入（assistLineTexts）。
+ */
+export function collectEquationRegionBoxes(sourceLines = [], equationTextGroups = []) {
+  if (!Array.isArray(equationTextGroups) || !equationTextGroups.length) return [];
+  const candidates = sourceLines
+    .filter((line) => line && normalizeLine(line.text) && !CJK_RE.test(String(line.text)))
+    .map((line) => ({ line, key: matchKey(line.text) }))
+    .filter((item) => item.key);
+  if (!candidates.length) return [];
+  const boxes = [];
+  for (const group of equationTextGroups) {
+    const keys = (Array.isArray(group) ? group : [group]).map(matchKey).filter(Boolean);
+    if (!keys.length) continue;
+    const matched = [];
+    for (const item of candidates) {
+      const hit = keys.some((key) => {
+        if (item.key === key) return true;
+        const longer = key.length >= item.key.length ? key : item.key;
+        const shorter = key.length >= item.key.length ? item.key : key;
+        // 两套抽取器的 span 合并方式不同，用归一化文本的包含关系做模糊匹配
+        return shorter.length >= 8 && longer.includes(shorter) && shorter.length / longer.length >= 0.8;
+      });
+      if (hit) matched.push(item.line);
+    }
+    if (matched.length) boxes.push({ ...unionBox(matched, 2), reason: "vision-equation" });
+  }
+  return boxes.filter(Boolean);
+}
+
+const UNTRANSLATED_REF_HINT_RE = /\bet\s+al\b|\bvol\.\s*\d|\bpp\.\s*\d|\bproc\.\b|\barxiv\b|doi\.org|https?:\/\/|^\s*[\[(]\d+[\])]/i;
+
+/** 译文页里「整行仍是英文长句」的正文行：疑似漏译 */
+export function isUntranslatedBodyLine(text) {
+  const t = normalizeLine(text);
+  if (!t || CJK_RE.test(t)) return false;
+  if (t.length < 40) return false;
+  if (isFormulaLikeLine(t)) return false;
+  if (isAuthorLine(t) || isAffiliationLine(t) || isMetaLine(t) || isBodyStopLine(t)) return false;
+  if (/^(fig(?:ure)?|table)\b[\s.:]/i.test(t)) return false;
+  if (UNTRANSLATED_REF_HINT_RE.test(t)) return false;
+  const words = t.split(/\s+/).filter(Boolean);
+  if (words.length < 6) return false;
+  const letters = (t.match(/[A-Za-z]/g) || []).length;
+  return letters >= t.length * 0.6;
+}
+
+/**
+ * 统计译文页里连续成段的未翻译正文行簇。
+ * 单行不成簇（多为残留标题/碎片），参考文献页通常整页成簇（数量远超阈值），由调用方结合上限判断。
+ */
+export function countUntranslatedClusters(lines = []) {
+  const rows = [...lines]
+    .filter((line) => line && normalizeLine(line.text))
+    .sort((a, b) => Number(a.y0) - Number(b.y0) || Number(a.x0) - Number(b.x0));
+  let clusters = 0;
+  let run = 0;
+  let prev = null;
+  const flush = () => {
+    if (run >= 2) clusters += 1;
+    run = 0;
+  };
+  for (const row of rows) {
+    if (isUntranslatedBodyLine(row.text)) {
+      const stacked = prev
+        && Number(row.y0) - Number(prev.y1) <= Math.max(6, (Number(prev.y1) - Number(prev.y0)) * 0.9);
+      if (run > 0 && !stacked) flush();
+      run += 1;
+    } else {
+      flush();
+    }
+    prev = row;
+  }
+  flush();
+  return clusters;
 }
 
 function pythonCandidates() {
@@ -288,10 +381,11 @@ export function stampPreserveBoxes({ sourcePdf, destPdf, page, kind = "mono", bo
 }
 
 /**
- * 译完后把作者/单位块和泄漏公式从原文盖回去，保住原排版。
+ * 译完后把作者/单位块、泄漏公式和视觉 equation 区域从原文盖回去，保住原排版。
+ * 结果携带译文页文本行（mono 为全部行，dual 为译文半幅行），调用方可复用做漏译扫描，省一次抽取。
  * 失败不抛给翻译任务。
  */
-export function restorePreservedRegions({ sourcePdf, destPdf, page, kind = "mono" } = {}) {
+export function restorePreservedRegions({ sourcePdf, destPdf, page, kind = "mono", equationTextGroups = [] } = {}) {
   if (!sourcePdf || !destPdf || !page || !fs.existsSync(sourcePdf) || !fs.existsSync(destPdf)) {
     return { ok: false, restored: 0, reason: "missing" };
   }
@@ -306,25 +400,27 @@ export function restorePreservedRegions({ sourcePdf, destPdf, page, kind = "mono
         ? { ...line, x0: line.x0 - source.width, x1: line.x1 - source.width }
         : line
     ));
+    const scannedLines = kind === "mono" ? destLines : mappedDest;
     const boxes = [
       ...collectPreserveBoxes(source.lines || []),
-      ...collectFormulaLeakBoxes(source.lines || [], mappedDest)
+      ...collectFormulaLeakBoxes(source.lines || [], mappedDest),
+      ...(kind === "mono" ? collectEquationRegionBoxes(source.lines || [], equationTextGroups) : [])
     ];
-    if (!boxes.length) return { ok: true, restored: 0, reason: "none" };
+    if (!boxes.length) return { ok: true, restored: 0, reason: "none", destLines: scannedLines };
     const stamped = stampPreserveBoxes({ sourcePdf, destPdf, page, kind, boxes });
-    return { ok: true, restored: stamped.restored || boxes.length, boxes };
+    return { ok: true, restored: stamped.restored || boxes.length, boxes, destLines: scannedLines };
   } catch (error) {
     return { ok: false, restored: 0, reason: error.message || String(error) };
   }
 }
 
-export function restorePreservedPageOutputs(sourcePdf, destMono, destDual, page) {
+export function restorePreservedPageOutputs(sourcePdf, destMono, destDual, page, { equationTextGroups = [] } = {}) {
   const results = [];
   if (destMono && fs.existsSync(destMono)) {
-    results.push({ kind: "mono", ...restorePreservedRegions({ sourcePdf, destPdf: destMono, page, kind: "mono" }) });
+    results.push({ kind: "mono", ...restorePreservedRegions({ sourcePdf, destPdf: destMono, page, kind: "mono", equationTextGroups }) });
   }
   if (destDual && fs.existsSync(destDual) && destDual !== destMono) {
-    results.push({ kind: "dual", ...restorePreservedRegions({ sourcePdf, destPdf: destDual, page, kind: "dual" }) });
+    results.push({ kind: "dual", ...restorePreservedRegions({ sourcePdf, destPdf: destDual, page, kind: "dual", equationTextGroups }) });
   }
   return results;
 }

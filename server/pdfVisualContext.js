@@ -1,4 +1,5 @@
 import { extractModelFinishReason, extractModelReasoning, extractModelText, modelResponseError, parseJsonFromModelText } from "./modelResponse.js";
+import { chatgptModelFetch } from "./chatgptModel.js";
 const REGION_KINDS = new Set(["text", "title", "heading", "caption", "table", "figure", "equation", "header", "footer"]);
 const MAX_LINES = 240;
 const MAX_REQUEST_LINES = 160;
@@ -101,7 +102,9 @@ function createVisionRequestError(code, message, status = 0) {
   error.code = code;
   error.status = Number(status) || 0;
   error.stage = "request";
-  error.retryable = ["VISION_UPSTREAM", "VISION_NETWORK", "VISION_TIMEOUT"].includes(code);
+  error.retryable = code === "VISION_NETWORK" || code === "VISION_TIMEOUT"
+    || code === "VISION_STREAM_INTERRUPTED"
+    || (code === "VISION_UPSTREAM" && (status === 408 || status === 429 || status >= 500));
   return error;
 }
 
@@ -138,7 +141,8 @@ function shouldDisableThinking(config = {}) {
     && (/deepseek/.test(model) || /deepseek\.com/.test(baseUrl));
 }
 
-async function requestPdfVisualContextOnce({ rendered, page, config = {}, fetchImpl = globalThis.fetch, signal, retry = false } = {}) {
+async function requestPdfVisualContextOnce({ rendered, page, config = {}, fetchImpl = chatgptModelFetch, signal, retry = false } = {}) {
+  signal?.throwIfAborted();
   const baseUrl = String(config.baseUrl || "").trim().replace(/\/+$/, "");
   const apiKey = String(config.apiKey || "").trim();
   const model = String(config.model || "").trim();
@@ -155,6 +159,32 @@ async function requestPdfVisualContextOnce({ rendered, page, config = {}, fetchI
   const system = "你是 PDF 学术排版语境分析器。只根据页面截图和给定文本行判断阅读顺序、栏数与区域分组，不翻译文本。严格只输出 JSON 对象：{\"version\":\"page-context-v1\",\"page\":整数,\"textLayer\":true,\"columns\":1到4,\"readingOrder\":行 index 数组,\"regions\":[{\"kind\":\"text|title|heading|caption|table|figure|equation|header|footer\",\"order\":整数,\"lineIndexes\":行 index 数组,\"confidence\":0到1}],\"notes\":\"不超过600字\"}。不要输出 Markdown、坐标、额外字段。";
   const user = `页面 ${page} 的文本行（坐标只用于理解，不能修改）：\n${JSON.stringify(lines)}`;
   let response;
+  const requestSignal = visualRequestSignal(signal);
+  const requestFailure = (error) => {
+    signal?.throwIfAborted();
+    if (error?.name === "AbortError" && !requestSignal.aborted) throw error;
+    const timeout = requestSignal.reason?.name === "TimeoutError" || error?.name === "TimeoutError"
+      || error?.code === "ETIMEDOUT" || /timeout|timed out/i.test(String(error?.message || ""));
+    if (timeout) return createVisionRequestError("VISION_TIMEOUT", "视觉模型请求超时");
+    if (error?.code === "CHATGPT_OUTPUT_TRUNCATED") return createVisionOutputTruncatedError();
+    if (error?.code === "CHATGPT_RESPONSE_FAILED") return classifyVisionResponseError(error.status);
+    if (error?.reauthenticate === true || /请在设置中登录 ChatGPT|ChatGPT.*(?:退出登录|授权.*失效|登录状态已改变)/.test(String(error?.message || ""))) {
+      return createVisionRequestError("VISION_AUTH", "ChatGPT 登录或授权已失效，请在设置中重新登录");
+    }
+    const streamErrors = {
+      CHATGPT_STREAM_INTERRUPTED: ["VISION_STREAM_INTERRUPTED", "视觉响应流中断，未收到完整结果", true],
+      CHATGPT_RESPONSE_INCOMPLETE: ["VISION_INCOMPLETE", "视觉模型未完成本页分析", false],
+      CHATGPT_STREAM_INVALID_JSON: ["VISION_INVALID_JSON", "视觉响应流格式无效", true],
+      CHATGPT_EMPTY_OUTPUT: ["VISION_EMPTY", "视觉模型完成请求但没有返回分析结果", false]
+    };
+    if (streamErrors[error?.code]) {
+      const [code, message, retryable] = streamErrors[error.code];
+      return Object.assign(createVisionRequestError(code, message), { stage: "response-parse", retryable });
+    }
+    const network = error?.name === "TypeError" || /^(?:EAI_AGAIN|ENOTFOUND|ECONNRESET|ECONNREFUSED|UND_ERR_)/.test(String(error?.cause?.code || error?.code || ""))
+      || /fetch failed|socket|network|connection reset/i.test(String(error?.message || ""));
+    return createVisionRequestError(network ? "VISION_NETWORK" : "VISION_REQUEST", network ? "视觉模型网络连接失败" : "视觉请求未能完成，上游未提供可识别的错误类型");
+  };
   try {
     response = await fetchImpl(`${baseUrl}/chat/completions`, {
     method: "POST",
@@ -169,17 +199,12 @@ async function requestPdfVisualContextOnce({ rendered, page, config = {}, fetchI
         { role: "user", content: [{ type: "text", text: user }, { type: "image_url", image_url: { url: rendered.image } }] }
       ]
     }),
-    signal: visualRequestSignal(signal)
+    signal: requestSignal
   });
   } catch (error) {
-    if (signal?.aborted) throw error;
-    const timeout = error?.name === "TimeoutError" || error?.code === "ETIMEDOUT" || /timeout|timed out/i.test(String(error?.message || ""));
-    const wrapped = new Error(timeout ? "视觉模型请求超时" : "视觉模型网络请求失败");
-    wrapped.code = timeout ? "VISION_TIMEOUT" : "VISION_NETWORK";
-    wrapped.stage = "request";
-    wrapped.retryable = true;
-    throw wrapped;
+    throw requestFailure(error);
   }
+  signal?.throwIfAborted();
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
     throw classifyVisionResponseError(response.status, detail);
@@ -187,13 +212,18 @@ async function requestPdfVisualContextOnce({ rendered, page, config = {}, fetchI
   let data;
   try {
     data = await response.json();
-  } catch {
+  } catch (cause) {
+    signal?.throwIfAborted();
+    // Headers may arrive before a timeout or socket failure interrupts the body.
+    if (requestSignal.aborted || cause?.name === "TypeError" || cause?.name === "AbortError"
+      || cause?.name === "TimeoutError" || cause?.code === "ETIMEDOUT") throw requestFailure(cause);
     const error = new Error("视觉模型返回了无法读取的响应");
     error.code = "VISION_INVALID_JSON";
     error.stage = "response-parse";
     error.retryable = true;
     throw error;
   }
+  signal?.throwIfAborted();
   if (data?.error) {
     throw classifyVisionResponseError(response.status || 400, JSON.stringify(data.error).slice(0, 500));
   }
@@ -204,7 +234,7 @@ async function requestPdfVisualContextOnce({ rendered, page, config = {}, fetchI
     const error = new Error(modelResponseError(data));
     error.code = extractModelReasoning(data) ? "VISION_REASONING_ONLY" : "VISION_EMPTY";
     error.stage = "response-parse";
-    error.retryable = false;
+    error.retryable = error.code === "VISION_REASONING_ONLY";
     throw error;
   }
   let parsed;
@@ -233,17 +263,21 @@ export async function requestPdfVisualContext(args = {}) {
   try {
     return await requestPdfVisualContextOnce(args);
   } catch (error) {
-    // A reasoning model can consume the whole output budget before emitting JSON.
-    // Retry once with a smaller prompt and a larger completion budget. DeepSeek
-    // gateways may omit finish_reason when they return reasoning only, so the
-    // same bounded retry also covers that provider-specific shape.
-    const retryableReasoningOnly = error?.code === "VISION_REASONING_ONLY"
-      && shouldDisableThinking(args.config);
-    const canRetry = error?.code === "VISION_OUTPUT_TRUNCATED" || retryableReasoningOnly;
-    if (!canRetry || args.retry) {
+    // At most two attempts across all recoverable failures, regardless of model
+    // name. Reasoning-only is not evidence for or against image support.
+    args.signal?.throwIfAborted();
+    if (!error?.retryable || error?.name === "AbortError" || args.retry) {
       throw error;
     }
-    return requestPdfVisualContextOnce({ ...args, retry: true });
+    try {
+      return await requestPdfVisualContextOnce({ ...args, retry: true });
+    } catch (finalError) {
+      args.signal?.throwIfAborted();
+      // This layer owns the recovery budget. Do not let the page preparation
+      // layer render again and multiply the same two request attempts.
+      if (finalError?.retryable === true) finalError.retryable = false;
+      throw finalError;
+    }
   }
 }
 

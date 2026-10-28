@@ -39,10 +39,12 @@ export function defaultTitle(filename) {
  * preload 的 scholarloopDownloads API 可能尚未就绪，所有访问都判空。
  */
 export default function PdfIngestDialog({ download, onClose, onIngested }) {
-  const { refresh } = useData();
+  const { refresh, savePaper, library } = useData();
+  const detectedDoi = extractDoi(download?.sourceUrl) || extractDoi(download?.url);
+  const existingPaper = library.find((paper) => detectedDoi && String(paper.doi || "").toLowerCase() === detectedDoi.toLowerCase());
   const [form, setForm] = useState({
-    title: defaultTitle(download?.filename),
-    doi: extractDoi(download?.url) || extractDoi(download?.sourceUrl),
+    title: existingPaper?.title || defaultTitle(download?.filename),
+    doi: detectedDoi,
     sourceUrl: download?.sourceUrl || "",
     authors: "",
     year: "",
@@ -54,18 +56,24 @@ export default function PdfIngestDialog({ download, onClose, onIngested }) {
   const [done, setDone] = useState(null);
   // 「仍另存到磁盘」的结果提示
   const [saveState, setSaveState] = useState(null);
+  const [savingToDisk, setSavingToDisk] = useState(false);
+  const downloading = download?.state === "downloading";
+  const downloadFailed = download?.state === "failed";
+  const progress = download?.totalBytes > 0 ? Math.min(100, Math.round((download.receivedBytes || 0) / download.totalBytes * 100)) : null;
 
   const setField = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
 
   // 订阅另存结果（preload API 缺失时静默不启用）
   useEffect(() => {
     const off = getPdfDownloadsBridge()?.onPdfDownloadSaved?.((info) => {
+      if (info?.downloadId !== download?.downloadId) return;
+      setSavingToDisk(false);
       setSaveState(info || {});
     });
     return () => {
       if (typeof off === "function") off();
     };
-  }, []);
+  }, [download?.downloadId]);
 
   // 按 DOI 解析元数据，预填作者/年份/期刊/标题
   const resolveByDoi = async () => {
@@ -90,15 +98,13 @@ export default function PdfIngestDialog({ download, onClose, onIngested }) {
     }
   };
 
-  // 提交入库：让服务端按 URL 下载 PDF 并创建文献记录
+  // 原生下载完成后直接导入实际文件，避免重放临时链接、POST 或登录请求。
   const submit = async () => {
     setLoading(true);
     setError("");
     try {
       const body = {
         url: download?.url || "",
-        // cookie 原样透传给服务端（可能为字符串或对象）
-        cookie: download?.cookies || "",
         title: form.title.trim(),
         doi: form.doi.trim(),
         sourceUrl: form.sourceUrl.trim()
@@ -109,14 +115,25 @@ export default function PdfIngestDialog({ download, onClose, onIngested }) {
       }
       if (form.year.trim()) body.year = form.year.trim();
       if (form.venue.trim()) body.venue = form.venue.trim();
-      const result = await api.importPdfFromUrl(body);
+      let result;
+      const bridge = getPdfDownloadsBridge();
+      if (download?.state && bridge?.readCapturedPdf) {
+        if (download.state !== "ready") throw new Error(download.error || "PDF 还没有下载完成");
+        const file = await bridge.readCapturedPdf(download.downloadId);
+        if (file.data.length > 49 * 1024 * 1024) throw new Error("PDF 较大，超过当前入库请求的大小限制。请先使用「另存到磁盘」保留下载文件。");
+        const imported = await api.importPdf({ ...body, data: file.data, pdfName: file.filename || download.filename });
+        const paper = await savePaper({ ...imported, url: imported.url || body.sourceUrl || body.url });
+        result = { paper, attached: imported.attached };
+      } else {
+        result = await api.importPdfFromUrl(body);
+        if (result?.paper) result.paper = await savePaper(result.paper);
+      }
       if (result?.ok === false) throw new Error(result.error || "PDF 入库失败");
       // attached 标记随 paper 一起传出，供外层区分「新建入库 / 附加已有文献」
       const paper = result?.paper ? { ...result.paper, attached: Boolean(result.attached) } : null;
       setDone(paper);
       await refresh();
-      // 短暂展示成功提示后关闭
-      setTimeout(() => onIngested?.(paper), 1200);
+      onIngested?.(paper);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -125,14 +142,29 @@ export default function PdfIngestDialog({ download, onClose, onIngested }) {
   };
 
   // 次要操作：放弃拦截，走系统「另存为」对话框
-  const saveToDisk = () => {
+  const saveToDisk = async () => {
     setSaveState(null);
-    getPdfDownloadsBridge()?.savePdfAs?.(download?.downloadId);
+    setSavingToDisk(true);
+    try {
+      const result = await getPdfDownloadsBridge()?.savePdfAs?.(download?.downloadId);
+      setSaveState(result || { ok: false, error: "另存接口不可用" });
+    } catch (error) {
+      setSaveState({ ok: false, error: error.message });
+    } finally {
+      setSavingToDisk(false);
+    }
   };
 
   return (
-    <Modal title="PDF 入库确认" onClose={onClose} width="560px">
+    <Modal title={downloading ? "正在下载门户 PDF" : downloadFailed ? "PDF 下载失败" : "PDF 已就绪"} onClose={loading || savingToDisk ? () => {} : onClose} width="560px">
       <div className="import-form">
+        <div role="status" aria-live="polite">
+          {downloading ? <p className="form-note"><Loader2 className="spin" size={14} />正在下载{progress !== null ? ` ${progress}%` : "…"} · {((download.receivedBytes || 0) / 1048576).toFixed(1)} MB</p> : null}
+          {downloading ? <progress max={100} value={progress ?? undefined} style={{ width: "100%" }} /> : null}
+          {downloading && download.error ? <p className="error-text">{download.error}</p> : null}
+          {downloadFailed ? <p className="error-text">{download.error || "下载中断，请回到门户重新点击 PDF。"}</p> : null}
+          {download?.state === "ready" ? <p className="form-note">已下载并校验 PDF。确认后保存到文献库并打开阅读器；相同 DOI 会附加到已有文献。</p> : null}
+        </div>
         <p className="form-note"><FileText size={13} /> 捕获到 PDF 下载：{download?.filename || download?.url || "未知文件"}</p>
         <label>标题 <input value={form.title} onChange={setField("title")} placeholder="论文标题" /></label>
         <div className="two-col">
@@ -156,18 +188,18 @@ export default function PdfIngestDialog({ download, onClose, onIngested }) {
         {saveState ? (
           saveState.ok ? (
             <p className="form-note"><Download size={13} /> 已保存到：{saveState.path || "所选位置"}</p>
-          ) : (
+          ) : saveState.canceled || saveState.error === "canceled" ? <p className="form-note">已取消另存，PDF 仍可入库。</p> : (
             <p className="error-text">另存失败：{saveState.error || "未知错误"}</p>
           )
         ) : null}
       </div>
       <div className="import-actions">
-        <Button variant="ghost" onClick={saveToDisk} disabled={!download?.downloadId || !getPdfDownloadsBridge()?.savePdfAs}>
-          仍另存到磁盘
+        <Button variant="ghost" onClick={saveToDisk} disabled={downloading || downloadFailed || loading || savingToDisk || !download?.downloadId || !getPdfDownloadsBridge()?.savePdfAs}>
+          {savingToDisk ? "保存中…" : "另存到磁盘"}
         </Button>
-        <Button variant="ghost" onClick={onClose}>取消</Button>
-        <Button icon={loading ? Loader2 : FileText} onClick={submit} disabled={loading || Boolean(done)}>
-          {loading ? "入库中" : "确认入库"}
+        <Button variant="ghost" onClick={onClose} disabled={loading || savingToDisk}>{downloading ? "后台下载" : "关闭"}</Button>
+        <Button icon={loading ? Loader2 : FileText} onClick={submit} disabled={downloading || downloadFailed || loading || savingToDisk || Boolean(done)}>
+          {loading ? "正在保存文献…" : "入库并阅读"}
         </Button>
       </div>
     </Modal>

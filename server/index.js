@@ -1,4 +1,5 @@
 import express from "express";
+import { installZoteroRoutes } from "./zoteroRoutes.js";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -43,7 +44,7 @@ import {
 } from "./store.js";
 import { getNoteFile, saveNoteFile } from "./noteFiles.js";
 import { getProxyUrl, fetchWithFallback } from "./proxy.js";
-import { interpretPdf } from "./pdfInterpret.js";
+import { interpretPdf, reviewGuidedAnswer, guideDialogTurn } from "./pdfInterpret.js";
 import { mergeUsages, parseChatUsage } from "../src/llmUsage.js";
 import { clearPdfCache, getPdfCache, listPdfCaches, resolveLocalPdfPath, resolvePaperPdfPath, savePdfCache, savePdfSource } from "./pdfCache.js";
 import { parseReadingNotes } from "../src/readingNotes.js";
@@ -55,6 +56,7 @@ import {
   createPdfMathTranslationIdentity,
   getPdfMathTranslateFile,
   getPdfMathTranslationForPaper,
+  getPdfMathCompletedOutputCount,
   hasUsablePdfMathOutput,
   getPdfMathTranslationJob,
   getPdfMathInstallState,
@@ -72,6 +74,7 @@ import {
   sanitizeTranslationModelOutput
 } from "./translationQuality.js";
 import { handlePdfMathLlmProxy, setPdfMathLlmProxyPort } from "./pdfMathLlmProxy.js";
+import { pdfLayoutJobMatchesRestore } from "./pdfLayoutRestore.js";
 import { extractModelText, modelResponseError } from "./modelResponse.js";
 import { chatGptAuth, isLocalChatGptRequest } from "./chatgptAuth.js";
 import { chatgptModelFetch, isChatGptModelUrl } from "./chatgptModel.js";
@@ -213,6 +216,7 @@ function searchErrorMessage(error, config = {}) {
   return redactSensitiveError(error?.message || error, [...sourceKeys, config?.apiKey]);
 }
 app.use(express.json({ limit: "50mb" }));
+installZoteroRoutes(app);
 // OAuth credentials are usable only by the local desktop/browser client.
 app.use((req, res, next) => {
   const oauth = req.path.startsWith("/api/chatgpt/")
@@ -502,6 +506,7 @@ app.post("/api/pdf/translate-layout", async (req, res) => {
       paperId: req.body?.paperId || "",
       jobId: req.body?.jobId || "",
       force: Boolean(req.body?.force),
+      retranslatePage: Number(req.body?.retranslatePage) || 0,
       // 续译未完成页（跳过已完成）；与 force 互斥
       continueAll: Boolean(req.body?.continueAll || req.body?.translateMode === "all-remaining"),
       layoutAssist: req.body?.layoutAssist,
@@ -638,6 +643,46 @@ app.post("/api/pdf/interpret", async (req, res) => {
     res.json(result);
   } catch (err) {
     const msg = err.message || "解读失败";
+    const status = /API Key|配置/.test(msg) ? 400 : /扫描版|无可提取/.test(msg) ? 422 : 502;
+    res.status(status).json({ error: msg });
+  }
+});
+
+app.post("/api/pdf/interpret/guide", async (req, res) => {
+  try {
+    const result = await reviewGuidedAnswer({
+      title: req.body?.title || "",
+      mode: req.body?.mode === "full" ? "full" : "quick",
+      config: req.body?.config || {},
+      pages: Array.isArray(req.body?.pages) ? req.body.pages : [],
+      step: req.body?.step || {},
+      userAnswer: req.body?.userAnswer || "",
+      prior: req.body?.prior || null
+    });
+    res.json(result);
+  } catch (err) {
+    const msg = err.message || "批改失败";
+    const status = /API Key|配置/.test(msg) ? 400 : /扫描版|无可提取/.test(msg) ? 422 : 502;
+    res.status(status).json({ error: msg });
+  }
+});
+
+// 引导式精读：某一步批改完成后的持续追问（多轮对话）
+app.post("/api/pdf/interpret/guide/dialog", async (req, res) => {
+  try {
+    const result = await guideDialogTurn({
+      title: req.body?.title || "",
+      mode: req.body?.mode === "full" ? "full" : "quick",
+      config: req.body?.config || {},
+      pages: Array.isArray(req.body?.pages) ? req.body.pages : [],
+      step: req.body?.step || {},
+      record: req.body?.record || {},
+      messages: Array.isArray(req.body?.messages) ? req.body.messages : [],
+      prior: req.body?.prior || null
+    });
+    res.json(result);
+  } catch (err) {
+    const msg = err.message || "回复失败";
     const status = /API Key|配置/.test(msg) ? 400 : /扫描版|无可提取/.test(msg) ? 422 : 502;
     res.status(status).json({ error: msg });
   }
@@ -818,6 +863,34 @@ app.get("/api/library/:id/pdf-layout-translation", (req, res) => {
       ? req.query.layoutAssist === "true"
       : undefined
   };
+  if (req.query?.restoreOnly === "true") {
+    const restoreRequest = {
+      paperId: req.params.id,
+      sourceSha256: requestedConfig.sourceSha256,
+      layoutAssist: requestedConfig.layoutAssist,
+      sourceLang: String(req.query?.sourceLang || "en").trim(),
+      targetLang: String(req.query?.targetLang || "zh").trim()
+    };
+    if (!restoreRequest.sourceSha256 || restoreRequest.layoutAssist === undefined) {
+      return res.status(400).json({ error: "恢复版式译文需要模式和 PDF 指纹" });
+    }
+    const cache = getPdfCache(req.params.id);
+    const mode = restoreRequest.layoutAssist ? "assisted" : "normal";
+    const ids = [cache?.layoutTranslationJobs?.[mode]?.jobId, cache?.layoutTranslationJobId].filter(Boolean);
+    let job = getPdfMathTranslationForPaper(req.params.id, { ...restoreRequest, requireOutput: true });
+    for (const id of [...new Set(ids)]) {
+      const candidate = getPdfMathTranslationJob(id);
+      if (pdfLayoutJobMatchesRestore(candidate, restoreRequest) && hasUsablePdfMathOutput(candidate)) {
+        if (!job || getPdfMathCompletedOutputCount(candidate) > getPdfMathCompletedOutputCount(job)
+          || (getPdfMathCompletedOutputCount(candidate) === getPdfMathCompletedOutputCount(job)
+            && Number(candidate.updatedAt) > Number(job.updatedAt))) job = candidate;
+      }
+    }
+    if (!pdfLayoutJobMatchesRestore(job, restoreRequest) || !hasUsablePdfMathOutput(job)) {
+      return res.status(404).json({ error: "该文献还没有本地版式译文" });
+    }
+    return res.json(decoratePdfMathJob(job));
+  }
   requestedConfig.engine = createPdfMathTranslationIdentity({
     config: { ...getSettings(), model: requestedConfig.model, baseUrl: requestedConfig.baseUrl },
     sourceSha256: requestedConfig.sourceSha256,
