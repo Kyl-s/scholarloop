@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 
 const ENTROPY = "ScholarLoop.ChatGPT.OAuth.v1";
 export const chatGptCredentialPath = path.join(process.env.LOCALAPPDATA || os.homedir(), "ScholarLoop", "chatgpt", "credentials.dpapi");
+const compatibleCredentialPath = path.join(process.env.APPDATA || os.homedir(), "scholar-loop", "chatgpt", "credentials.dpapi");
 
 // Secrets travel only through anonymous child-process pipes, never argv or logs.
 // DPAPI CurrentUser binds the ciphertext to this Windows user's login profile.
@@ -31,11 +32,17 @@ export function windowsProtect(value, decrypt = false) {
   });
 }
 
-export function createCredentialVault({ file = chatGptCredentialPath, protect = windowsProtect } = {}) {
+export function createCredentialVault({ file = chatGptCredentialPath, protect = windowsProtect, fallbackFile = file === chatGptCredentialPath ? compatibleCredentialPath : null, renameFile = fs.rename } = {}) {
   let writes = Promise.resolve();
+  let activeFile = file;
   async function load() {
     let ciphertext;
-    try { ciphertext = await fs.readFile(file); }
+    // Once migrated, the newer vault is authoritative, including after logout.
+    if (fallbackFile) {
+      try { ciphertext = await fs.readFile(fallbackFile); activeFile = fallbackFile; }
+      catch (error) { if (error.code !== "ENOENT") throw new Error("无法读取 ChatGPT 加密凭据"); }
+    }
+    try { ciphertext ??= await fs.readFile(file); }
     catch (error) { if (error.code === "ENOENT") return null; throw new Error("无法读取 ChatGPT 加密凭据"); }
     try { return JSON.parse((await protect(ciphertext, true)).toString("utf8")); }
     catch { throw new Error("ChatGPT 本地凭据无法解密，请使用原 Windows 账号或重新登录"); }
@@ -44,13 +51,23 @@ export function createCredentialVault({ file = chatGptCredentialPath, protect = 
     const snapshot = JSON.stringify(record);
     const write = async () => {
       const ciphertext = await protect(Buffer.from(snapshot, "utf8"));
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      const temporary = `${file}.${randomUUID()}.tmp`;
-      try {
-        const handle = await fs.open(temporary, "wx", 0o600);
-        try { await handle.writeFile(ciphertext); await handle.sync(); } finally { await handle.close(); }
-        await fs.rename(temporary, file);
-      } finally { await fs.unlink(temporary).catch(() => {}); }
+      async function replace(target) {
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        const temporary = `${target}.${randomUUID()}.tmp`;
+        try {
+          const handle = await fs.open(temporary, "wx", 0o600);
+          try { await handle.writeFile(ciphertext); await handle.sync(); } finally { await handle.close(); }
+          await renameFile(temporary, target);
+        } finally { await fs.unlink(temporary).catch(() => {}); }
+      }
+      try { await replace(activeFile); }
+      catch (error) {
+        if (error.code !== "EXDEV" || !fallbackFile || activeFile === fallbackFile) throw error;
+        // Windows EFS directories can reject same-directory replacement.
+        // Move future writes to a DPAPI-protected vault that supports atomic rename.
+        await replace(fallbackFile);
+        activeFile = fallbackFile;
+      }
     };
     const result = writes.then(write);
     writes = result.catch(() => {});

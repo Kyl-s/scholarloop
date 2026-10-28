@@ -1,4 +1,4 @@
-import { ProxyAgent } from "undici";
+import { fetch as undiciFetch, ProxyAgent } from "undici";
 import { spawnSync } from "node:child_process";
 
 let cachedSystemProxy = null;
@@ -54,7 +54,8 @@ function agentFor(proxy) {
 
 export async function fetchWithProxy(url, options = {}, proxy) {
   const dispatcher = agentFor(proxy);
-  return fetch(url, dispatcher ? { ...options, dispatcher } : options);
+  // Keep fetch and its dispatcher on the same Undici version.
+  return dispatcher ? undiciFetch(url, { ...options, dispatcher }) : fetch(url, options);
 }
 
 export async function fetchWithFallback(url, options = {}, proxy) {

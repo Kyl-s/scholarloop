@@ -8,7 +8,8 @@
 
 - 仅本机使用。Tailscale/远程访问不能借用本机 OAuth 会话。
 - 访问令牌、刷新令牌、ID token、账号与注册信息使用 Windows DPAPI CurrentUser 加密，存放于 `%LOCALAPPDATA%/ScholarLoop/chatgpt/credentials.dpapi`，不进入 localStorage、数据导出或项目文件。重启后自动恢复；本地供应商列表仅保存非秘密标记 `oauth-managed`。
-- 非秘密安装 ID 存放于同目录 `host-id.txt`。持续复用同一安装 ID 和已颁发的客户端 ID。加密凭据绑定当前 Windows 用户，不应复制到其他账号或设备使用。
+- 如果原凭据目录的原子替换报 `EXDEV`，自动改用 `%APPDATA%/scholar-loop/chatgpt/credentials.dpapi`；仍使用 DPAPI CurrentUser 加密及原子写入。备用文件一旦存在就优先读取，退出状态不会被旧文件覆盖，备用文件损坏时也不会恢复旧令牌。
+- 非秘密安装 ID 存放于原目录 `host-id.txt`。持续复用同一安装 ID 和已颁发的客户端 ID。加密凭据绑定当前 Windows 用户，不应复制到其他账号或设备使用。
 - 登录使用临时 `127.0.0.1` 回调端口、PKCE S256、一次性 state/nonce；ID token 用 `jose` 校验签名、issuer、audience、过期时间和 nonce。缺少套餐授权时禁止推理。
 - 令牌刷新串行执行；新令牌和轮换后的刷新令牌一起原子写入加密文件。退出时清除本地令牌，保留注册映射，并尝试撤销远程会话；失败会提示到 ChatGPT 设置断开连接。
 - 模型选择沿用 API 配置的表单样式和刷新图标，将账号目录与常用的 GPT-6.1 Sol、GPT-6 Astra、GPT-6 Sol、GPT-6 Luna 合并去重，统一显示模型 ID，并支持自定义输入。刷新保留当前选择。内置选项不代表账号目录已开放，是否可调用以实际响应为准。
@@ -17,7 +18,7 @@
 
 ## 验证
 
-定向检查：`node --test server/chatgptAuth.test.js server/chatgptModel.test.js server/chatgptVault.test.js`（包括真实 Windows DPAPI 的虚构凭据加解密测试）。
+定向检查：`node --test server/proxy.test.js server/chatgptAuth.test.js server/chatgptModel.test.js server/chatgptVault.test.js`（包括本地代理转发、EXDEV 迁移、真实 Windows DPAPI 的虚构凭据加解密测试）。代理请求使用 npm Undici 的 fetch 和 ProxyAgent，避免混用 Node 内置 fetch 的 dispatcher 协议。
 前端构建：`npm run build`。
 真实验收需要用户浏览器授权后，选择目录中的模型，完成一条短翻译或 Agent 请求。
 

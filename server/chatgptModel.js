@@ -99,10 +99,25 @@ export async function readChatGptStream(response) {
     const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
     if (!data || data === "[DONE]") return;
     let value;
-    try { value = JSON.parse(data); } catch { throw new Error("ChatGPT 响应流包含无效 JSON"); }
+    try { value = JSON.parse(data); } catch {
+      throw Object.assign(new Error("ChatGPT 响应流包含无效 JSON"), { code: "CHATGPT_STREAM_INVALID_JSON" });
+    }
     if (["response.failed", "response.incomplete", "error"].includes(value.type)) {
       const detail = value.response?.error || value.error || value.response?.incomplete_details || value;
-      throw new Error(`ChatGPT 请求未完成：${detail.code || detail.reason || detail.message || value.type}`);
+      if (value.type === "response.incomplete") {
+        const truncated = detail.reason === "max_output_tokens";
+        throw Object.assign(new Error(`ChatGPT 请求未完成：${truncated ? "输出被截断" : "响应未完成"}`), {
+          code: truncated ? "CHATGPT_OUTPUT_TRUNCATED" : "CHATGPT_RESPONSE_INCOMPLETE"
+        });
+      }
+      const statuses = {
+        invalid_api_key: 401, authentication_error: 401, permission_denied: 403,
+        model_not_found: 404, rate_limit_exceeded: 429, insufficient_quota: 429, server_error: 500
+      };
+      const status = Object.hasOwn(statuses, detail.code) ? statuses[detail.code] : 0;
+      throw Object.assign(new Error("ChatGPT 请求未完成：上游请求失败"), {
+        code: "CHATGPT_RESPONSE_FAILED", ...(status ? { status } : {})
+      });
     }
     if (value.type === "response.output_item.done") {
       if (!Number.isInteger(value.output_index) || value.output_index < 0 || !value.item?.type) throw new Error("ChatGPT 返回了无效输出项");
@@ -128,14 +143,14 @@ export async function readChatGptStream(response) {
     await reader.cancel().catch(() => {});
     throw error;
   } finally { reader.releaseLock(); }
-  if (!completed) throw new Error("ChatGPT 响应流中断，未收到 response.completed");
+  if (!completed) throw Object.assign(new Error("ChatGPT 响应流中断，未收到 response.completed"), { code: "CHATGPT_STREAM_INTERRUPTED" });
   // Some live plan responses carry completed items only in the preceding SSE events.
   // Prefer the final snapshot when present; never concatenate it with those items.
   const output = completed.output?.length ? completed.output
     : [...completedItems.entries()].sort(([left], [right]) => left - right).map(([, item]) => item);
   const result = completionJson({ ...completed, output });
   if (!result.choices[0].message.content.trim() && !result.choices[0].message.tool_calls?.length) {
-    throw new Error("ChatGPT 已完成请求，但没有返回文本或工具调用");
+    throw Object.assign(new Error("ChatGPT 已完成请求，但没有返回文本或工具调用"), { code: "CHATGPT_EMPTY_OUTPUT" });
   }
   return result;
 }
