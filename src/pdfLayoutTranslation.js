@@ -7,61 +7,29 @@ export function buildLayoutTranslationPrompt(lines) {
     .join("\n");
 }
 
-function cleanSegment(value) {
-  return String(value || "")
-    .replace(/__SCHOLARLOOP_KEEP_\d__/g, "")
-    .replace(/^\s+|\s+$/g, "")
-    .trim();
-}
-
-function distributeFallbackText(source, lines) {
-  const expected = Array.isArray(lines) ? lines : [];
-  const text = String(source || "").trim();
-  if (!text || !expected.length) return [];
-  const totalWeight = expected.reduce((sum, line) => sum + Math.max(1, String(line?.text || "").length), 0);
-  let cursor = 0;
-  let remainingWeight = totalWeight;
-  return expected.map((line, index) => {
-    if (index === expected.length - 1) return text.slice(cursor).trim();
-    const remaining = text.length - cursor;
-    const weight = Math.max(1, String(line?.text || "").length);
-    const size = Math.max(1, Math.round((remaining * weight) / Math.max(1, remainingWeight)));
-    const value = text.slice(cursor, Math.min(text.length, cursor + size)).trim();
-    cursor += size;
-    remainingWeight -= weight;
-    return value;
-  });
+export function cleanLayoutTranslationText(value) {
+  return String(value || "").replace(/__SCHOLARLOOP_KEEP_\d+__/g, "").trim();
 }
 
 export function parseLayoutTranslation(output, lines) {
   const source = String(output || "").trim();
   const expected = Array.isArray(lines) ? lines : [];
-  const matches = [...source.matchAll(LAYOUT_TOKEN)].sort((a, b) => Number(a[1]) - Number(b[1]));
+  // Slice in response order, then map by token ID. Sorting first corrupts
+  // boundaries when a model returns IDs out of order (including IDs >= 10).
+  const matches = [...source.matchAll(LAYOUT_TOKEN)];
   const translated = new Map();
+  let invalid = false;
   for (let index = 0; index < matches.length; index += 1) {
     const match = matches[index];
     const lineIndex = Number(match[1]);
     const next = matches[index + 1];
-    const value = source.slice(match.index + match[0].length, next ? next.index : source.length);
-    if (Number.isInteger(lineIndex) && lineIndex >= 0 && lineIndex < expected.length) translated.set(lineIndex, cleanSegment(value));
+    const value = cleanLayoutTranslationText(source.slice(match.index + match[0].length, next ? next.index : source.length));
+    if (lineIndex >= expected.length || translated.has(lineIndex) || !value) invalid = true;
+    else translated.set(lineIndex, value);
   }
-
-  if (!matches.length || translated.size < expected.length) {
-    const fallback = source
-      .replace(LAYOUT_TOKEN, "")
-      .split(/\r?\n+/)
-      .map(cleanSegment)
-      .filter(Boolean);
-    if (fallback.length >= expected.length) {
-      fallback.slice(0, expected.length).forEach((value, index) => translated.set(index, value));
-    } else {
-      distributeFallbackText(fallback.join(" "), expected).forEach((value, index) => translated.set(index, value));
-    }
-  }
-
-  return expected
-    .map((line, index) => ({ ...line, text: cleanSegment(translated.get(index)) }))
-    .filter((line) => line.text);
+  // Never invent spatial alignment from line count or character proportions.
+  if (invalid || !expected.length || translated.size !== expected.length) return [];
+  return expected.map((line, index) => ({ ...line, text: translated.get(index) }));
 }
 
 export function joinLayoutTranslation(lines) {

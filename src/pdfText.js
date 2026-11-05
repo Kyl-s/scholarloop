@@ -3,7 +3,7 @@
  * order a person reads the page.  Build lines from their page coordinates so
  * the text sent to translation follows the visible document from top to bottom.
  */
-export const PDF_TEXT_LAYOUT_VERSION = 3;
+export const PDF_TEXT_LAYOUT_VERSION = 4;
 
 /** 从 PDF 字体名猜字重。期刊嵌入字体常不带 bold 位，只能看名字。 */
 export function inferFontWeightFromName(fontName) {
@@ -278,6 +278,87 @@ export function buildPdfTextLayout(items, viewport) {
 
 export function extractReadablePdfText(items) {
   return groupReadablePdfLines(items).map((line) => line.text).join("\n");
+}
+
+// Actual glyph bounds in the screenshot viewport; deliberately independent of
+// buildPdfTextLayout's historical cover-box offset. Indices are page-local.
+export function buildPdfVisionLines(content, viewport) {
+  const m = viewport?.transform;
+  if (!Array.isArray(m) || !viewport.width || !viewport.height) return [];
+  const diagnostics = { unpositionedItems: 0, clampedItems: 0, truncatedRows: 0, omittedRows: 0, scope: "local" };
+  const point = (x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+  const glyphs = (content?.items || []).flatMap((item, order) => {
+    const t = item.transform;
+    if (!item.str?.trim()) return [];
+    if (!Array.isArray(t) || t.length < 6 || t.some((v) => !Number.isFinite(v))) { diagnostics.unpositionedItems += 1; return []; }
+    const size = Math.hypot(t[2], t[3]);
+    const style = content.styles?.[item.fontName] || {};
+    const ascent = Number.isFinite(style.ascent) ? style.ascent : 0.9;
+    const descent = Number.isFinite(style.descent) ? style.descent : -0.25;
+    const axis = point(t[4] + t[0], t[5] + t[1]);
+    const origin = point(t[4], t[5]);
+    let safe = size > 0 && Number(item.width) > 0 && Math.abs(axis[1] - origin[1]) < Math.abs(axis[0] - origin[0]) * 0.015
+      && Math.abs(t[2]) < size * 0.015 && t[0] > 0 && !style.vertical
+      && !/symbol|math|cmmi|cmsy|cmex|msam|msbm/i.test(item.fontName || "");
+    const width = Number(item.width) > 0 ? Number(item.width) : Math.max(1, size * item.str.length * 0.5);
+    const axisSize = Math.hypot(t[0], t[1]) || 1;
+    const dx = t[0] / axisSize * width;
+    const dy = t[1] / axisSize * width;
+    const corners = [point(t[4] + t[2] * ascent, t[5] + t[3] * ascent), point(t[4] + dx + t[2] * ascent, t[5] + dy + t[3] * ascent),
+      point(t[4] + t[2] * descent, t[5] + t[3] * descent), point(t[4] + dx + t[2] * descent, t[5] + dy + t[3] * descent)];
+    const bbox = [Math.min(...corners.map((p) => p[0])) / viewport.width * 1000,
+      Math.min(...corners.map((p) => p[1])) / viewport.height * 1000,
+      Math.max(...corners.map((p) => p[0])) / viewport.width * 1000,
+      Math.max(...corners.map((p) => p[1])) / viewport.height * 1000];
+    if (bbox.some((v) => !Number.isFinite(v))) { diagnostics.unpositionedItems += 1; return []; }
+    if (bbox.some((v) => v < 0 || v > 1000)) { safe = false; diagnostics.clampedItems += 1; }
+    // Even an edge glyph must leave a small unsafe collision footprint.
+    const left = Math.max(0, Math.min(999.9, bbox[0]));
+    const top = Math.max(0, Math.min(999.9, bbox[1]));
+    const clamped = [left, top, Math.max(left + 0.1, Math.min(1000, bbox[2])), Math.max(top + 0.1, Math.min(1000, bbox[3]))];
+    return [{ text: item.str, bbox: clamped, baseline: origin[1] / viewport.height * 1000, safe, order }];
+  }).sort((a, b) => a.baseline - b.baseline || a.bbox[0] - b.bbox[0] || a.order - b.order);
+  // First collect baseline bands, THEN sort each band left-to-right. Drawing a
+  // right-hand fragment first must not leave two overlapping physical rows.
+  const bands = [];
+  for (const glyph of glyphs) {
+    const height = glyph.bbox[3] - glyph.bbox[1];
+    const band = bands.findLast((b) => Math.abs(b.baseline - glyph.baseline) <= Math.min(height, b.height) * 0.4);
+    if (band) band.glyphs.push(glyph);
+    else bands.push({ baseline: glyph.baseline, height, glyphs: [glyph] });
+  }
+  const rows = [];
+  for (const band of bands) {
+   let row = null;
+   for (const glyph of band.glyphs.sort((a, b) => a.bbox[0] - b.bbox[0] || a.order - b.order)) {
+    const h = glyph.bbox[3] - glyph.bbox[1];
+    if (row && glyph.bbox[0] - row.bbox[2] < Math.max(h * 2, 10)) {
+      row.text += `${/[a-z0-9)]$/i.test(row.text) && /^[a-z0-9(]/i.test(glyph.text) ? " " : ""}${glyph.text}`;
+      row.bbox = [Math.min(row.bbox[0], glyph.bbox[0]), Math.min(row.bbox[1], glyph.bbox[1]), Math.max(row.bbox[2], glyph.bbox[2]), Math.max(row.bbox[3], glyph.bbox[3])];
+      row.safe = row.safe && glyph.safe;
+    } else { row = { ...glyph, height: h }; rows.push(row); }
+   }
+  }
+  const limited = [];
+  let textBudget = 100000;
+  for (const row of rows.slice(0, 800)) {
+    if (textBudget <= 0) break;
+    const source = row.text.trim();
+    const text = source.slice(0, Math.min(1600, textBudget));
+    if (text.length !== source.length) diagnostics.truncatedRows += 1;
+    limited.push({ index: limited.length, text, bbox: row.bbox, safe: row.safe && text.length === source.length,
+      ...(!row.safe ? { unsafeReason: "源行方向、字体或边界不可靠" } : text.length !== source.length ? { unsafeReason: "源行超过文本限额，局部保留原图" } : {}) });
+    textBudget -= text.length;
+  }
+  // Omitted rows would no longer be available to the intersection veto.
+  if (limited.length !== rows.length) {
+    diagnostics.omittedRows = rows.length - limited.length;
+    diagnostics.scope = "page";
+    for (const line of limited) { line.safe = false; line.unsafeReason = "本页超过源行或总文本限额，缺少碰撞证据"; }
+  }
+  if (!limited.length && diagnostics.unpositionedItems) diagnostics.scope = "page";
+  limited.diagnostics = diagnostics;
+  return limited;
 }
 
 function quantizeRgb(r, g, b, step = 12) {

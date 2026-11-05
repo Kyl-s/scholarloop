@@ -23,8 +23,11 @@ import {
   startPdfMathTranslation,
   unloadPdfMathTranslationJob
 } from "./pdfMathTranslate.js";
+import { pdfOutputCopyLines, testSourcePdf, writeMinimalPdf } from "./pdfTestFixtures.js";
 
 const FAKE_PDF = "%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
+// 真实可解析的最小 PDF：严格回贴校验会调用 PyMuPDF 抽文本，假 PDF 会被判为产物无效。
+const SOURCE_PDF_BASE64 = testSourcePdf(4).toString("base64");
 
 test("从发行版资源里挑出 Windows zip", () => {
   const asset = pickPdfMathWindowsAsset([
@@ -321,7 +324,7 @@ test("runs a layout translation as a pollable job and exposes its result", async
     : "#!/bin/sh\nmkdir -p \"$3\"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > \"$3/source.zh.mono.pdf\"\n";
   fs.writeFileSync(command, script, { mode: 0o755 });
   const started = startPdfMathTranslation({
-    data: Buffer.from("%PDF-1.7\n").toString("base64"),
+    data: SOURCE_PDF_BASE64,
     binary: command,
     config: { baseUrl: "http://127.0.0.1:1", apiKey: "test-secret", model: "test-model" }
   });
@@ -341,6 +344,129 @@ test("runs a layout translation as a pollable job and exposes its result", async
   }
 });
 
+test("marks a page failed when the translated PDF cannot be text-extracted", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scholarloop-pdfmath-invalid-output-"));
+  const command = path.join(dir, process.platform === "win32" ? "invalid-pdfmath.cmd" : "invalid-pdfmath");
+  fs.writeFileSync(command, process.platform === "win32"
+    ? [
+      "@echo off",
+      "set \"OUT=%~3\"",
+      "if not exist \"%OUT%\" mkdir \"%OUT%\"",
+      "> \"%OUT%\\source.zh.mono.pdf\" echo %%PDF-1.4",
+      ">> \"%OUT%\\source.zh.mono.pdf\" echo %%EOF",
+      "exit /b 0",
+      ""
+    ].join("\r\n")
+    : "#!/bin/sh\nmkdir -p \"$3\"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > \"$3/source.zh.mono.pdf\"\n",
+  { mode: 0o755 });
+  const started = startPdfMathTranslation({
+    data: SOURCE_PDF_BASE64,
+    binary: command,
+    pageCount: 2,
+    progressive: true,
+    priorityPage: 1,
+    config: { baseUrl: "http://127.0.0.1:1", apiKey: "test-secret", model: "test-model" }
+  });
+  let job = started;
+  for (let attempt = 0; attempt < 80 && !["completed", "failed", "canceled", "partial"].includes(job.status); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    job = getPdfMathTranslationJob(started.jobId);
+  }
+  try {
+    // 单页失败不再拖垮整本：任务停在 partial，失败原因保留在页级状态，用户可继续重试。
+    assert.equal(job.status, "partial", job.progress);
+    assert.equal(job.pages[0].status, "failed");
+    assert.match(job.pages[0].error, /回贴\/最终文本抽取失败/);
+    assert.equal(job.incompletePages.length, 2);
+  } finally {
+    fs.rmSync(path.join(process.cwd(), "data", "pdf-translations", started.jobId), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("continues with later pages after a single page fails", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scholarloop-pdfmath-skip-failed-"));
+  const command = path.join(dir, process.platform === "win32" ? "skip-failed.cmd" : "skip-failed");
+  const outputPdf = writeMinimalPdf(path.join(dir, "translated.pdf"), { pages: 1, text: "Hello" });
+  const script = process.platform === "win32"
+    ? [
+      "@echo off",
+      "set \"OUT=%~3\"",
+      "echo %~3 | findstr /i \"page-001\" >nul && exit /b 1",
+      "if not exist \"%OUT%\" mkdir \"%OUT%\"",
+      ...pdfOutputCopyLines(outputPdf),
+      "exit /b 0",
+      ""
+    ].join("\r\n")
+    : `#!/bin/sh\ncase "$3" in *page-001*) exit 1;; esac\nmkdir -p "$3"\n${pdfOutputCopyLines(outputPdf).join("\n")}\n`;
+  fs.writeFileSync(command, script, { mode: 0o755 });
+  const started = startPdfMathTranslation({
+    data: SOURCE_PDF_BASE64,
+    binary: command,
+    pageCount: 3,
+    progressive: true,
+    config: { baseUrl: "http://127.0.0.1:1", apiKey: "test-secret", model: "test-model" }
+  });
+  let job = started;
+  for (let attempt = 0; attempt < 120 && !["completed", "failed", "canceled", "partial"].includes(job.status); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    job = getPdfMathTranslationJob(started.jobId);
+  }
+  try {
+    assert.equal(job.status, "partial", job.progress);
+    assert.equal(job.pages[0].status, "failed");
+    assert.equal(job.pages[1].status, "completed");
+    assert.equal(job.pages[2].status, "completed");
+    assert.equal(job.completedPages, 2);
+    assert.deepEqual(job.incompletePages.map((page) => page.page), [1]);
+    assert.match(job.pages[0].error, /退出码 1/);
+  } finally {
+    fs.rmSync(path.join(process.cwd(), "data", "pdf-translations", started.jobId), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stops after three consecutive page failures instead of burning the rest of the document", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scholarloop-pdfmath-consecutive-failures-"));
+  const command = path.join(dir, process.platform === "win32" ? "consecutive-failed.cmd" : "consecutive-failed");
+  const outputPdf = writeMinimalPdf(path.join(dir, "translated.pdf"), { pages: 1, text: "Hello" });
+  const script = process.platform === "win32"
+    ? [
+      "@echo off",
+      "set \"OUT=%~3\"",
+      "echo %~3 | findstr /i \"page-001 page-002 page-003\" >nul && exit /b 1",
+      "if not exist \"%OUT%\" mkdir \"%OUT%\"",
+      ...pdfOutputCopyLines(outputPdf),
+      "exit /b 0",
+      ""
+    ].join("\r\n")
+    : `#!/bin/sh\ncase "$3" in *page-001*|*page-002*|*page-003*) exit 1;; esac\nmkdir -p "$3"\n${pdfOutputCopyLines(outputPdf).join("\n")}\n`;
+  fs.writeFileSync(command, script, { mode: 0o755 });
+  const started = startPdfMathTranslation({
+    data: SOURCE_PDF_BASE64,
+    binary: command,
+    pageCount: 4,
+    progressive: true,
+    config: { baseUrl: "http://127.0.0.1:1", apiKey: "test-secret", model: "test-model" }
+  });
+  let job = started;
+  for (let attempt = 0; attempt < 120 && !["completed", "failed", "canceled", "partial"].includes(job.status); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    job = getPdfMathTranslationJob(started.jobId);
+  }
+  try {
+    assert.equal(job.status, "partial", job.progress);
+    assert.deepEqual(job.pages.slice(0, 3).map((page) => page.status), ["failed", "failed", "failed"]);
+    // 第 4 页不应在连续 3 页失败后再被认领。
+    assert.equal(job.pages[3].status, "queued");
+    assert.equal(job.pages[3].monoFile, "");
+    assert.match(job.progress, /连续 3 页翻译失败/);
+  } finally {
+    fs.rmSync(path.join(process.cwd(), "data", "pdf-translations", started.jobId), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("cancels a running layout translation job", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scholarloop-pdfmath-cancel-"));
   const command = path.join(dir, process.platform === "win32" ? "slow-pdfmath.cmd" : "slow-pdfmath");
@@ -349,7 +475,7 @@ test("cancels a running layout translation job", async () => {
     : "#!/bin/sh\nsleep 30\n";
   fs.writeFileSync(command, script, { mode: 0o755 });
   const started = startPdfMathTranslation({
-    data: Buffer.from("%PDF-1.7\n").toString("base64"),
+    data: SOURCE_PDF_BASE64,
     binary: command,
     config: { baseUrl: "http://127.0.0.1:1", apiKey: "test-secret", model: "test-model" }
   });
@@ -371,21 +497,20 @@ test("cancels a running layout translation job", async () => {
 test("publishes the first completed page while later pages are still running", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scholarloop-pdfmath-progressive-"));
   const command = path.join(dir, process.platform === "win32" ? "fake-progressive-pdfmath.cmd" : "fake-progressive-pdfmath");
+  const outputPdf = writeMinimalPdf(path.join(dir, "translated.pdf"), { pages: 1, text: "Hello" });
   const script = process.platform === "win32"
     ? [
       "@echo off",
       "set \"OUT=%~3\"",
       "echo %~3 | findstr /i \"page-002\" >nul && ping 127.0.0.1 -n 16 >nul",
-      "if not exist \"%OUT%\" mkdir \"%OUT%\"",
-      "> \"%OUT%\\source.zh.mono.pdf\" echo %%PDF-1.4",
-      ">> \"%OUT%\\source.zh.mono.pdf\" echo %%EOF",
+      ...pdfOutputCopyLines(outputPdf),
       "exit /b 0",
       ""
     ].join("\r\n")
-    : "#!/bin/sh\nmkdir -p \"$3\"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > \"$3/source.zh.mono.pdf\"\n";
+    : `#!/bin/sh\ncase "$3" in *page-002*) sleep 8;; esac\n${pdfOutputCopyLines(outputPdf).join("\n")}\n`;
   fs.writeFileSync(command, script, { mode: 0o755 });
   const started = startPdfMathTranslation({
-    data: Buffer.from("%PDF-1.7\n").toString("base64"),
+    data: SOURCE_PDF_BASE64,
     binary: command,
     pageCount: 2,
     progressive: true,
@@ -421,19 +546,19 @@ test("progressive jobs finish the whole queue in default or explicit starting-pa
     for (const priorityPage of [undefined, 3]) {
       const orderFile = path.join(dir, `order-${priorityPage || "default"}.txt`);
       const command = path.join(dir, process.platform === "win32" ? "ordered.cmd" : "ordered");
+      const outputPdf = writeMinimalPdf(path.join(dir, `translated-${priorityPage || "default"}.pdf`), { pages: 1, text: "Hello" });
       fs.writeFileSync(command, process.platform === "win32"
         ? [
           "@echo off",
           `>> "${orderFile}" echo %~3`,
-          'if not exist "%~3" mkdir "%~3"',
-          '> "%~3\\source.zh.mono.pdf" echo %%PDF-1.4',
-          '>> "%~3\\source.zh.mono.pdf" echo %%EOF',
+          "set \"OUT=%~3\"",
+          ...pdfOutputCopyLines(outputPdf),
           "exit /b 0", ""
         ].join("\r\n")
-        : `#!/bin/sh\nprintf '%s\\n' "$3" >> '${orderFile}'\nmkdir -p "$3"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > "$3/source.zh.mono.pdf"\n`,
+        : `#!/bin/sh\nprintf '%s\\n' "$3" >> '${orderFile}'\n${pdfOutputCopyLines(outputPdf).join("\n")}\n`,
       { mode: 0o755 });
       const started = startPdfMathTranslation({
-        data: Buffer.from("%PDF-1.7\n").toString("base64"),
+        data: SOURCE_PDF_BASE64,
         binary: command,
         pageCount: 4,
         ...(priorityPage === undefined ? {} : { priorityPage }),
@@ -464,21 +589,20 @@ test("progressive jobs finish the whole queue in default or explicit starting-pa
 test("translates progressive PDF pages serially by default", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scholarloop-pdfmath-serial-"));
   const command = path.join(dir, process.platform === "win32" ? "fake-serial-pdfmath.cmd" : "fake-serial-pdfmath");
+  const outputPdf = writeMinimalPdf(path.join(dir, "translated.pdf"), { pages: 1, text: "Hello" });
   const script = process.platform === "win32"
     ? [
       "@echo off",
       "set \"OUT=%~3\"",
       "echo %~3 | findstr /i \"page-002\" >nul && ping 127.0.0.1 -n 8 >nul",
-      "if not exist \"%OUT%\" mkdir \"%OUT%\"",
-      "> \"%OUT%\\source.zh.mono.pdf\" echo %%PDF-1.4",
-      ">> \"%OUT%\\source.zh.mono.pdf\" echo %%EOF",
+      ...pdfOutputCopyLines(outputPdf),
       "exit /b 0",
       ""
     ].join("\r\n")
-    : "#!/bin/sh\ncase \"$3\" in *page-002*) sleep 10;; esac\nmkdir -p \"$3\"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > \"$3/source.zh.mono.pdf\"\n";
+    : `#!/bin/sh\ncase "$3" in *page-002*) sleep 5;; esac\n${pdfOutputCopyLines(outputPdf).join("\n")}\n`;
   fs.writeFileSync(command, script, { mode: 0o755 });
   const started = startPdfMathTranslation({
-    data: Buffer.from("%PDF-1.7\n").toString("base64"),
+    data: SOURCE_PDF_BASE64,
     binary: command,
     pageCount: 3,
     progressive: true,
@@ -510,21 +634,20 @@ test("translates progressive PDF pages serially by default", async () => {
 test("reprioritizes a running progressive job to the current reading page", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scholarloop-pdfmath-priority-"));
   const command = path.join(dir, process.platform === "win32" ? "fake-priority-pdfmath.cmd" : "fake-priority-pdfmath");
+  const outputPdf = writeMinimalPdf(path.join(dir, "translated.pdf"), { pages: 1, text: "Hello" });
   const script = process.platform === "win32"
     ? [
       "@echo off",
       "set \"OUT=%~3\"",
       "echo %~3 | findstr /i \"page-001\" >nul && ping 127.0.0.1 -n 20 >nul",
-      "if not exist \"%OUT%\" mkdir \"%OUT%\"",
-      "> \"%OUT%\\source.zh.mono.pdf\" echo %%PDF-1.4",
-      ">> \"%OUT%\\source.zh.mono.pdf\" echo %%EOF",
+      ...pdfOutputCopyLines(outputPdf),
       "exit /b 0",
       ""
     ].join("\r\n")
-    : "#!/bin/sh\ncase \"$3\" in *page-001*) sleep 20;; esac\nmkdir -p \"$3\"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > \"$3/source.zh.mono.pdf\"\n";
+    : `#!/bin/sh\ncase "$3" in *page-001*) sleep 20;; esac\n${pdfOutputCopyLines(outputPdf).join("\n")}\n`;
   fs.writeFileSync(command, script, { mode: 0o755 });
   const started = startPdfMathTranslation({
-    data: Buffer.from("%PDF-1.7\n").toString("base64"),
+    data: SOURCE_PDF_BASE64,
     binary: command,
     pageCount: 3,
     progressive: true,
@@ -576,23 +699,22 @@ test("reprioritizes a running progressive job to the current reading page", asyn
 test("persists layout translation job and restores after memory clear", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scholarloop-pdfmath-persist-"));
   const command = path.join(dir, process.platform === "win32" ? "fake-persist-pdfmath.cmd" : "fake-persist-pdfmath");
+  const outputPdf = writeMinimalPdf(path.join(dir, "translated.pdf"), { pages: 1, text: "Hello" });
   const script = process.platform === "win32"
     ? [
       "@echo off",
       "set \"OUT=%~3\"",
-      "if not exist \"%OUT%\" mkdir \"%OUT%\"",
-      "> \"%OUT%\\source.zh.mono.pdf\" echo %%PDF-1.4",
-      ">> \"%OUT%\\source.zh.mono.pdf\" echo %%EOF",
+      ...pdfOutputCopyLines(outputPdf),
       "exit /b 0",
       ""
     ].join("\r\n")
-    : "#!/bin/sh\nmkdir -p \"$3\"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > \"$3/source.zh.mono.pdf\"\n";
+    : `#!/bin/sh\n${pdfOutputCopyLines(outputPdf).join("\n")}\n`;
   fs.writeFileSync(command, script, { mode: 0o755 });
   const paperId = "manual:persist-layout-test";
   let differentModelJob = null;
   let assistedJob = null;
   const started = startPdfMathTranslation({
-    data: Buffer.from("%PDF-1.7\n").toString("base64"),
+    data: SOURCE_PDF_BASE64,
     binary: command,
     pageCount: 1,
     progressive: false,
@@ -625,7 +747,7 @@ test("persists layout translation job and restores after memory clear", async ()
 
     // 相同 paper + 相同 PDF 再次提交应复用，不新建 job
     const reused = startPdfMathTranslation({
-      data: Buffer.from("%PDF-1.7\n").toString("base64"),
+      data: SOURCE_PDF_BASE64,
       binary: command,
       pageCount: 1,
       progressive: false,
@@ -637,7 +759,7 @@ test("persists layout translation job and restores after memory clear", async ()
 
     // 普通与页面图片辅助模式必须各自复用自己的任务，不能互相覆盖索引。
     assistedJob = startPdfMathTranslation({
-      data: Buffer.from("%PDF-1.7\n").toString("base64"),
+      data: SOURCE_PDF_BASE64,
       binary: command,
       pageCount: 1,
       progressive: true,
@@ -671,7 +793,7 @@ test("persists layout translation job and restores after memory clear", async ()
     assert.notEqual(assistedJob.jobId, started.jobId);
 
     const normalAfterAssisted = startPdfMathTranslation({
-      data: Buffer.from("%PDF-1.7\n").toString("base64"),
+      data: SOURCE_PDF_BASE64,
       binary: command,
       pageCount: 1,
       progressive: false,
@@ -709,7 +831,7 @@ test("persists layout translation job and restores after memory clear", async ()
 
     // 同一 paper / PDF 但模型变化时必须创建新的任务身份，不能复用旧产物。
     differentModelJob = startPdfMathTranslation({
-      data: Buffer.from("%PDF-1.7\n").toString("base64"),
+      data: SOURCE_PDF_BASE64,
       binary: command,
       pageCount: 1,
       progressive: false,
@@ -741,6 +863,7 @@ test("成功视觉辅助会把页面语境送入 PDFMathTranslate 调用", async
   const command = path.join(dir, process.platform === "win32" ? "fake-visual-success.cmd" : "fake-visual-success");
   const capture = path.join(dir, "argv.txt");
   const captureForBatch = capture.replace(/%/g, "%%");
+  const outputPdf = writeMinimalPdf(path.join(dir, "translated.pdf"), { pages: 1, text: "Hello" });
   const script = process.platform === "win32"
     ? [
       "@echo off",
@@ -756,13 +879,11 @@ test("成功视觉辅助会把页面语境送入 PDFMathTranslate 调用", async
       "goto scan",
       ":done",
       `> \"${captureForBatch}\" echo prompt=%HAS_PROMPT%;context=%HAS_CONTEXT%`,
-      "if not exist \"%OUT%\" mkdir \"%OUT%\"",
-      "> \"%OUT%\\source.zh.mono.pdf\" echo %%PDF-1.4",
-      ">> \"%OUT%\\source.zh.mono.pdf\" echo %%EOF",
+      ...pdfOutputCopyLines(outputPdf),
       "exit /b 0",
       ""
     ].join("\r\n")
-    : `#!/bin/sh\nprintf '%s\\n' "$@" > '${capture.replace(/'/g, "'\\''")}'\nmkdir -p "$3"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > "$3/source.zh.mono.pdf"\n`;
+    : `#!/bin/sh\nprintf '%s\\n' "$@" > '${capture.replace(/'/g, "'\\''")}'\n${pdfOutputCopyLines(outputPdf).join("\n")}\n`;
   fs.writeFileSync(command, script, { mode: 0o755 });
   const pageContext = {
     version: "page-context-v1",
@@ -774,7 +895,7 @@ test("成功视觉辅助会把页面语境送入 PDFMathTranslate 调用", async
     notes: ""
   };
   const started = startPdfMathTranslation({
-    data: Buffer.from("%PDF-1.7\n").toString("base64"),
+    data: SOURCE_PDF_BASE64,
     binary: command,
     pageCount: 1,
     progressive: true,
@@ -825,7 +946,7 @@ test("视觉准备阶段取消时不启动 PDFMathTranslate", async () => {
   let visionStarted;
   const startedPromise = new Promise((resolve) => { visionStarted = resolve; });
   const started = startPdfMathTranslation({
-    data: Buffer.from("%PDF-1.7\n").toString("base64"),
+    data: SOURCE_PDF_BASE64,
     binary: command,
     pageCount: 1,
     progressive: true,
@@ -862,9 +983,10 @@ test("视觉准备阶段取消时不启动 PDFMathTranslate", async () => {
 test("视觉准备阶段显式抢占后优先翻译指定页并续译被让出的页面", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scholarloop-pdfmath-visual-preempt-"));
   const command = path.join(dir, process.platform === "win32" ? "fake-visual-preempt.cmd" : "fake-visual-preempt");
+  const outputPdf = writeMinimalPdf(path.join(dir, "translated.pdf"), { pages: 1, text: "Hello" });
   const script = process.platform === "win32"
-    ? ["@echo off", "set \"OUT=%~3\"", "if not exist \"%OUT%\" mkdir \"%OUT%\"", "> \"%OUT%\\source.zh.mono.pdf\" echo %%PDF-1.4", ">> \"%OUT%\\source.zh.mono.pdf\" echo %%EOF", "exit /b 0", ""].join("\r\n")
-    : "#!/bin/sh\nmkdir -p \"$3\"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > \"$3/source.zh.mono.pdf\"\n";
+    ? ["@echo off", "set \"OUT=%~3\"", ...pdfOutputCopyLines(outputPdf), "exit /b 0", ""].join("\r\n")
+    : `#!/bin/sh\n${pdfOutputCopyLines(outputPdf).join("\n")}\n`;
   fs.writeFileSync(command, script, { mode: 0o755 });
   let firstVisionStarted;
   let visionCalls = 0;
@@ -872,7 +994,7 @@ test("视觉准备阶段显式抢占后优先翻译指定页并续译被让出�
   const firstStarted = new Promise((resolve) => { firstVisionStarted = resolve; });
   const makeContext = (page) => ({ version: "page-context-v1", page, textLayer: true, columns: 1, readingOrder: [0], regions: [{ kind: "text", order: 0, lineIndexes: [0], confidence: 1 }], notes: "" });
   const started = startPdfMathTranslation({
-    data: Buffer.from("%PDF-1.7\n").toString("base64"),
+    data: SOURCE_PDF_BASE64,
     binary: command,
     pageCount: 2,
     progressive: true,
@@ -918,20 +1040,19 @@ test("视觉准备阶段显式抢占后优先翻译指定页并续译被让出�
 test("视觉辅助失败时标记本页 fallback 且不阻塞普通翻译", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scholarloop-pdfmath-visual-fallback-"));
   const command = path.join(dir, process.platform === "win32" ? "fake-visual-fallback.cmd" : "fake-visual-fallback");
+  const outputPdf = writeMinimalPdf(path.join(dir, "translated.pdf"), { pages: 1, text: "Hello" });
   const script = process.platform === "win32"
     ? [
       "@echo off",
       "set \"OUT=%~3\"",
-      "if not exist \"%OUT%\" mkdir \"%OUT%\"",
-      "> \"%OUT%\\source.zh.mono.pdf\" echo %%PDF-1.4",
-      ">> \"%OUT%\\source.zh.mono.pdf\" echo %%EOF",
+      ...pdfOutputCopyLines(outputPdf),
       "exit /b 0",
       ""
     ].join("\r\n")
-    : "#!/bin/sh\nmkdir -p \"$3\"\nprintf '%s\\n' '%PDF-1.4' '%%EOF' > \"$3/source.zh.mono.pdf\"\n";
+    : `#!/bin/sh\n${pdfOutputCopyLines(outputPdf).join("\n")}\n`;
   fs.writeFileSync(command, script, { mode: 0o755 });
   const started = startPdfMathTranslation({
-    data: Buffer.from("%PDF-1.7\n").toString("base64"),
+    data: SOURCE_PDF_BASE64,
     binary: command,
     pageCount: 1,
     progressive: true,
