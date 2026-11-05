@@ -83,12 +83,33 @@ function normalizeDialogMessages(value) {
     .slice(-200);
 }
 
+const VERDICT_RANK = { skipped: 0, off: 1, partial: 2, good: 3 };
+
+function normalizeVerdictHistory(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => ({
+      verdict: GUIDE_VERDICTS.includes(item?.verdict) ? item.verdict : "",
+      from: GUIDE_VERDICTS.includes(item?.from) ? item.from : "",
+      reason: String(item?.reason || "").trim().slice(0, 200),
+      at: String(item?.at || "")
+    }))
+    .filter((item) => item.verdict && item.from && item.verdict !== item.from)
+    .slice(-10);
+}
+
 function normalizeGuidedAnswer(value) {
   if (!value || typeof value !== "object") return null;
   const verdict = GUIDE_VERDICTS.includes(value.verdict) ? value.verdict : "partial";
+  // verdictInitial 记录第一次批改时的结论；后续追问会让 verdict 变化，两者不同即说明理解有提升。
+  const verdictInitial = GUIDE_VERDICTS.includes(value.verdictInitial) ? value.verdictInitial : verdict;
   return {
     answer: String(value.answer || "").slice(0, 4000),
     verdict,
+    verdictInitial,
+    verdictNote: String(value.verdictNote || "").slice(0, 200),
+    verdictUpdatedAt: String(value.verdictUpdatedAt || ""),
+    verdictHistory: normalizeVerdictHistory(value.verdictHistory),
     feedback: String(value.feedback || "").slice(0, 6000),
     reference: String(value.reference || "").slice(0, 6000),
     strengths: (Array.isArray(value.strengths) ? value.strengths : [])
@@ -98,6 +119,39 @@ function normalizeGuidedAnswer(value) {
     evidence: normalizeEvidenceItems(value.evidence),
     dialog: normalizeDialogMessages(value.dialog),
     answeredAt: String(value.answeredAt || "")
+  };
+}
+
+/**
+ * 把某一轮追问返回的掌握程度合并回记录。
+ * 只有水平有变化时才写入历史，且 skipped → partial → good 这样的提升会被保留下来。
+ */
+export function applyUnderstandingProgress(record, progress) {
+  if (!record || typeof record !== "object") return record;
+  const verdict = GUIDE_VERDICTS.includes(progress?.verdict) ? progress.verdict : "";
+  if (!verdict) return record;
+  const from = GUIDE_VERDICTS.includes(record.verdict) ? record.verdict : "partial";
+  const reason = String(progress?.reason || "").trim().slice(0, 200);
+  if (verdict === from) {
+    return reason ? { ...record, verdictNote: reason } : record;
+  }
+  const upgraded = (VERDICT_RANK[verdict] || 0) > (VERDICT_RANK[from] || 0);
+  return {
+    ...record,
+    verdict,
+    verdictNote: reason,
+    verdictUpdatedAt: new Date().toISOString(),
+    verdictInitial: record.verdictInitial || from,
+    verdictHistory: [
+      ...(Array.isArray(record.verdictHistory) ? record.verdictHistory : []),
+      {
+        verdict,
+        from,
+        reason,
+        at: new Date().toISOString(),
+        direction: upgraded ? "up" : "down"
+      }
+    ].slice(-10)
   };
 }
 

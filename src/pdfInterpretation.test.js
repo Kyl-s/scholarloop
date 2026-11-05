@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  applyUnderstandingProgress,
   createGuidedSession,
   createSavedInterpretation,
   interpretationStorageKey,
@@ -161,4 +162,42 @@ test("旧解读没有 guided 时按步骤计划从头开始，超界进度被收
     answers: { s1: { answer: "a", verdict: "excellent" } }
   });
   assert.equal(badVerdict.answers.s1.verdict, "partial");
+});
+
+test("追问让理解提升时更新到位程度并保留变化", () => {
+  const record = { answer: "初次回答", verdict: "partial", verdictInitial: "partial" };
+  const upgraded = applyUnderstandingProgress(record, { verdict: "good", reason: "补上了关键点" });
+  assert.equal(upgraded.verdict, "good");
+  assert.equal(upgraded.verdictInitial, "partial");
+  assert.equal(upgraded.verdictNote, "补上了关键点");
+  assert.equal(upgraded.verdictHistory.length, 1);
+  assert.equal(upgraded.verdictHistory[0].from, "partial");
+  assert.equal(upgraded.verdictHistory[0].verdict, "good");
+});
+
+test("追问没有带来新理解时保持原评估，只更新说明", () => {
+  const record = { verdict: "partial", verdictInitial: "partial" };
+  const same = applyUnderstandingProgress(record, { verdict: "partial", reason: "还在复述导师的话" });
+  assert.equal(same.verdict, "partial");
+  assert.equal(same.verdictNote, "还在复述导师的话");
+  assert.equal(same.verdictHistory, undefined);
+
+  assert.equal(applyUnderstandingProgress(record, null), record);
+  assert.equal(applyUnderstandingProgress(record, { verdict: "excellent" }), record);
+});
+
+test("跳过的一步也可以在追问后提升，并能随解读持久化恢复", () => {
+  const record = { answer: "", verdict: "skipped", verdictInitial: "skipped" };
+  const upgraded = applyUnderstandingProgress(record, { verdict: "partial", reason: "开始抓住要点" });
+  assert.equal(upgraded.verdict, "partial");
+  assert.equal(upgraded.verdictInitial, "skipped");
+
+  const restored = normalizeGuidedState({
+    plan: [{ id: "step-1", title: "第一步", question: "问题？" }],
+    index: 1,
+    answers: { "step-1": upgraded }
+  });
+  assert.equal(restored.answers["step-1"].verdict, "partial");
+  assert.equal(restored.answers["step-1"].verdictInitial, "skipped");
+  assert.equal(restored.answers["step-1"].verdictHistory.length, 1);
 });
