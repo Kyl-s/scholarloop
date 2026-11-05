@@ -71,6 +71,7 @@ function needsRebuild() {
   // 前端源码 / 入口 / 配置变更时重建，避免桌面版一直吃旧 dist（例如缺 AI 解读按钮）
   const srcTime = Math.max(
     latestMtime(path.join(ROOT, "src"), [".js", ".jsx", ".ts", ".tsx", ".css", ".svg", ".png"]),
+    latestMtime(path.join(ROOT, "shared")),
     latestMtime(path.join(ROOT, "public")),
     ...["index.html", "vite.config.js", "vite.config.ts", "package.json"].map((f) => {
       try {

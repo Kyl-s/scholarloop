@@ -78,6 +78,7 @@ import { pdfLayoutJobMatchesRestore } from "./pdfLayoutRestore.js";
 import { extractModelText, modelResponseError } from "./modelResponse.js";
 import { chatGptAuth, isLocalChatGptRequest } from "./chatgptAuth.js";
 import { chatgptModelFetch, isChatGptModelUrl } from "./chatgptModel.js";
+import { handlePdfVisionTranslation } from "./pdfVisionTranslation.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -523,6 +524,8 @@ app.post("/api/pdf/translate-layout", async (req, res) => {
     res.status(status).json({ error: message });
   }
 });
+
+app.post("/api/pdf/vision-translate", handlePdfVisionTranslation);
 
 app.post("/api/translate", async (req, res) => {
   const text = String(req.body?.text || "").trim();
