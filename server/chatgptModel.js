@@ -1,5 +1,6 @@
 import { getChatGptAccessToken } from "./chatgptAuth.js";
 import { fetchWithProxy, getProxyUrl } from "./proxy.js";
+import { withOpenCodeSessionHeader } from "./opencodeSession.js";
 
 export const CHATGPT_BASE_URL = "scholarloop-chatgpt://local";
 const API = "https://api.openai.com/v1";
@@ -88,7 +89,7 @@ function completionJson(response) {
   };
 }
 
-export async function readChatGptStream(response) {
+export async function readChatGptStream(response, { signal } = {}) {
   if (!response.body) throw new Error("ChatGPT 未返回响应流");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -124,25 +125,45 @@ export async function readChatGptStream(response) {
       completedItems.set(value.output_index, value.item);
     }
     if (value.type === "response.completed") {
-      if (!value.response || (value.response.status && value.response.status !== "completed")) throw new Error("ChatGPT 返回了无效完成状态");
+      if (!value.response || typeof value.response !== "object" || Array.isArray(value.response) || (value.response.status && value.response.status !== "completed")) throw new Error("ChatGPT 返回了无效完成状态");
       completed = value.response;
     }
   }
+  let onAbort;
+  let cancelled = false;
+  function cancelReader() {
+    if (cancelled) return;
+    cancelled = true;
+    // Do not let a slow upstream cancellation delay completion or abort.
+    try { Promise.resolve(reader.cancel()).catch(() => {}); } catch { /* already closed */ }
+  }
   try {
-    while (true) {
-      const { value, done } = await reader.read();
+    signal?.throwIfAborted();
+    const aborted = signal ? new Promise((_, reject) => {
+      onAbort = () => {
+        reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
+        cancelReader();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    }) : null;
+    while (!completed) {
+      signal?.throwIfAborted();
+      const { value, done } = await (aborted ? Promise.race([reader.read(), aborted]) : reader.read());
       buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
       let separator;
       while ((separator = /\r?\n\r?\n/.exec(buffer))) {
         event(buffer.slice(0, separator.index));
         buffer = buffer.slice(separator.index + separator[0].length);
+        if (completed) break;
       }
+      if (completed) break;
       if (done) { if (buffer.trim()) event(buffer); break; }
     }
-  } catch (error) {
-    await reader.cancel().catch(() => {});
-    throw error;
-  } finally { reader.releaseLock(); }
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+    cancelReader();
+    reader.releaseLock();
+  }
   if (!completed) throw Object.assign(new Error("ChatGPT 响应流中断，未收到 response.completed"), { code: "CHATGPT_STREAM_INTERRUPTED" });
   // Some live plan responses carry completed items only in the preceding SSE events.
   // Prefer the final snapshot when present; never concatenate it with those items.
@@ -158,7 +179,7 @@ export async function readChatGptStream(response) {
 /** Only the internal marker activates OAuth; ordinary providers retain their fetch behavior. */
 export function createChatGptModelFetch({ getAccessToken = getChatGptAccessToken, oauthFetch = fetchWithProxy, proxyUrl = getProxyUrl, ordinaryFetch = (...args) => globalThis.fetch(...args) } = {}) {
   return async function modelFetch(url, options = {}) {
-    if (!isChatGptModelUrl(url)) return ordinaryFetch(url, options);
+    if (!isChatGptModelUrl(url)) return ordinaryFetch(url, withOpenCodeSessionHeader(url, options));
     const route = String(url).slice(CHATGPT_BASE_URL.length);
     const method = String(options.method || "GET").toUpperCase();
     const models = route === "/models" && method === "GET";
@@ -176,7 +197,7 @@ export function createChatGptModelFetch({ getAccessToken = getChatGptAccessToken
       if (!Array.isArray(catalog.models)) throw new Error("ChatGPT 模型目录格式无效");
       return Response.json({ object: "list", data: catalog.models.filter((model) => model.visibility === "list" && model.slug).map((model) => ({ id: model.slug, object: "model", display_name: model.display_name || model.slug })) });
     }
-    return Response.json(await readChatGptStream(response));
+    return Response.json(await readChatGptStream(response, { signal: options.signal }));
   };
 }
 

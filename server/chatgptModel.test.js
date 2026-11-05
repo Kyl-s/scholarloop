@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createChatGptModelFetch, toChatGptResponsesBody, readChatGptStream, CHATGPT_BASE_URL } from "./chatgptModel.js";
+import { getOpenCodeSessionId } from "./opencodeSession.js";
 
 const frame = (value) => `data: ${JSON.stringify(value)}\r\n\r\n`;
 function stream(events, size = 7) {
@@ -62,6 +63,19 @@ test("API-key providers pass through without reading OAuth credentials", async (
   } });
   assert.equal((await (await modelFetch("https://model.example/chat/completions", options)).json()).ok, true);
   assert.equal(called, true);
+});
+
+test("opencode gateways receive a session header without mutating callers", async () => {
+  let seen = null;
+  const modelFetch = createChatGptModelFetch({ getAccessToken: () => { throw new Error("must not read"); }, ordinaryFetch: (url, opts) => {
+    seen = { url, opts }; return Response.json({ ok: true });
+  } });
+  const options = { method: "POST", headers: { Authorization: "Bearer ordinary-key" } };
+  await modelFetch("https://opencode.ai/zen/go/v1/chat/completions", options);
+  assert.equal(seen.opts.headers["x-opencode-session"], getOpenCodeSessionId());
+  assert.equal(options.headers["x-opencode-session"], undefined);
+  await modelFetch("https://model.example/chat/completions", options);
+  assert.equal(seen.opts, options);
 });
 
 test("OAuth uses only fixed public endpoints, token and proxy with no retries", async () => {

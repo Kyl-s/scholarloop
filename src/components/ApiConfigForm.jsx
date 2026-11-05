@@ -177,7 +177,7 @@ export default function ApiConfigForm() {
                   <span>{item.id === CHATGPT_PROVIDER_ID ? "ChatGPT 账号授权" : item.baseUrl.replace(/^https?:\/\//, "")} · {item.model}</span>
                 </div>
                 <div className="api-provider-row-actions">
-                  {isActive ? <Badge tone="ok">使用中</Badge> : item.id === CHATGPT_PROVIDER_ID ? <Badge tone="neutral">请在上方登录后启用</Badge> : (
+                  {isActive ? <Badge tone="ok">使用中</Badge> : item.id === CHATGPT_PROVIDER_ID ? <Badge tone="neutral">请在上方选择模型后启用</Badge> : (
                     <button type="button" className="api-provider-text-btn" onClick={() => activate(item.id)}>启用</button>
                   )}
                   {item.id !== CHATGPT_PROVIDER_ID ? <IconButton icon={Pencil} label={`编辑 ${item.name}`} onClick={() => showProvider(item, false)} /> : null}

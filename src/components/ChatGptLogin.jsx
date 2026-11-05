@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, RefreshCw } from "lucide-react";
 import { api } from "../api.js";
 import { loadAgentConfigStore, removeProvider, saveProvider } from "../agentConfig.js";
@@ -18,27 +18,42 @@ export default function ChatGptLogin({ onChanged }) {
   const [model, setModel] = useState(() => loadAgentConfigStore().providers.find((item) => item.id === CHATGPT_PROVIDER_ID)?.model || "");
   const [note, setNote] = useState("");
   const [modelRefresh, setModelRefresh] = useState(0);
+  const [statusRefresh, setStatusRefresh] = useState(0);
+  const [statusLoading, setStatusLoading] = useState(true);
+  const [statusError, setStatusError] = useState("");
+  const mounted = useRef(false);
+  const statusVersion = useRef(0);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; statusVersion.current += 1; };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     let timer;
     const check = async () => {
+      const version = statusVersion.current;
+      let pending = Boolean(status?.pending);
+      setStatusLoading(true);
       try {
         const next = await api.get("/api/chatgpt/status");
-        if (cancelled) return;
+        if (cancelled || version !== statusVersion.current) return;
         setStatus(next);
-        setError(next.error || "");
-        timer = setTimeout(check, next.pending ? 2000 : 30000);
+        setStatusError("");
+        pending = Boolean(next.pending);
       } catch (err) {
+        if (!cancelled && version === statusVersion.current) setStatusError(err.message || "暂时无法获取授权状态");
+      } finally {
         if (!cancelled) {
-          setError(err.message);
-          if (status?.pending) timer = setTimeout(check, 2000);
+          setStatusLoading(false);
+          timer = setTimeout(check, pending ? 2000 : 30000);
         }
       }
     };
     check();
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [status?.pending]);
+  }, [status?.pending, statusRefresh]);
 
   useEffect(() => {
     if (!status?.connected || !status.sharing) { setModels([]); setModelsLoading(false); setModelsError(""); return; }
@@ -57,32 +72,39 @@ export default function ChatGptLogin({ onChanged }) {
   }, [status?.connected, status?.sharing, modelRefresh]);
 
   const login = async () => {
+    statusVersion.current += 1;
     setBusy(true);
     setError("");
     setNote("");
     try {
       const result = await api.post("/api/chatgpt/login");
+      if (!mounted.current) return;
       const url = new URL(result.url);
       if (url.protocol !== "https:" || url.hostname !== "auth.openai.com") throw new Error("登录服务返回了无效的授权地址");
+      statusVersion.current += 1;
       setLoginUrl(url.href);
       setStatus((previous) => ({ ...previous, pending: true }));
       window.open(url.href, "_blank", "noopener,noreferrer");
-    } catch (err) { setError(err.message); }
-    finally { setBusy(false); }
+    } catch (err) { if (mounted.current) setError(err.message); }
+    finally { if (mounted.current) setBusy(false); }
   };
 
   const logout = async () => {
+    statusVersion.current += 1;
     setBusy(true);
     setError("");
     try {
       const result = await api.post("/api/chatgpt/logout");
+      if (!mounted.current) return;
+      statusVersion.current += 1;
       removeProvider(CHATGPT_PROVIDER_ID);
       setStatus(result);
+      setStatusError("");
       setLoginUrl("");
       setNote(result.error || "已退出 ChatGPT 登录");
       onChanged?.();
-    } catch (err) { setError(err.message); }
-    finally { setBusy(false); }
+    } catch (err) { if (mounted.current) setError(err.message); }
+    finally { if (mounted.current) setBusy(false); }
   };
 
   const enable = () => {
@@ -96,17 +118,30 @@ export default function ChatGptLogin({ onChanged }) {
 
   const modelOptions = [...new Set([...models, ...COMMON_CHATGPT_MODELS])];
   const customModel = !modelOptions.includes(model);
+  const connectionUnavailable = Boolean(statusError || modelsError || (status?.connected && status.error));
+  const retry = () => {
+    setStatusRefresh((value) => value + 1);
+    setModelRefresh((value) => value + 1);
+  };
+  const statusLabel = status?.connected
+    ? connectionUnavailable ? "授权已保存 · 暂时离线" : "已授权"
+    : status?.pending ? "等待授权" : !status ? statusError ? "状态暂不可用" : "正在确认授权" : "未登录";
 
   return (
     <section className="api-provider-editor" aria-label="ChatGPT OAuth 登录">
       <div className="api-provider-editor-head">
         <strong>ChatGPT OAuth（实验性）</strong>
-        <Badge tone={status?.connected ? "ok" : "neutral"}>{status?.connected ? "已登录" : status?.pending ? "等待授权" : "未登录"}</Badge>
+        <Badge tone={status?.connected && !connectionUnavailable ? "ok" : "neutral"}>{statusLabel}</Badge>
       </div>
       <p>使用 ChatGPT 账号授权，无需填写 API Key。凭据由 Windows 加密保存在本机，重启后自动恢复，令牌到期自动刷新。可用模型和额度由账号套餐决定。</p>
+      {connectionUnavailable ? <p className="model-note warn" role="status">{status?.connected
+        ? "授权已保存，暂时无法连接；开启代理后重试。已选模型会保留，无需重新登录。"
+        : status?.pending ? "暂时无法确认授权进度；开启代理后重试，系统会继续检查。"
+          : "暂时无法确认授权状态；开启代理后重试。连接失败不代表授权已退出。"}</p> : null}
       {status?.connected && !status.sharing ? <p className="model-note warn">账号已登录，但尚未获得套餐额度使用权限，暂时无法启用模型。</p> : null}
       <div className="institution-actions">
         {!status?.connected ? <Button type="button" onClick={login} disabled={busy || !status || status.pending}>Continue with ChatGPT</Button> : null}
+        <Button type="button" variant="ghost" icon={RefreshCw} onClick={retry} disabled={busy || statusLoading}>{statusLoading ? "正在检查连接…" : "刷新 / 重试连接"}</Button>
         {status?.connected || status?.pending ? <Button type="button" variant="ghost" onClick={logout} disabled={busy}>{status.connected ? "退出登录" : "取消登录"}</Button> : null}
       </div>
       {status?.pending && loginUrl ? <p className="model-note">请在授权页面完成登录。若浏览器未打开，<a href={loginUrl} target="_blank" rel="noopener noreferrer">点击打开授权页面</a>。</p> : null}
@@ -119,7 +154,7 @@ export default function ChatGptLogin({ onChanged }) {
                 <em>刷新最新模型列表，也可输入其他模型 ID。</em>
               </span>
               <div className="model-picker">
-                <select aria-label="ChatGPT 模型" value={customModel ? "__custom__" : model} onChange={(event) => setModel(event.target.value === "__custom__" ? "" : event.target.value)} disabled={modelsLoading}>
+                <select aria-label="ChatGPT 模型" value={customModel ? "__custom__" : model} onChange={(event) => setModel(event.target.value === "__custom__" ? "" : event.target.value)}>
                   {modelsLoading && !models.length ? <option value="">加载模型中...</option> : null}
                   {modelOptions.map((item) => <option key={item} value={item}>{item}</option>)}
                   <option value="__custom__">自定义...</option>
@@ -134,15 +169,16 @@ export default function ChatGptLogin({ onChanged }) {
               </div>
               {customModel ? <input aria-label="自定义 ChatGPT 模型" value={model} onChange={(event) => setModel(event.target.value)} placeholder="输入模型 ID，如 gpt-6.1-sol" /> : null}
               {modelsLoading ? <span className="model-note" role="status">正在获取账号的模型列表...</span> : null}
-              {modelsError ? <span className="model-note warn" role="alert">获取模型列表失败：{modelsError}</span> : null}
+              {modelsError ? <span className="model-note warn">模型列表暂不可用，仍可使用已选模型或输入模型 ID。</span> : null}
             </label>
           </div>
           <div className="institution-actions">
-            <Button type="button" icon={Check} onClick={enable} disabled={busy || modelsLoading || !model.trim()}>启用此模型</Button>
+            <Button type="button" icon={Check} onClick={enable} disabled={busy || !model.trim()}>启用此模型</Button>
           </div>
         </>
       ) : null}
       {error ? <p className="agent-error" role="alert">{error}</p> : null}
+      {!status?.connected && status?.error ? <p className="agent-error" role="alert">{status.error}</p> : null}
       {note ? <p className="settings-msg" role="status">{note}</p> : null}
     </section>
   );

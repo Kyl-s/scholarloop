@@ -1,5 +1,6 @@
 import { chatgptModelFetch, isChatGptModelUrl } from "./chatgptModel.js";
 import { randomUUID } from "node:crypto";
+import { getOpenCodeSessionId } from "./opencodeSession.js";
 import {
   looksLikeBatchJsonRequest,
   sanitizeTranslationModelOutput
@@ -18,7 +19,8 @@ export function registerPdfMathLlmSession({ baseUrl, apiKey, model } = {}) {
   sessions.set(token, {
     baseUrl: String(baseUrl || "").trim().replace(/\/+$/, ""),
     apiKey: String(apiKey || "").trim(),
-    model: String(model || "").trim()
+    model: String(model || "").trim(),
+    sessionId: getOpenCodeSessionId()
   });
   return token;
 }
@@ -98,7 +100,8 @@ export async function handlePdfMathLlmProxy(req, res) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${session.apiKey}`
+      Authorization: `Bearer ${session.apiKey}`,
+      "x-opencode-session": session.sessionId || `scholarloop-${req.params.token}`
     },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(180000)

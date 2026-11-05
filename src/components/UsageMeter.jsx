@@ -12,7 +12,8 @@ export default function UsageMeter({
   estimateTokens = 0,
   usedChars = 0,
   pageCoverage = "",
-  compact = false
+  compact = false,
+  variant = "panel"
 }) {
   const windowSize = contextWindowForModel(model);
   const real = hasUsage(usage);
@@ -20,6 +21,29 @@ export default function UsageMeter({
   const ratio = windowSize > 0 ? Math.min(1, used / windowSize) : 0;
   const tone = ratio >= 0.85 ? "high" : ratio >= 0.55 ? "mid" : "ok";
   const hit = real ? cacheHitRate(usage) : 0;
+
+  if (variant === "inline") {
+    // 侧栏里的单行形态：只留一个百分比和细进度条，细节放到 title，避免把内部统计铺在正文里。
+    const details = [
+      `上下文 ${formatTokenCount(used)} / ${formatTokenCount(windowSize)}${real ? "" : "（估算）"}`,
+      real ? `缓存命中 ${formatPercent(hit)}` : "解读后显示实际用量",
+      real ? `输出 ${formatTokenCount(usage.completionTokens)}` : "",
+      pageCoverage ? `覆盖页 ${pageCoverage}` : "",
+      usedChars ? `${formatTokenCount(usedChars)} 字` : ""
+    ].filter(Boolean);
+    return (
+      <span
+        className={`usage-inline is-${tone}`}
+        title={details.join(" · ")}
+        aria-label={`上下文使用 ${formatPercent(ratio)}`}
+      >
+        <i className="usage-inline-track" aria-hidden="true">
+          <b style={{ width: `${used > 0 ? Math.max(4, ratio * 100) : 0}%` }} />
+        </i>
+        {formatPercent(ratio)}
+      </span>
+    );
+  }
 
   return (
     <div className={`usage-meter${compact ? " is-compact" : ""}`} aria-label="上下文使用">

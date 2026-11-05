@@ -11,6 +11,40 @@ const ISSUER = "https://auth.openai.com";
 const RESOURCE = "https://api.openai.com/v1";
 const SCOPE = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
 const random = () => randomBytes(32).toString("base64url");
+const REFRESH_UNAVAILABLE = "ChatGPT 暂时无法连接或完成刷新，已保留登录，检查代理后重试";
+
+// Inspect only a small JSON error body. Never expose upstream descriptions or tokens.
+async function oauthErrorCode(response) {
+  if (!/^application\/(?:json|[\w.+-]+\+json)(?:\s*;|\s*$)/i.test(response.headers?.get("content-type") || "")) {
+    void response.body?.cancel().catch(() => {});
+    return null;
+  }
+  const reader = response.body?.getReader();
+  if (!reader) return null;
+  let timer;
+  try {
+    return await Promise.race([
+      (async () => {
+        const chunks = [];
+        let size = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > 8192) return null;
+          chunks.push(Buffer.from(value));
+        }
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        return typeof body?.error === "string" ? body.error : null;
+      })(),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), 5000); })
+    ]);
+  } catch { return null; }
+  finally {
+    clearTimeout(timer);
+    void reader.cancel().catch(() => {});
+  }
+}
 
 // The installation ID is not a credential; tokens are in the separate DPAPI vault.
 function hostId() {
@@ -73,18 +107,28 @@ export function createChatGptAuth({ fetcher = network, getHostId = hostId, verif
   };
   const status = () => ({ connected: Boolean(session), sharing: Boolean(session?.scopes.includes("chatgpt.tokens.use.direct")), pending: Boolean(pending), error });
   async function tokenRequest(params) {
-    const r = await fetcher(`${ISSUER}/api/accounts/oauth/token`, {
-      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ ...params, resource: RESOURCE }).toString()
-    });
-    if (!r.ok) {
-      const failure = new Error(`ChatGPT 令牌交换失败（HTTP ${r.status}），请重新登录`);
-      failure.reauthenticate = [400, 401, 403].includes(r.status);
-      throw failure;
+    const refreshing = params.grant_type === "refresh_token";
+    try {
+      const r = await fetcher(`${ISSUER}/api/accounts/oauth/token`, {
+        method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ ...params, resource: RESOURCE }).toString()
+      });
+      if (!r.ok) {
+        // RFC 6749 invalid_grant identifies an unusable refresh grant. HTTP status,
+        // invalid_client, gateway pages, and unknown/provider-specific codes do not.
+        const code = await oauthErrorCode(r);
+        const failure = new Error(refreshing ? REFRESH_UNAVAILABLE : "ChatGPT 暂时无法完成令牌交换，请检查代理后重试登录");
+        failure.reauthenticate = refreshing && [400, 401, 403].includes(r.status) && code === "invalid_grant";
+        if (failure.reauthenticate) failure.message = "ChatGPT 授权已过期或被撤销，请重新登录";
+        throw failure;
+      }
+      const data = await r.json();
+      if (!data?.access_token || !Number.isFinite(Number(data.expires_in)) || Number(data.expires_in) <= 0) throw new Error("ChatGPT 返回的登录凭据不完整");
+      return data;
+    } catch (failure) {
+      if (failure?.reauthenticate) throw failure;
+      throw new Error(refreshing ? REFRESH_UNAVAILABLE : "ChatGPT 暂时无法完成令牌交换，请检查代理后重试登录");
     }
-    const data = await r.json();
-    if (!data.access_token || !Number.isFinite(Number(data.expires_in)) || Number(data.expires_in) <= 0) throw new Error("ChatGPT 返回的登录凭据不完整");
-    return data;
   }
 
   async function beginLogin() {
@@ -161,12 +205,15 @@ export function createChatGptAuth({ fetcher = network, getHostId = hostId, verif
         await persist();
         if (!session) throw new Error("ChatGPT 已退出登录");
         if (!status().sharing) throw new Error("ChatGPT 套餐授权已失效，请重新登录");
+        if (error === REFRESH_UNAVAILABLE) error = "";
         return session.access_token;
       })().catch(async (failure) => {
         if (failure.reauthenticate && session === selected) {
           session = null;
           error = "ChatGPT 授权已过期或被撤销，请重新登录";
           await persist();
+        } else if (session === selected && failure.message === REFRESH_UNAVAILABLE) {
+          error = REFRESH_UNAVAILABLE;
         }
         throw failure;
       }).finally(() => { refresh = null; });
