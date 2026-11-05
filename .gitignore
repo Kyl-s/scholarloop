@@ -20,3 +20,11 @@ __pycache__/
 *.pyc
 
 data/zotero-state.json*
+
+# local debugging / tooling artifacts
+.zcode/
+.playwright-mcp/
+work/
+cjk_counts.py
+jobcheck.py
+p2check.py
