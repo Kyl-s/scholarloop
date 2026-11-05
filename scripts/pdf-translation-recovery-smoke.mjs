@@ -32,6 +32,9 @@ async function openPaper(paperTitle) {
   await page.getByText(paperTitle, { exact: true }).click();
   await page.getByRole("button", { name: "内置阅读器", exact: true }).last().click();
   await page.locator(".pdf-layout-status-count").waitFor();
+  assert.match(await page.locator(".pdf-panel-tabs").innerText(), /翻译/);
+  assert.equal(await page.locator(".pdf-layout-primary-card:visible").count(), 1);
+  assert.equal(await page.locator(".pdf-translation-dock:visible").count(), 0);
 }
 
 try {

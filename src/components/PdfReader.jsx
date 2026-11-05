@@ -25,7 +25,10 @@ import {
   StickyNote,
   ChevronDown,
   CircleHelp,
-  Flag
+  Flag,
+  RefreshCw,
+  ArrowUpRight,
+  MessageCircle
 } from "lucide-react";
 import * as pdfjsLib from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
@@ -37,11 +40,13 @@ import { normalizePdfSelection, normalizedSelectionAnchor } from "../pdfTranslat
 import { attachPdfTextLayerSelection, isPdfSelectionOverlayTarget, pickSelectionAnchorRect, reorderPdfTextLayerForSelection } from "../pdfTextSelection.js";
 import { appendDialogMessage, createPendingFollowup, settleFollowup } from "../pdfChat.js";
 import { applySampledLineAppearance, buildPdfTextLayout, extractReadablePdfText, PDF_TEXT_LAYOUT_VERSION } from "../pdfText.js";
-import { buildLayoutTranslationPrompt, joinLayoutTranslation, parseLayoutTranslation } from "../pdfLayoutTranslation.js";
+import { buildLayoutTranslationPrompt, cleanLayoutTranslationText, joinLayoutTranslation, parseLayoutTranslation } from "../pdfLayoutTranslation.js";
+import PdfVisionReading from "./PdfVisionReading.jsx";
+import PdfVisionTranslationLayer from "./PdfVisionTranslationLayer.jsx";
+import { visionModelIdentity, visionResultsFor } from "../pdfVisionReadingState.js";
 import {
   canSelectLayoutDisplayMode,
   canRestoreLayoutTranslation,
-  canRestoreCachedDisplayMode,
   initialPdfDisplayMode,
   layoutVariantForDisplayMode,
   normalizePdfDisplayMode,
@@ -55,6 +60,7 @@ import {
   restoreProtectedText
 } from "../pdfOcr.js";
 import {
+  applyUnderstandingProgress,
   createGuidedSession,
   createSavedInterpretation,
   interpretationStorageKey,
@@ -96,7 +102,8 @@ function layoutPageStatus(result, pageNumber) {
   if (done) label = `第 ${pageNumber} 页已完成`;
   else if (running) label = `第 ${pageNumber} 页翻译中…`;
   else if (page.status === "failed") label = `第 ${pageNumber} 页失败`;
-  else if (page.status === "queued") label = `第 ${pageNumber} 页排队中`;
+  else if (page.status === "queued") label = result?.status === "partial" ? `第 ${pageNumber} 页未完成` : `第 ${pageNumber} 页排队中`;
+  else if (page.status === "canceled") label = `第 ${pageNumber} 页未完成`;
   else label = `第 ${pageNumber} 页${page.status || "未知"}`;
   return { status: page.status || "", done, running, label, page };
 }
@@ -190,7 +197,10 @@ async function pdfMathConfigFingerprint(config = {}) {
     qps: config.pdfMathQps ?? "",
     workers: config.pdfMathWorkers ?? "",
     pageWorkers: config.pdfMathPageWorkers ?? "",
-    binary: String(config.pdfMathBinary || "").trim()
+    binary: String(config.pdfMathBinary || "").trim(),
+    // 术语表内容指纹由服务端通过 /translate-layout/status 提供；术语表更新后指纹变化，
+    // 旧任务配置随之失效，避免继续复用按旧术语表生成的页面。
+    termGlossaryHash: config.pdfMathNoGlossary === true ? "" : String(config.pdfMathGlossaryHash || "").trim()
   };
   return sha256ArrayBuffer(new TextEncoder().encode(JSON.stringify(value)));
 }
@@ -367,13 +377,21 @@ function normalizeEvidenceText(text) {
 }
 
 function EvidenceLinks({ items, onJump }) {
+  const seen = new Set();
   const evidence = (Array.isArray(items) ? items : [])
     .map((item) => ({
       ...item,
       page: Number(item?.page) || 0,
       label: String(item?.label || (item?.page ? `第 ${item.page} 页` : "")).trim()
     }))
-    .filter((item) => item.page > 0 && item.label);
+    .filter((item) => {
+      if (!(item.page > 0 && item.label)) return false;
+      // 「第 N 页」标签按页去重；带具体图/表名称的保留区分。
+      const key = /^第\s*\d+\s*页$/.test(item.label) ? `page:${item.page}` : `${item.page}|${item.label}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   if (!evidence.length) return null;
 
   return (
@@ -403,6 +421,19 @@ const GUIDE_VERDICT_LABELS = {
   skipped: "已跳过"
 };
 
+/** "1-4,6-13,22" → 实际覆盖页数，用于把原始页码串折叠成一句人话 */
+function coveragePageCount(pageCoverage) {
+  let total = 0;
+  for (const part of String(pageCoverage || "").split(",")) {
+    const match = part.trim().match(/^(\d+)\s*(?:-\s*(\d+))?$/);
+    if (!match) continue;
+    const start = Number(match[1]);
+    const end = Number(match[2] || match[1]);
+    if (Number.isFinite(start) && Number.isFinite(end) && end >= start) total += end - start + 1;
+  }
+  return total;
+}
+
 /** 引导式精读：某一步的批改内容（我的回答 + AI 反馈 + 参考答案 + 依据） */
 function GuidedReviewBody({ record, onJump }) {
   if (!record) return null;
@@ -416,6 +447,14 @@ function GuidedReviewBody({ record, onJump }) {
       ) : (
         <p className="pdf-ai-guided-skipped">这一步被跳过了，随时可以重走一遍巩固理解。</p>
       )}
+      {record.verdictInitial && record.verdictInitial !== record.verdict ? (
+        <p className="pdf-ai-verdict-upgrade">
+          <ArrowUpRight size={12} />
+          追问后「{GUIDE_VERDICT_LABELS[record.verdictInitial] || record.verdictInitial}」→「
+          {GUIDE_VERDICT_LABELS[record.verdict] || record.verdict}」
+          {record.verdictNote ? <em>{record.verdictNote}</em> : null}
+        </p>
+      ) : null}
       {record.strengths?.length ? (
         <ul className="pdf-ai-guided-strengths">
           {record.strengths.map((s, i) => (
@@ -444,13 +483,20 @@ function GuidedReviewBody({ record, onJump }) {
 function GuideDialogThread({ record, busy, disabled, draft, onDraftChange, onSend, onJump }) {
   const dialog = Array.isArray(record?.dialog) ? record.dialog : [];
   const listRef = useRef(null);
+  const inputRef = useRef(null);
+  const [open, setOpen] = useState(false);
   useEffect(() => {
     const list = listRef.current;
     if (!list) return;
     list.scrollTop = list.scrollHeight;
   }, [dialog.length, busy]);
+  useEffect(() => {
+    if (open) inputRef.current?.focus();
+  }, [open]);
+  const showComposer = open || dialog.length > 0 || busy;
+
   return (
-    <div className="pdf-ai-guide-dialog">
+    <div className={`pdf-ai-guide-dialog${showComposer ? " is-open" : ""}`}>
       {dialog.length || busy ? (
         <div className="pdf-ai-guide-dialog-list" ref={listRef}>
           {dialog.map((m, i) => (
@@ -474,33 +520,40 @@ function GuideDialogThread({ record, busy, disabled, draft, onDraftChange, onSen
             </div>
           ) : null}
         </div>
+      ) : null}
+      {showComposer ? (
+        <div className="pdf-ai-guide-dialog-input">
+          <textarea
+            ref={inputRef}
+            rows={2}
+            value={draft}
+            maxLength={4000}
+            placeholder="追问这一步…（Enter 发送）"
+            disabled={disabled}
+            onChange={(e) => onDraftChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                onSend();
+              }
+            }}
+          />
+          <button
+            type="button"
+            onClick={onSend}
+            disabled={disabled || !draft.trim()}
+            aria-label="发送"
+            title="发送（Enter）"
+          >
+            {busy ? <Loader2 size={13} className="spin" /> : <Send size={13} />}
+          </button>
+        </div>
       ) : (
-        <p className="pdf-ai-guide-dialog-empty">对这一步还有疑问？在这里继续和导师聊，记录会一直保留。</p>
-      )}
-      <div className="pdf-ai-guide-dialog-input">
-        <textarea
-          rows={2}
-          value={draft}
-          maxLength={4000}
-          placeholder="继续追问这一步…（Enter 发送，Shift+Enter 换行）"
-          disabled={disabled}
-          onChange={(e) => onDraftChange(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              onSend();
-            }
-          }}
-        />
-        <button
-          type="button"
-          onClick={onSend}
-          disabled={disabled || !draft.trim()}
-          aria-label="发送"
-        >
-          {busy ? <Loader2 size={13} className="spin" /> : <Send size={13} />}
+        <button type="button" className="pdf-ai-guide-dialog-toggle" onClick={() => setOpen(true)}>
+          <MessageCircle size={13} />
+          继续追问这一步
         </button>
-      </div>
+      )}
     </div>
   );
 }
@@ -576,7 +629,29 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const pdfSourceWriteKeyRef = useRef(`reader-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   const pdfCacheWriteKeyRef = useRef(`cache-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   const [originalPdfSource, setOriginalPdfSource] = useState(null);
+  const [originalDoc, setOriginalDoc] = useState(null);
+  const [visionDetailsHost, setVisionDetailsHost] = useState(null);
   const [activePdfVariant, setActivePdfVariant] = useState("original");
+  const visionIdentity = visionModelIdentity(config);
+  const visionDoc = originalDoc || (activePdfVariant === "original" ? doc : null);
+  const visionResults = useMemo(() => visionResultsFor(visionDoc || imageSource, visionIdentity), [visionDoc, imageSource, visionIdentity]);
+  const [visionRevision, setVisionRevision] = useState(0);
+  const [translationBackend, setTranslationBackend] = useState("layout");
+  const visionPresentedRef = useRef(new WeakSet());
+  const [visionCoverage, setVisionCoverage] = useState(null);
+  const [visionCanvasCommit, setVisionCanvasCommit] = useState(null);
+  const currentVisionResult = visionResults.get(pageNum);
+  const usingVision = activePdfVariant === "original" && translationBackend !== "layout"
+    && (visionResults.size > 0 || translationBackend === "vision");
+  const reportVisionCoverage = useCallback((coverage) => setVisionCoverage((previous) =>
+    previous?.result === currentVisionResult && previous?.covered === coverage.covered && previous?.total === coverage.total
+      && JSON.stringify(previous.blocks) === JSON.stringify(coverage.blocks) ? previous : { ...coverage, result: currentVisionResult }), [currentVisionResult]);
+  useLayoutEffect(() => {
+    if (translationBackend !== "vision" || activePdfVariant !== "original" || !currentVisionResult || visionPresentedRef.current.has(visionResults)) return;
+    visionPresentedRef.current.add(visionResults);
+    setTranslationBackend("vision");
+    setDisplayMode("translated");
+  }, [visionResults, visionRevision, pageNum, activePdfVariant, translationBackend]);
   const [pdfMathStatus, setPdfMathStatus] = useState({ loading: true, available: false, command: "", installHint: "" });
   const [pdfMathState, setPdfMathState] = useState("idle");
   const [pdfMathError, setPdfMathError] = useState("");
@@ -605,6 +680,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const [layoutReloadToken, setLayoutReloadToken] = useState(0);
   const [showTextDetails, setShowTextDetails] = useState(false);
   const [showPanel, setShowPanel] = useState(true);
+  // 默认在侧栏使用版式翻译，视觉精读由用户主动打开。
   const [panelTab, setPanelTab] = useState(initialTab === "notes" || initialTab === "ai" ? initialTab : "translate");
   /** 右侧面板放大模式：在翻译与 AI 解读之间切换时保持 */
   const [aiFocus, setAiFocus] = useState(false);
@@ -660,6 +736,57 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     void persistPdfCache(patch);
   };
 
+  // 版式翻译进度看门狗：主轮询循环遇到 PDF 源切换会静默退出（isCurrentSource 失效），
+  // 面板就会停在旧页数上。这里按 jobId 独立同步，保证进度始终跟得上后台任务。
+  useEffect(() => {
+    if (pdfMathState !== "working" || !pdfMathJobId) return undefined;
+    let stopped = false;
+    let timer = null;
+    const syncLayoutJob = async () => {
+      let job = null;
+      try {
+        job = await api.pdfMathTranslateJob(pdfMathJobId);
+      } catch {
+        /* 单次请求失败不结束同步，下一轮继续重试 */
+      }
+      if (stopped) return;
+      if (job) {
+        if (job.progress) setPdfMathProgress(job.progress);
+        if (typeof job?.layoutAssist?.enabled === "boolean") setLayoutAssistEnabled(job.layoutAssist.enabled);
+        setPdfMathResultForCurrentConfig(job);
+        const stillActive = ["queued", "running", "canceling"].includes(job.status);
+        if (!stillActive) {
+          const hasCompletedPage = (job.pages || []).some((page) => page.status === "completed" && (page.monoUrl || page.dualUrl));
+          if (job.status === "completed") {
+            setPdfMathState("ready");
+            setPdfMathError("");
+            if (paperId) rememberLayoutTranslationJob(job);
+          } else if (job.status === "canceled") {
+            setPdfMathState(hasCompletedPage ? "ready" : "idle");
+            setPdfMathError("");
+            setPdfMathProgress(hasCompletedPage ? "已暂停，可随时继续" : "已停止");
+          } else if (job.status === "partial") {
+            setPdfMathState(hasCompletedPage ? "ready" : "error");
+            setPdfMathError(hasCompletedPage ? "" : (job.error || "仍有页面未完成，请重新开始翻译"));
+            if (hasCompletedPage && paperId) rememberLayoutTranslationJob(job);
+          } else {
+            setPdfMathState(hasCompletedPage ? "ready" : "error");
+            setPdfMathError(job.error || (hasCompletedPage ? "有页面失败，已保留完成页，可点继续" : "PDF 排版翻译失败"));
+            if (hasCompletedPage && paperId) rememberLayoutTranslationJob(job);
+          }
+          return;
+        }
+      }
+      timer = window.setTimeout(syncLayoutJob, 1500);
+    };
+    timer = window.setTimeout(syncLayoutJob, 1500);
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在任务/状态变化时重启，避免轮询被高频重置
+  }, [pdfMathState, pdfMathJobId]);
+
   const proxy = settings?.proxy || "";
   const interpretationKey = useMemo(
     () => interpretationStorageKey({ paperId, doi, url, title }),
@@ -687,7 +814,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   }, [noteScope, pageNum]);
 
   // 版式翻译结果：上方「原文/译文/中英对照」直接切换，不走侧栏按钮
-  const layoutDisplayVariant = layoutVariantForDisplayMode(displayMode);
+  const layoutDisplayVariant = usingVision ? "" : layoutVariantForDisplayMode(displayMode);
   const layoutAssistResultEnabled = typeof pdfMathResult?.layoutAssist?.enabled === "boolean"
     ? pdfMathResult.layoutAssist.enabled
     : null;
@@ -720,6 +847,11 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     })
   );
   const usingLayoutPdf = layoutViewReady;
+  const visionCanvasReady = visionCanvasCommit?.source === (doc || imageSource)
+    && visionCanvasCommit?.page === pageNum && visionCanvasCommit?.scale === scale && visionCanvasCommit?.original === true;
+  const activeVisionCoverage = visionCanvasReady && usingVision && displayMode !== "original" && !pageRendering
+    && visionCoverage?.result === currentVisionResult ? visionCoverage : null;
+  const visionRemainingReasons = [...new Set((activeVisionCoverage?.blocks || []).map((block) => block.rejectionReason).filter(Boolean))].join("；");
   const layoutCompletedCount = useMemo(
     () => (currentModePdfMathResult?.pages || []).filter((page) => page.status === "completed" && (page.monoUrl || page.dualUrl)).length,
     [currentModePdfMathResult]
@@ -996,6 +1128,10 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     setPdfMathError(job.status === "failed" && !hasCompletedPage ? (job.error || "版式翻译失败") : "");
     if (["queued", "running", "canceling"].includes(job.status)) {
       setPdfMathState("working");
+    } else if (job.status === "partial") {
+      // 历史任务被纠正为 partial：有完成页就可阅读，同时提示还有页未完成，可继续翻译。
+      setPdfMathState(hasCompletedPage ? "ready" : "error");
+      if (!hasCompletedPage) setPdfMathError(job.error || "仍有页面未完成，可重新开始翻译");
     } else if (hasCompletedPage || hasWholeFile || job.status === "completed") {
       setPdfMathState("ready");
     } else {
@@ -1050,6 +1186,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     pdfSourceSha256Ref.current = "";
     const sourceVariant = source.variant === "dual" || source.variant === "mono" ? source.variant : "original";
     const isTranslatedVariant = sourceVariant !== "original";
+    if (!isTranslatedVariant) setOriginalDoc(null);
     const preservePdfMathResult = Boolean(source.preservePdfMathResult);
     const keepErrorUi = Boolean(source.keepErrorUi);
     if (keepErrorUi) {
@@ -1126,7 +1263,6 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     const cachedPdfUrl = shouldUseCache ? String(cache?.pdfUrl || "").trim() : "";
     const sourceUrl = cachedPdfUrl || requestedUrl;
     const compatibleTextCache = Number(cache?.textLayoutVersion) === PDF_TEXT_LAYOUT_VERSION;
-    const cachedDisplayMode = initialPdfDisplayMode(cache?.displayMode);
     const cachedTextByPage = compatibleTextCache ? (cache?.textByPage || {}) : {};
     setTextByPage(cachedTextByPage);
     setOcrPageTexts(cache?.ocrPageTexts || {});
@@ -1260,6 +1396,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         return;
       }
       setDoc(pdf);
+      if (!isTranslatedVariant) setOriginalDoc(pdf);
       setNumPages(pdf.numPages);
       const startPage = Number(initialPage) > 0 ? Math.min(Number(initialPage), pdf.numPages) : 1;
       setPageNum(startPage);
@@ -1319,12 +1456,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
           const cachedJob = savedCache?.layoutTranslationJobs?.[mode] || cache?.layoutTranslationJobs?.[mode];
           const sourceSha256 = computedSourceSha256;
           const legacyJobId = cache?.layoutTranslationJobId || savedCache?.layoutTranslationJobId || "";
-          const hasCachedLayoutJob = Boolean(cachedJob?.jobId || legacyJobId);
-          const canRestoreTextDisplayMode = canRestoreCachedDisplayMode(cache, cachedDisplayMode, { compatibleTextCache });
-          if (cachedDisplayMode !== "original" && !hasCachedLayoutJob && canRestoreTextDisplayMode) {
-            setDisplayMode(cachedDisplayMode);
-          }
-          const restoredPdfMathJob = await restorePdfMathFromLocal(
+          // Restore history as an available secondary result, never select it
+          // over the default visual workflow (or a user's in-flight start).
+          await restorePdfMathFromLocal(
             cachedJob?.jobId || legacyJobId,
             {
               expectedAssistEnabled: assistEnabled,
@@ -1334,9 +1468,6 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
               allowModeDiscovery: !cachedJob && Boolean(legacyJobId) && (Number(cache?.layoutTranslationJobsVersion) || 0) < 1
             }
           );
-          if (restoredPdfMathJob && cachedDisplayMode !== "original" && (!canRestoreTextDisplayMode || hasCachedLayoutJob)) {
-            setDisplayMode(cachedDisplayMode);
-          }
         }
       }
     } catch (err) {
@@ -1363,6 +1494,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     setErrorIsAuth(false);
     setPdfSourceBase64("");
     setOriginalPdfSource(null);
+    setOriginalDoc(null);
     setActivePdfVariant("original");
     setPdfMathState("idle");
     setPdfMathError("");
@@ -1376,9 +1508,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     setOcrPageTexts({});
     setParagraphTranslations({});
     setPageTranslations({});
-    setVisualPageTranslationLayouts({});
-    setVisualLayoutError("");
-    setVisualLayoutEnabled(false);
+    setPageTextLayouts({});
+    setPageTranslationLayouts({});
     layoutAssistEnabledRef.current = false;
     setLayoutAssistEnabled(false);
     setLayoutTranslationJobs({ normal: null, assisted: null });
@@ -1445,9 +1576,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   }, [initialPage, numPages]);
 
   useEffect(() => {
-    if (initialTab === "notes" || initialTab === "ai" || initialTab === "translate") {
+    if (initialTab === "notes" || initialTab === "ai" || initialTab === "translate" || initialTab === "vision") {
       setShowPanel(true);
-      setPanelTab(initialTab);
+      setPanelTab(initialTab === "translate" ? "vision" : initialTab);
     }
   }, [initialTab]);
 
@@ -1562,6 +1693,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         canvas.style.width = `${cssWidth}px`;
         canvas.style.height = `${cssHeight}px`;
         canvas.getContext("2d").drawImage(renderCanvas, 0, 0);
+        setVisionCanvasCommit({ source: imageSource, page: pageNum, scale, original: true });
         if (surface) {
           surface.style.width = `${cssWidth}px`;
           surface.style.height = `${cssHeight}px`;
@@ -1580,7 +1712,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     }
 
     (async () => {
-      let renderFromLayout = layoutViewReady;
+      let renderFromLayout = !usingVision && layoutViewReady;
       try {
         // 仅当版式文档与当前页匹配时才渲染译文，否则渲染原文（避免翻页串页）
         const sourceDoc = renderFromLayout ? layoutViewDoc : doc;
@@ -1625,6 +1757,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         canvas.style.width = `${cssWidth}px`;
         canvas.style.height = `${cssHeight}px`;
         canvas.getContext("2d").drawImage(renderCanvas, 0, 0);
+        setVisionCanvasCommit({ source: doc, page: pageNum, scale, original: !renderFromLayout });
         if (surface) {
           surface.style.width = `${cssWidth}px`;
           surface.style.height = `${cssHeight}px`;
@@ -1733,7 +1866,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         textLayerRef.current.removeEventListener("dblclick", textLayerDoubleClick);
       }
     };
-  }, [doc, imageSource, pageNum, scale, displayMode, pageTranslations[pageNum], layoutViewReady, layoutViewDoc, interactionMode, ocrSelectMode, ocrBusy, renderRetryToken]);
+  }, [doc, imageSource, pageNum, scale, displayMode, usingVision, pageTranslations[pageNum], layoutViewReady, layoutViewDoc, interactionMode, ocrSelectMode, ocrBusy, renderRetryToken]);
 
   useEffect(() => {
     setSelectionPopup(null);
@@ -2163,7 +2296,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
 
   const expandSidePanel = (tab = "translate") => {
     setShowPanel(true);
-    if (tab === "ai" || tab === "notes" || tab === "translate") setPanelTab(tab);
+    if (tab === "vision") selectVisionWorkflow();
+    if (tab === "translate") setTranslationBackend("layout");
+    if (tab === "ai" || tab === "notes" || tab === "translate" || tab === "vision") setPanelTab(tab);
     else setPanelTab("translate");
   };
 
@@ -2281,7 +2416,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
     });
     const rawText = String(result?.text || "").trim();
     const lines = parseLayoutTranslation(rawText, layout);
-    if (!lines.length) return rawText ? { text: rawText, lines: null } : null;
+    if (!lines.length) return rawText ? { text: cleanLayoutTranslationText(rawText), lines: [] } : null;
     return { text: joinLayoutTranslation(lines) || String(text || "").trim(), lines };
   };
 
@@ -2377,6 +2512,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   const translateWithPdfMath = async ({ force = false, priorityPage = 1, retranslatePage = 0 } = {}) => {
     if (!pdfSourceBase64 || !config || !pdfMathStatus.available) return;
     if (pdfMathState === "working") return;
+    setTranslationBackend("layout");
     const sourceLoadSeq = sourceLoadSeqRef.current;
     const isCurrentSource = () => sourceLoadSeq === sourceLoadSeqRef.current;
     if (!force && !retranslatePage && layoutAllDone) {
@@ -2387,7 +2523,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
 
     const resuming = !force && hasAnyLayoutResult;
     pdfMathCancelRequested.current = false;
-    if (!resuming) pdfMathFirstPageOpened.current = false;
+    pdfMathFirstPageOpened.current = false;
     setPdfMathState("working");
     setPdfMathError("");
     if (force) setPdfMathResultForCurrentConfig(null);
@@ -2399,7 +2535,11 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
           : "正在开始版式翻译…"
     );
     try {
-      const configFingerprint = await pdfMathConfigFingerprint(config);
+      // status 未返回术语表指纹时不发送指纹，交给服务端按当前配置+术语表计算，避免无谓的身份失配。
+      const glossaryHash = String(pdfMathStatus?.glossaryHash || "").trim();
+      const configFingerprint = glossaryHash
+        ? await pdfMathConfigFingerprint({ ...config, pdfMathGlossaryHash: glossaryHash })
+        : "";
       const started = await api.pdfMathTranslate({
         data: pdfSourceBase64,
         config,
@@ -2409,7 +2549,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         progressive: true,
         priorityPage,
         paperId: paperId || "",
-        jobId: (!force && layoutAssistModeMatches && layoutAssistResultConfigMatches && pdfMathJobId) ? pdfMathJobId : "",
+        jobId: (!force && layoutAssistModeMatches && pdfMathJobId) ? pdfMathJobId : "",
         force: Boolean(force),
         retranslatePage: Number(retranslatePage) || 0,
         // 主路径始终续译全部未完成页，避免「译两页就停」让人摸不着头脑
@@ -2420,6 +2560,9 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       if (!isCurrentSource()) return;
       if (typeof started?.layoutAssist?.enabled === "boolean") setLayoutAssistEnabled(started.layoutAssist.enabled);
       setPdfMathJobId(started.jobId || "");
+      if (started?.staleReason === "terminology-updated") {
+        setPdfMathError("术语表已更新，旧译文已保留；正在按新术语表重新翻译");
+      }
       if (paperId && started.jobId) rememberLayoutTranslationJob(started);
       const showFirstReadyPdfMathPage = (candidate) => {
         if (!isCurrentSource()) return;
@@ -2428,7 +2571,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         const preferred = completed.find((page) => page.page === priorityPage) || completed[0];
         pdfMathFirstPageOpened.current = true;
         if (!resuming && preferred.page && preferred.page !== pageNum) setPageNum(preferred.page);
-        setDisplayModeAndPersist(preferred.dualUrl ? "bilingual" : "translated");
+        setDisplayModeAndPersist(preferred.monoUrl ? "translated" : "bilingual");
       };
       let job = started;
       if (!["queued", "running", "canceling"].includes(job.status)) {
@@ -2499,11 +2642,23 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         setPdfMathError(job.error || "有页面失败，已保留完成页，可点继续");
         return;
       }
+      if (job.status === "partial") {
+        // 服务端明确标记“有完成页但仍有缺口”，不是完成也不是失败：保留已完成页，允许继续。
+        setPdfMathState(hasCompletedPage ? "ready" : "error");
+        setPdfMathError(hasCompletedPage ? "" : (job.error || "仍有页面未完成，请重新开始翻译"));
+        setPdfMathProgress(job.progress || `仍有 ${job.incompletePages?.length || 0} 页未完成，可继续翻译`);
+        return;
+      }
       if (job.status !== "completed" && !hasCompletedPage && !job.monoUrl && !job.dualUrl) {
         throw new Error(job.error || "PDF 排版翻译没有生成译文 PDF");
       }
       setPdfMathResultForCurrentConfig(job);
       if (retranslatePage) setLayoutReloadToken((token) => token + 1);
+      if (job.staleReason === "terminology-updated") {
+        // 术语表更新触发的自动重译：完成后不要继续显示红色错误，只保留可读提示。
+        setPdfMathError("");
+        setPdfMathProgress(`${job.progress || "版式翻译已完成"}；术语表已更新，已按新术语表重新翻译`);
+      }
       setPdfMathState("ready");
       if (paperId && job.jobId) rememberLayoutTranslationJob(job);
     } catch (err) {
@@ -2670,6 +2825,13 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
   }, [pdfSourceBase64, paperId, url, title, doi]);
 
   const restoreOriginalPdf = () => {
+    if (originalDoc) {
+      setDoc(originalDoc);
+      setActivePdfVariant("original");
+      setNumPages(originalDoc.numPages);
+      setDisplayModeAndPersist("original");
+      return;
+    }
     // 兼容旧逻辑：若曾整本替换为译文 PDF，回到原始数据
     if (activePdfVariant !== "original" && originalPdfSource?.data) {
       loadSource({
@@ -2681,6 +2843,19 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       });
     }
     setDisplayModeAndPersist("original");
+  };
+
+  const selectVisionWorkflow = (start = false) => {
+    setTranslationBackend("vision");
+    setLayoutViewError("");
+    // Keep the same PDF.js source and result Map. Do not call loadSource here:
+    // that would invalidate the source key and cancel the just-started batch.
+    if (originalDoc) {
+      setDoc(originalDoc);
+      setActivePdfVariant("original");
+      setNumPages(originalDoc.numPages);
+    }
+    if (start) setDisplayMode("translated");
   };
 
   const handleLayoutAssistChange = async (enabled) => {
@@ -2702,6 +2877,10 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
 
   const handleDisplayModeChange = (mode) => {
     setLayoutViewError("");
+    if (usingVision) {
+      setDisplayModeAndPersist(mode);
+      return;
+    }
     if (mode !== "original") {
       const variant = layoutVariantForDisplayMode(mode);
       const resolved = resolveLayoutPageUrl(currentModePdfMathResult, pageNum, variant);
@@ -2872,6 +3051,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
           [step.id]: {
             answer: "",
             verdict: "skipped",
+            verdictInitial: "skipped",
             feedback: "",
             reference: "",
             strengths: [],
@@ -2911,6 +3091,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
           [step.id]: {
             answer: userAnswer,
             verdict: data.verdict || "partial",
+            verdictInitial: data.verdict || "partial",
             feedback: data.feedback || "",
             reference: data.reference || "",
             strengths: data.strengths || [],
@@ -2987,7 +3168,12 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         config,
         pages: pagesPayload(effectiveTextByPage),
         step: { ...step, index: stepIndex, total: current.plan.length },
-        record: { answer: record.answer, feedback: record.feedback, reference: record.reference },
+        record: {
+          answer: record.answer,
+          verdict: record.verdict,
+          feedback: record.feedback,
+          reference: record.reference
+        },
         messages: withUser,
         prior: interpretResult
       });
@@ -3001,7 +3187,10 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
       });
       applyGuided({
         ...latest,
-        answers: { ...latest.answers, [stepId]: { ...latestRecord, dialog: withReply } }
+        answers: {
+          ...latest.answers,
+          [stepId]: applyUnderstandingProgress({ ...latestRecord, dialog: withReply }, data.progress)
+        }
       });
       const nextMeta = data.usage
         ? { ...interpretMeta, usage: data.usage, model: data.model || interpretMeta?.model || config?.model || "" }
@@ -3181,7 +3370,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
           </div>
           <div className="pdf-display-switch" aria-label="PDF 显示模式">
             {PDF_DISPLAY_MODES.map((mode) => {
-              const layoutReady = mode.value === "original"
+              const layoutReady = usingVision || mode.value === "original"
                 || canSelectLayoutDisplayMode(currentModePdfMathResult, pageNum, mode.value);
               return (
                 <button
@@ -3193,7 +3382,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                   title={
                     mode.value === "original"
                       ? "显示原始 PDF"
-                      : mode.value === "translated"
+                      : usingVision ? (mode.value === "bilingual" ? "原页与视觉覆盖译页并排对照" : "在原页显示安全可排版的视觉段落译文；其余见侧栏") : mode.value === "translated"
                         ? (layoutReady ? "显示本页纯中文版式译文" : "本页版式译文尚未就绪")
                         : (layoutReady ? "显示本页中英对照版式译文" : "本页版式译文尚未就绪")
                   }
@@ -3203,6 +3392,21 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
               );
             })}
           </div>
+          {hasAnyPdfMathResult ? <label className="pdf-translation-backend">译文来源
+            <select aria-label="译文来源" value={usingVision ? "vision" : "layout"} onChange={(event) => {
+              setTranslationBackend(event.target.value);
+              setLayoutViewError("");
+               if (event.target.value === "vision") selectVisionWorkflow();
+             }}><option value="layout">版式译文</option><option value="vision">视觉译文</option></select>
+          </label> : null}
+          <button
+            type="button"
+            className={`pdf-vision-entry${showPanel && panelTab === "vision" ? " active" : ""}`}
+            onClick={() => { setPanelTab("vision"); setShowPanel(true); setAiFocus(false); selectVisionWorkflow(); }}
+            title="看原页截图，按完整段落翻译；仅点击翻译按钮后发送本页"
+          >
+            <Scan size={15} /> 视觉精读
+          </button>
           <IconButton icon={ZoomOut} label="缩小" onClick={() => setScale((s) => clampScale(s - SCALE_STEP_BTN))} />
           <span className="pdf-zoom-label" title="Ctrl + 滚轮缩放">{Math.round(scale * 100)}%</span>
           <IconButton icon={ZoomIn} label="放大" onClick={() => setScale((s) => clampScale(s + SCALE_STEP_BTN))} />
@@ -3249,7 +3453,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
             label={showPanel ? "收起侧栏" : "展开侧栏"}
             onClick={() => {
               if (showPanel) collapseSidePanel();
-              else expandSidePanel(panelTab === "ai" ? "ai" : "translate");
+               else expandSidePanel(panelTab === "ai" || panelTab === "notes" || panelTab === "vision" ? panelTab : "translate");
             }}
             className={showPanel ? "active" : ""}
           />
@@ -3269,6 +3473,28 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         </div>
       </div>
 
+      <div hidden={panelTab !== "vision"}>
+      <PdfVisionReading
+        doc={visionDoc}
+        imageSource={imageSource}
+        numPages={numPages}
+        page={pageNum}
+        text={pageText}
+        config={config}
+        loading={loading}
+        isOriginal={Boolean(visionDoc || (activePdfVariant === "original" && imageSource))}
+        coverage={activeVisionCoverage}
+        detailsHost={visionDetailsHost}
+        displayLabel={usingLayoutPdf || activePdfVariant !== "original" ? "历史版式译文" : usingVision && displayMode !== "original" && currentVisionResult && activeVisionCoverage?.covered ? "视觉译文" : "原文"}
+        onShowDetails={() => { setPanelTab("vision"); setShowPanel(true); setAiFocus(false); selectVisionWorkflow(); }}
+        onStart={() => selectVisionWorkflow(true)}
+        onApplyResult={() => { selectVisionWorkflow(true); setVisionRevision((value) => value + 1); }}
+        onPageResult={(number, result, sourceResults) => {
+          if (sourceResults !== visionResults) return;
+          setVisionRevision((value) => value + 1);
+        }}
+      />
+      </div>
       <div className={`pdf-body${aiFocus ? " ai-focus-mode" : ""}${showPanel ? "" : " panel-collapsed"}`}>
         <div className="pdf-canvas-stage">
           <div
@@ -3322,7 +3548,12 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                     <button type="button" aria-label="关闭依据提示" onClick={() => setEvidenceHighlight(null)}><X size={13} /></button>
                   </div>
                 ) : null}
-                <div className={`pdf-page-compare display-${displayMode}${evidenceHighlight?.page === pageNum ? " evidence-jump-active" : ""}${usingLayoutPdf ? " is-layout-pdf" : ""}`}>
+                <div className={`pdf-page-compare display-${displayMode}${evidenceHighlight?.page === pageNum ? " evidence-jump-active" : ""}${usingLayoutPdf ? " is-layout-pdf" : ""}${usingVision ? " is-vision-view" : ""}`}>
+                {usingVision && displayMode !== "original" ? <div className={`pdf-vision-page-status${currentVisionResult && (!activeVisionCoverage || !activeVisionCoverage.covered) ? " is-uncovered" : ""}`} role="status">
+                  <span>{!currentVisionResult ? `第 ${pageNum} 页尚未视觉翻译，当前保留原页。` : currentVisionResult.layoutVersion !== 1 ? "文本已翻译；旧结果无可靠坐标，重译会调用模型。完整译文仍可在侧栏阅读。" : activeVisionCoverage ? `文本已翻译 · 原页已覆盖 ${activeVisionCoverage.covered} 段${!activeVisionCoverage.covered ? " · 注意：尚未覆盖原页" : ""} · 剩余 ${activeVisionCoverage.total - activeVisionCoverage.covered} 块${visionRemainingReasons ? `：${visionRemainingReasons}` : ""}` : "文本已翻译 · 正在核对原页与排版，尚未确认覆盖。"}</span>
+                  <button type="button" onClick={() => { setPanelTab("vision"); setShowPanel(true); selectVisionWorkflow(); }}>查看完整译文</button>
+                  <small>仅阅读显示，不修改源 PDF</small>
+                </div> : null}
                 {layoutDisplayVariant && layoutViewLoading && !layoutViewReady ? (
                   <div className="pdf-layout-view-status" role="status">
                     <Loader2 size={14} className="spin" />
@@ -3379,6 +3610,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                   onPointerCancel={handleOcrPointerUp}
                 >
                     <canvas ref={canvasRef} className="pdf-canvas" />
+                    {usingVision && visionCanvasReady && displayMode === "translated" && currentVisionResult && !pageRendering && !pageRenderError ? <PdfVisionTranslationLayer key={`${pageNum}:${scale}`} result={currentVisionResult} pageScale={scale} onCoverage={reportVisionCoverage} /> : null}
                     <div
                       ref={textLayerRef}
                       className={`textLayer pdf-text-layer${canUseHandPan ? " is-hand-passthrough" : ""}`}
@@ -3386,7 +3618,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                     />
 
                     {/* 有版式 PDF 时不再叠文字覆盖层；仅文字翻译回退时使用 */}
-                    {!usingLayoutPdf && displayMode === "translated" && currentPageTranslationText && !pageTranslationFailed && !pageIsOcr ? (
+                    {!usingVision && !usingLayoutPdf && displayMode === "translated" && currentPageTranslationText && !pageTranslationFailed && !pageIsOcr ? (
                       <PdfLayoutTranslationLayer lines={currentPageTranslationLayout} scale={scale} />
                     ) : null}
 
@@ -3406,7 +3638,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                       />
                     ) : null}
 
-                    {!usingLayoutPdf && displayMode !== "original" && (!currentPageTranslationText || pageTranslationFailed) && currentParagraphTranslations.length ? (
+                    {!usingVision && !usingLayoutPdf && displayMode !== "original" && (!currentPageTranslationText || pageTranslationFailed) && currentParagraphTranslations.length ? (
                   <div className="pdf-paragraph-overlay-stack">
                     {currentParagraphTranslations.map(([key, translation]) => (
                       <div className="pdf-inline-translation-card" key={key}>
@@ -3432,7 +3664,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                   </div>
                 ))}
 
-                    {!usingLayoutPdf && !layoutPageResolved.url && displayMode === "bilingual" && !hasInlineTranslation && !pageTranslationFailed ? (
+                    {!usingVision && !usingLayoutPdf && !layoutPageResolved.url && displayMode === "bilingual" && !hasInlineTranslation && !pageTranslationFailed ? (
                   <div className="pdf-empty-translation-overlay">
                     <Languages size={22} />
                     <strong>本页还没有译文</strong>
@@ -3474,7 +3706,14 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                   ) : null}
                 </div>
 
-                {!usingLayoutPdf && displayMode !== "original" && currentPageTranslationText && !pageTranslationFailed && pageIsOcr ? (
+                {usingVision && visionCanvasReady && displayMode === "bilingual" && currentVisionResult?.image && !pageRendering && !pageRenderError ? <section className="pdf-vision-compare-sheet" aria-label={`第 ${pageNum} 页视觉译文，与左侧原页对照`}>
+                  <div className="pdf-vision-compare-label">视觉译文 · 与完整原页对照</div>
+                  <div className="pdf-vision-compare-page" style={{ width: canvasRef.current?.style.width || "600px", height: canvasRef.current?.style.height || "auto" }}>
+                    <img src={currentVisionResult.image} alt={`第 ${pageNum} 页原图底图，安全段落覆盖译文`} />
+                    <PdfVisionTranslationLayer key={`${pageNum}:${scale}`} result={currentVisionResult} pageScale={scale} onCoverage={reportVisionCoverage} />
+                  </div>
+                </section> : null}
+                {!usingVision && !usingLayoutPdf && displayMode !== "original" && currentPageTranslationText && !pageTranslationFailed && pageIsOcr ? (
                   <section className={`pdf-page-translation-sheet ${displayMode}`} aria-label={`第 ${pageNum} 页译文`}>
                     <div className="pdf-overlay-head">
                       <strong>第 {pageNum} 页译文</strong>
@@ -3518,14 +3757,14 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
         {showPanel ? (
           <aside
             ref={panelRef}
-            className={`pdf-translate-panel${aiFocus ? " is-ai-focus" : ""}${panelTab === "ai" ? " is-ai-panel" : ""}`}
+            className={`pdf-translate-panel${aiFocus ? " is-ai-focus" : ""}${panelTab === "ai" ? " is-ai-panel" : ""}${panelTab === "vision" ? " is-vision-panel" : ""}${panelTab === "translate" ? " is-translate-panel" : ""}`}
           >
             <div className="pdf-panel-tabs">
               <Segmented
-                value={panelTab}
-                onChange={setPanelTab}
+                value={panelTab === "vision" ? "translate" : panelTab}
+                onChange={(tab) => { setPanelTab(tab); if (tab === "translate") setTranslationBackend("layout"); }}
                 options={[
-                  { value: "translate", label: "版式翻译" },
+                  { value: "translate", label: "翻译" },
                   { value: "ai", label: "AI 解读" },
                   { value: "notes", label: "手记" }
                 ]}
@@ -3542,8 +3781,10 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
               </button>
             </div>
 
-            {panelTab === "translate" ? (
-              <div className="pdf-translate-shell" ref={translateShellRef}>
+            {panelTab === "vision" ? (
+              <div className="pdf-vision-details-host" ref={setVisionDetailsHost} />
+            ) : panelTab === "translate" ? (
+              <div className="pdf-translate-shell" id="pdf-more-translation-methods" ref={translateShellRef}>
                 <div className="pdf-panel-head">
                   <div>
                     <Languages size={15} />
@@ -3567,7 +3808,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                   ) : null}
                 </div>
 
-                {/* 主力：版式翻译 —— 一个主按钮，状态一眼能懂 */}
+                {/* 次级工具：保留版式任务、图片辅助、文字翻译与 OCR 的原有行为。 */}
                 <section className="pdf-layout-primary-card" aria-label="版式翻译">
                   <div className="pdf-layout-primary-head">
                     <div>
@@ -3607,8 +3848,8 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                       <Sparkles size={14} />
                       <span>页面图片辅助翻译</span>
                     </label>
-                    <p>页面图片用于分析栏数、阅读顺序和区域，提供版式上下文，不直接重排页面。</p>
-                    <p>会发送页面图片，增加耗时与模型用量。<span>模型：{config?.model || "未配置"}</span></p>
+                    <p>翻译前分析原页结构；生成后对照检查译文，并尝试安全清理独立的重复原文。</p>
+                    <p>每页会发送原文和译文图片进行检查，增加耗时与模型用量；无法安全修复的问题需要人工核对。<span>模型：{config?.model || "未配置"}</span></p>
                     <div className="pdf-layout-assist-status" role="status" aria-live="polite">
                       {pdfMathState === "working" && layoutAssistEnabled && ["queued", "running", "analyzing", "rendering"].includes(currentLayoutPage.page?.assist?.status) ? <Loader2 size={12} className="spin" /> : <Sparkles size={12} />}
                       <span>
@@ -3617,6 +3858,39 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                           : "未启用页面图片辅助")}
                       </span>
                     </div>
+                    {currentLayoutPage.done && (currentLayoutPage.page?.translationIdentity?.model || currentModePdfMathResult?.identity?.model) ? (
+                      <p>本页译文模型：{currentLayoutPage.page?.translationIdentity?.model || currentModePdfMathResult.identity.model}</p>
+                    ) : null}
+                    {currentLayoutPage.page?.layoutQa ? (
+                      <div className="pdf-layout-review is-qa" role="status">
+                        {currentLayoutPage.page.layoutQa.status === "issues" ? (
+                          <>
+                            <strong>确定性检查发现 {currentLayoutPage.page.layoutQa.issues?.length || 0} 处问题：公式标记 {currentLayoutPage.page.layoutQa.counts?.latex || 0} · 英文残留 {currentLayoutPage.page.layoutQa.counts?.untranslated || 0} · 行重叠 {currentLayoutPage.page.layoutQa.counts?.overlap || 0} · 越界 {currentLayoutPage.page.layoutQa.counts?.outOfBounds || 0}</strong>
+                            <ul>{(currentLayoutPage.page.layoutQa.issues || []).slice(0, 4).map((issue, index) => <li key={index}>{issue.description}</li>)}</ul>
+                            {(currentLayoutPage.page.layoutQa.issues?.length || 0) > 4 ? <p>另有 {currentLayoutPage.page.layoutQa.issues.length - 4} 条未列出。</p> : null}
+                          </>
+                        ) : currentLayoutPage.page.layoutQa.status === "clear" ? <p>确定性检查通过（公式/英文残留/重叠）</p> : null}
+                      </div>
+                    ) : null}
+                    {currentLayoutPage.page?.status === "completed"
+                      && /重译失败/.test(`${currentLayoutPage.page?.progress || ""} ${currentLayoutPage.page?.error || ""}`) ? (
+                      <div className="pdf-layout-review" role="alert">
+                        <strong>重译未成功，当前显示的是原有译文：{`${currentLayoutPage.page?.error || currentLayoutPage.page?.progress || ""}`.replace(/^重译失败，已保留原有译文[：:]\s*/, "")}</strong>
+                      </div>
+                    ) : null}
+                    {layoutAssistEnabled && currentLayoutPage.page?.qualityReview ? (
+                      <div className="pdf-layout-review" role="status">
+                        {currentLayoutPage.page.qualityReview.repaired ? <p>已安全清理部分重复原文，并重新检查。</p> : null}
+                        {currentLayoutPage.page.qualityReview.status === "not-run" ? "此页复用已有产物，未做译后视觉检查；可用下方「重新翻译此页」生成检查。"
+                          : currentLayoutPage.page.qualityReview.status === "checking" ? "正在对照原文检查译文…"
+                          : currentLayoutPage.page.qualityReview.status === "failed" ? `译后检查失败／重译失败：${currentLayoutPage.page.qualityReview.error || "请核对本页。"}`
+                          : currentLayoutPage.page.qualityReview.status === "clear" ? "译后视觉检查未发现明显问题，请结合原文核对。"
+                          : currentLayoutPage.page.qualityReview.status === "issues" ? (
+                            <><strong>译后检查发现 {currentLayoutPage.page.qualityReview.issues.length} 处疑似问题，需要核对：</strong>
+                              <ul>{currentLayoutPage.page.qualityReview.issues.map((issue, index) => <li key={index}>{issue.description}</li>)}</ul></>
+                          ) : "译后视觉检查未完成，请核对本页。"}
+                      </div>
+                    ) : layoutAssistEnabled && currentLayoutPage.done ? <p>此页生成时未进行译后视觉检查。</p> : null}
                     {layoutAssistEnabled && !layoutAssistModeMismatch && (layoutAssistSummary.ready || layoutAssistSummary.fallback) ? <p>视觉分析成功 {layoutAssistSummary.ready} 页 · 普通版式回退 {layoutAssistSummary.fallback} 页。回退仅影响对应页，全文翻译继续。</p> : null}
                   </div>
 
@@ -3647,7 +3921,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                                   void translateWithPdfMath({ retranslatePage: pageNum, priorityPage: pageNum });
                                 }
                               }}
-                              disabled={!pdfSourceBase64 || !config || !pdfMathStatus.available || (!pdfMathJobId && !paperId)}
+                              disabled={!pdfSourceBase64 || !config || !pdfMathStatus.available || !pdfMathJobId}
                             >
                               重新翻译此页
                             </button>
@@ -3885,7 +4159,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                     <p>{currentPageTranslationText}</p>
                   </div>
                 ) : currentPageTranslationText ? (
-                  displayMode === "translated" && !pageIsOcr ? (
+                  displayMode === "translated" && !pageIsOcr && Boolean(pageTranslationLayouts[pageNum]?.length) ? (
                     <div className="pdf-page-translation-status">
                       <Check size={14} />
                       <span>本页已完成原位覆盖翻译，图片和版式保持不变。</span>
@@ -3897,6 +4171,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                         <span>本页全文翻译</span>
                         <Check size={13} />
                       </div>
+                      {!pageIsOcr && !pageTranslationLayouts[pageNum]?.length ? <div className="pdf-layout-fallback-notice" role="status">未获得可靠的位置标记，已改为完整文字阅读；原页保持不变，不进行强制对齐。复杂版面可尝试“视觉精读”。</div> : null}
                       <p>{pageTranslations[pageNum]}</p>
                     </div>
                   )
@@ -3945,7 +4220,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                   ) : (
                     <div className="pdf-no-text">
                       <p>这一页没有可提取的文字，可能是扫描版图片 PDF。</p>
-                      <span>可在“更多工具”中使用 OCR。</span>
+                      <span>可展开“文字翻译与 OCR”识别本页。</span>
                     </div>
                   )}
                 </div> : null}
@@ -4041,125 +4316,163 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
               </div>
             ) : (
               <div className="pdf-ai-shell">
-                <div className="pdf-panel-head">
-                  <div>
-                    <Sparkles size={15} />
+                <header className="pdf-ai-header">
+                  <div className="pdf-ai-header-main">
+                    <span className="pdf-ai-mark" aria-hidden="true"><Sparkles size={14} /></span>
                     <strong>AI 解读</strong>
-                    <span>{config ? `已启用 · ${config.model}` : "未配置 API"}</span>
-                    {aiFocus ? <em className="pdf-ai-focus-badge">已放大</em> : null}
+                    {config ? (
+                      <span className="pdf-ai-model" title={config.model}>{config.model}</span>
+                    ) : (
+                      <span className="pdf-ai-model is-off">未配置 API</span>
+                    )}
                   </div>
-                  {!aiFocus ? (
-                    <div className="pdf-panel-actions">
-                      <button
-                        type="button"
-                        className="pdf-ai-focus-toggle"
-                        onClick={() => setAiFocus(true)}
-                        title="放大侧栏 (Ctrl+Shift+F)"
-                      >
-                        <Maximize2 size={13} />
-                        放大
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
-
-                {aiFocus ? (
-                  <div className="pdf-ai-focus-bar">
-                    <span>侧栏已放大</span>
-                    <button type="button" onClick={() => setAiFocus(false)}>
-                      <BookOpen size={13} />
-                      回到 PDF
+                  <div className="pdf-ai-header-actions">
+                    {interpretResult ? (
+                      <details className="pdf-ai-menu">
+                        <summary title="重新解读" aria-label="重新解读"><RefreshCw size={14} /></summary>
+                        <div className="pdf-ai-menu-list" role="menu">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            disabled={interpretLoading || askLoading}
+                            onClick={(event) => {
+                              event.currentTarget.closest("details")?.removeAttribute("open");
+                              runInterpret("quick");
+                            }}
+                          >
+                            快速解读
+                            <em>摘要与结论</em>
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            disabled={interpretLoading || askLoading}
+                            onClick={(event) => {
+                              event.currentTarget.closest("details")?.removeAttribute("open");
+                              runInterpret("full");
+                            }}
+                          >
+                            完全解读
+                            <em>覆盖全文，更慢</em>
+                          </button>
+                        </div>
+                      </details>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="pdf-ai-icon-btn"
+                      onClick={() => setAiFocus((v) => !v)}
+                      title={aiFocus ? "还原侧栏 (Ctrl+Shift+F)" : "放大侧栏 (Ctrl+Shift+F)"}
+                      aria-label={aiFocus ? "还原侧栏" : "放大侧栏"}
+                    >
+                      {aiFocus ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
                     </button>
                   </div>
+                </header>
+
+                {interpretLoading ? (
+                  <div className="pdf-ai-progress" role="status" aria-live="polite">
+                    <Loader2 size={13} className="spin" />
+                    <span>{interpretProgress || "AI 正在读这篇论文…"}</span>
+                  </div>
                 ) : null}
-
-                <div className="pdf-ai-mode-row">
-                  <button
-                    className="pdf-ai-mode-btn"
-                    onClick={() => runInterpret("quick")}
-                    disabled={interpretLoading || askLoading}
-                    title="Ctrl+I"
-                  >
-                    {interpretLoading && interpretMeta?.mode !== "full" && interpretProgress ? (
-                      <Loader2 size={13} className="spin" />
-                    ) : null}
-                    快速解读
-                  </button>
-                  <button
-                    className="pdf-ai-mode-btn primary"
-                    onClick={() => runInterpret("full")}
-                    disabled={interpretLoading || askLoading}
-                    title="Ctrl+Shift+I"
-                  >
-                    {interpretLoading ? <Loader2 size={13} className="spin" /> : null}
-                    完全解读
-                  </button>
-                </div>
-                <p className="pdf-ai-hint">
-                  解读后 AI 会给出概述，并一步步抛出引导问题带你精读：作答后导师批改、点「下一步」继续，进度自动保存。
-                  快捷键 Ctrl+I / Ctrl+Shift+I · 放大侧栏 Ctrl+Shift+F
-                </p>
-                <UsageMeter
-                  usage={interpretMeta?.usage}
-                  model={interpretMeta?.model || config?.model || ""}
-                  estimateTokens={estimateTokensFromText(
-                    Object.values(effectiveTextByPage || {}).join("\n").slice(0, interpretMeta?.mode === "full" ? 28000 : 12000)
-                  )}
-                  usedChars={interpretMeta?.usedChars || 0}
-                  pageCoverage={interpretMeta?.pageCoverage || ""}
-                />
-
-                {interpretProgress ? <div className="pdf-translate-progress">{interpretProgress}</div> : null}
-                {interpretError ? <div className="pdf-config-hint">{interpretError}</div> : null}
+                {interpretError ? <div className="pdf-ai-notice is-error">{interpretError}</div> : null}
                 {!config ? (
-                  <div className="pdf-config-hint">需要先在设置中配置 API Key 才能解读。</div>
+                  <div className="pdf-ai-notice">需要先在设置中配置 API Key 才能解读。</div>
                 ) : null}
+                {saveInterpretationError ? <div className="pdf-ai-notice is-error">{saveInterpretationError}</div> : null}
 
                 <div className="pdf-ai-scroll" ref={aiScrollRef}>
-                  {interpretMeta && interpretResult ? (
-                    <div className="pdf-ai-meta-row">
-                      <div className="pdf-ai-meta">
-                        {interpretMeta.mode === "full" ? "完全解读" : "快速解读"}
-                        {interpretMeta.pageCoverage ? ` · 覆盖页 ${interpretMeta.pageCoverage}` : ""}
-                        {interpretMeta.usedChars ? ` · ${interpretMeta.usedChars} 字` : ""}
-                      </div>
-                      <div className="pdf-ai-save-actions">
-                        <span className={`pdf-ai-save-status ${saveInterpretationStatus === "error" ? "error" : ""}`} role="status">
-                          {saveInterpretationStatus === "saving" ? "保存中…" : saveInterpretationStatus === "saved" ? "已保存" : saveInterpretationStatus === "error" ? "保存失败" : "未保存"}
-                        </span>
-                        <button type="button" onClick={saveCurrentInterpretation} disabled={saveInterpretationStatus === "saving"}>
-                          {saveInterpretationStatus === "saving" ? "保存中" : "保存解读"}
+                  {!interpretResult && !interpretLoading ? (
+                    <div className="pdf-ai-welcome">
+                      <p className="pdf-ai-welcome-title">先把这篇论文读一遍</p>
+                      <p className="pdf-ai-welcome-text">
+                        AI 给出概述后，会用几个引导问题带你精读。回答会被逐条批改，进度自动保存，随时可以接着读。
+                      </p>
+                      <div className="pdf-ai-welcome-actions">
+                        <button
+                          type="button"
+                          className="pdf-ai-cta"
+                          onClick={() => runInterpret("quick")}
+                          disabled={!config || askLoading}
+                        >
+                          开始解读
+                        </button>
+                        <button
+                          type="button"
+                          className="pdf-ai-cta-ghost"
+                          onClick={() => runInterpret("full")}
+                          disabled={!config || askLoading}
+                        >
+                          完全解读
                         </button>
                       </div>
+                      <p className="pdf-ai-welcome-note">快速解读只读摘要层；完全解读覆盖全文，耗时更长。</p>
                     </div>
                   ) : null}
 
-                  {saveInterpretationError ? <div className="pdf-config-hint">{saveInterpretationError}</div> : null}
+                  {!interpretResult && interpretLoading ? (
+                    <div className="pdf-ai-loading" role="status" aria-live="polite">
+                      <Loader2 size={18} className="spin" />
+                      <span>{interpretProgress || "AI 正在读这篇论文…"}</span>
+                    </div>
+                  ) : null}
 
-                  {interpretResult?.evidence?.length ? (
-                    <EvidenceLinks items={interpretResult.evidence} onJump={jumpToEvidence} />
+                  {interpretMeta && interpretResult ? (
+                    <div className="pdf-ai-meta-row">
+                      <span className="pdf-ai-meta" title={interpretMeta.pageCoverage ? `覆盖页 ${interpretMeta.pageCoverage}` : ""}>
+                        {interpretMeta.mode === "full" ? "完全解读" : "快速解读"}
+                        {interpretMeta.usedChars ? ` · ${interpretMeta.usedChars.toLocaleString("en-US")} 字` : ""}
+                        {interpretMeta.pageCoverage ? ` · ${coveragePageCount(interpretMeta.pageCoverage)} 页` : ""}
+                      </span>
+                      <UsageMeter
+                        variant="inline"
+                        usage={interpretMeta?.usage}
+                        model={interpretMeta?.model || config?.model || ""}
+                        estimateTokens={estimateTokensFromText(
+                          Object.values(effectiveTextByPage || {}).join("\n").slice(0, interpretMeta?.mode === "full" ? 28000 : 12000)
+                        )}
+                        usedChars={interpretMeta?.usedChars || 0}
+                        pageCoverage={interpretMeta?.pageCoverage || ""}
+                      />
+                      <span className={`pdf-ai-save-status ${saveInterpretationStatus === "error" ? "error" : ""}`} role="status">
+                        {saveInterpretationStatus === "saving" ? "保存中…" : saveInterpretationStatus === "saved" ? "已保存" : saveInterpretationStatus === "error" ? "保存失败" : ""}
+                      </span>
+                      <button
+                        type="button"
+                        className="pdf-ai-save-btn"
+                        onClick={saveCurrentInterpretation}
+                        disabled={saveInterpretationStatus === "saving"}
+                        title="保存到文献库"
+                      >
+                        {saveInterpretationStatus === "saving" ? "保存中" : "保存"}
+                      </button>
+                    </div>
                   ) : null}
 
                   {interpretResult ? (
                     <div className="pdf-ai-result">
-                      <section className="pdf-ai-card pdf-ai-overview">
-                        <h4>论文概述</h4>
+                      <section className="pdf-ai-overview">
+                        <p className="pdf-ai-eyebrow">论文概述</p>
                         {interpretResult.oneSentence ? (
                           <p className="pdf-ai-overview-sentence">{interpretResult.oneSentence}</p>
                         ) : null}
                         {interpretResult.problem ? (
                           <p className="pdf-ai-overview-problem">
-                            <strong>核心问题：</strong>
+                            <span>核心问题</span>
                             {interpretResult.problem}
                           </p>
+                        ) : null}
+                        {interpretResult.evidence?.length ? (
+                          <EvidenceLinks items={interpretResult.evidence} onJump={jumpToEvidence} />
                         ) : null}
                         <button
                           type="button"
                           className="pdf-ai-fold-toggle"
                           onClick={() => setShowFullInterpretation((v) => !v)}
                         >
+                          {showFullInterpretation ? "收起完整解读" : "展开完整解读"}
                           <ChevronDown size={13} className={`pdf-ai-fold-chevron ${showFullInterpretation ? "up" : ""}`} />
-                          {showFullInterpretation ? "收起完整解读" : "查看完整解读"}
                         </button>
                       </section>
 
@@ -4302,7 +4615,13 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                                   <span className="pdf-ai-guided-step-no">第 {i + 1} 步</span>
                                   <strong>{step.title}</strong>
                                   {record ? (
-                                    <span className={`pdf-ai-verdict ${record.verdict}`}>
+                                    <span
+                                      className={`pdf-ai-verdict ${record.verdict}${record.verdictInitial && record.verdictInitial !== record.verdict ? " improved" : ""}`}
+                                      title={record.verdictNote || ""}
+                                    >
+                                      {record.verdictInitial && record.verdictInitial !== record.verdict ? (
+                                        <ArrowUpRight size={11} />
+                                      ) : null}
                                       {GUIDE_VERDICT_LABELS[record.verdict] || "已回答"}
                                     </span>
                                   ) : null}
@@ -4342,7 +4661,13 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
 
                               {guided.answers[guidedCurrentStep.id] ? (
                                 <>
-                                  <span className={`pdf-ai-verdict ${guided.answers[guidedCurrentStep.id].verdict}`}>
+                                  <span
+                                    className={`pdf-ai-verdict ${guided.answers[guidedCurrentStep.id].verdict}${guided.answers[guidedCurrentStep.id].verdictInitial && guided.answers[guidedCurrentStep.id].verdictInitial !== guided.answers[guidedCurrentStep.id].verdict ? " improved" : ""}`}
+                                    title={guided.answers[guidedCurrentStep.id].verdictNote || ""}
+                                  >
+                                    {guided.answers[guidedCurrentStep.id].verdictInitial && guided.answers[guidedCurrentStep.id].verdictInitial !== guided.answers[guidedCurrentStep.id].verdict ? (
+                                      <ArrowUpRight size={11} />
+                                    ) : null}
                                     {GUIDE_VERDICT_LABELS[guided.answers[guidedCurrentStep.id].verdict] || "已回答"}
                                   </span>
                                   <GuidedReviewBody record={guided.answers[guidedCurrentStep.id]} onJump={jumpToEvidence} />
@@ -4465,30 +4790,38 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
                   ) : null}
                 </div>
 
-                <div className="pdf-ai-ask">
-                  <textarea
-                    ref={askInputRef}
-                    className="pdf-ai-ask-input"
-                    rows={aiFocus ? 3 : 2}
-                    placeholder={interpretResult ? "继续追问这篇论文…" : "先完成解读后再追问"}
-                    value={askInput}
-                    disabled={!config || askLoading}
-                    onChange={(e) => setAskInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
-                        askFollowup();
-                      }
-                    }}
-                  />
-                  <button
-                    className="pdf-ai-ask-btn"
-                    onClick={askFollowup}
-                    disabled={!config || askLoading || !askInput.trim()}
-                  >
-                    {askLoading ? <Loader2 size={14} className="spin" /> : <Send size={14} />}
-                    提问
-                  </button>
+                <div className="pdf-ai-composer">
+                  <div className="pdf-ai-composer-box">
+                    <textarea
+                      ref={askInputRef}
+                      className="pdf-ai-ask-input"
+                      rows={2}
+                      placeholder={interpretResult ? "追问整篇论文…" : "先完成解读后再追问"}
+                      value={askInput}
+                      disabled={!config || askLoading}
+                      onChange={(e) => setAskInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          askFollowup();
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="pdf-ai-send-btn"
+                      onClick={askFollowup}
+                      disabled={!config || askLoading || !askInput.trim()}
+                      title="发送（Enter）"
+                      aria-label="发送追问"
+                    >
+                      {askLoading ? <Loader2 size={15} className="spin" /> : <Send size={15} />}
+                    </button>
+                  </div>
+                  <p className="pdf-ai-composer-hint">
+                    Enter 发送 · Shift+Enter 换行
+                    {interpretResult ? "" : " · 先完成上面的解读"}
+                  </p>
                 </div>
               </div>
             )}
@@ -4499,7 +4832,7 @@ export default function PdfReader({ url, title, doi, paperId, onClose, onOpenPor
               type="button"
               className="pdf-panel-expand-btn"
               onClick={() => expandSidePanel("translate")}
-              title="展开翻译侧栏"
+              title="展开翻译"
             >
               <PanelRightOpen size={15} />
               <span>翻译</span>
