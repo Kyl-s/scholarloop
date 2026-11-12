@@ -1,6 +1,4 @@
 import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import {
   addPathTask as addPathTaskToPath,
@@ -15,10 +13,9 @@ import { normalizeDoi } from "./pdfResolve.js";
 import { parseNoteAttachments, stripNoteAttachments } from "../src/noteAttachments.js";
 import { hasUsage, normalizeUsage } from "../src/llmUsage.js";
 import { normalizeGuidedState } from "../src/pdfInterpretation.js";
+import { DATA_DIR, dataPath } from "./runtimePaths.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, "..", "data");
-const DATA_FILE = path.join(DATA_DIR, "store.json");
+const DATA_FILE = dataPath("store.json");
 
 const defaultData = () => ({
   library: [],

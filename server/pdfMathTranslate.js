@@ -25,6 +25,7 @@ import {
 import { renderPdfPage, getPdfPageCount } from "./pdfPageRender.js";
 import { reviewTranslatedLayout } from "./pdfLayoutReview.js";
 import { trySafeLayoutRepair } from "./pdfSafeLayoutRepair.js";
+import { dataPath, TOOLS_DIR } from "./runtimePaths.js";
 import {
   compileLayoutAssistPrompt,
   createPageAssistState,
@@ -36,7 +37,7 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
-const JOBS_DIR = path.join(ROOT, "data", "pdf-translations");
+const JOBS_DIR = dataPath("pdf-translations");
 const PAPER_INDEX_DIR = path.join(JOBS_DIR, "by-paper");
 const WINDOWS_COMMAND_NAMES = ["pdf2zh.exe", "pdf2zh.cmd", "pdf2zh"];
 const POSIX_COMMAND_NAMES = ["pdf2zh"];
@@ -47,8 +48,8 @@ const CLEARED_PAPERS = new Set();
 const PAPER_GENERATIONS = new Map();
 const DELETING_PAPERS = new Set();
 const PDF_MATH_RELEASES_API = "https://api.github.com/repos/PDFMathTranslate/PDFMathTranslate-next/releases/latest";
-const PDF_MATH_INSTALL_DIR = path.join(ROOT, "tools", "pdf2zh");
-const PDF_MATH_INSTALL_TMP = path.join(ROOT, "tmp", "pdf2zh-install");
+const PDF_MATH_INSTALL_DIR = path.join(TOOLS_DIR, "pdf2zh");
+const PDF_MATH_INSTALL_TMP = dataPath("tmp", "pdf2zh-install");
 const pdfMathInstallState = {
   status: "idle",
   progress: "",
@@ -611,8 +612,8 @@ export function resolvePdfMathTranslateCommand(binary = "") {
   }
 
   const bundledCandidates = [
-    path.join(ROOT, "tools", "pdf2zh", "pdf2zh.exe"),
-    path.join(ROOT, "tools", "pdfmathtranslate", "pdf2zh.exe"),
+    path.join(TOOLS_DIR, "pdf2zh", "pdf2zh.exe"),
+    path.join(TOOLS_DIR, "pdfmathtranslate", "pdf2zh.exe"),
     path.join(ROOT, "pdf2zh.exe")
   ];
   for (const candidate of bundledCandidates) {

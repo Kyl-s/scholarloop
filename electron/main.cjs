@@ -7,6 +7,21 @@ const { createInstitutionPopupHandler, safeHttpUrl } = require("./institutionPop
 const { createAgentConfigVault } = require("./agentConfigVault.cjs");
 
 const ROOT = path.join(__dirname, "..");
+const DATA_DIR = app.isPackaged
+  ? path.join(process.env.LOCALAPPDATA || app.getPath("userData"), "ScholarLoop", "data")
+  : path.join(ROOT, "data");
+const TOOLS_DIR = app.isPackaged
+  ? path.join(process.env.LOCALAPPDATA || app.getPath("userData"), "ScholarLoop", "tools")
+  : path.join(ROOT, "tools");
+function writeStartupLog(message) {
+  try {
+    const dir = path.join(app.getPath("userData"), "logs");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, "desktop-startup.log"), `${new Date().toISOString()} ${message}\n`, "utf8");
+  } catch {
+    /* Startup diagnostics must never prevent the app from opening. */
+  }
+}
 const PRELOAD = path.join(__dirname, "preload.cjs");
 const DIST_INDEX = path.join(ROOT, "dist", "index.html");
 let serverProc = null;
@@ -85,6 +100,10 @@ function needsRebuild() {
 }
 
 async function ensureBuild() {
+  if (app.isPackaged) {
+    if (!fs.existsSync(DIST_INDEX)) throw new Error("安装包缺少前端文件，请重新安装 ScholarLoop");
+    return;
+  }
   if (!needsRebuild()) return;
   console.log("[scholarloop] rebuilding frontend (src newer than dist or dist missing)…");
   await new Promise((resolve, reject) => {
@@ -108,7 +127,7 @@ function stopServer() {
 
 function readMinimizeToTray() {
   try {
-    const raw = JSON.parse(fs.readFileSync(path.join(ROOT, "data", "store.json"), "utf8"));
+    const raw = JSON.parse(fs.readFileSync(path.join(DATA_DIR, "store.json"), "utf8"));
     return raw?.settings?.minimizeToTray !== false;
   } catch {
     return true;
@@ -148,8 +167,15 @@ function createTray() {
 function startServer() {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [path.join(ROOT, "server", "index.js")], {
-      cwd: ROOT,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", PORT: "0" },
+      cwd: app.isPackaged ? app.getPath("userData") : ROOT,
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: "1",
+        PORT: "0",
+        SCHOLARLOOP_DATA_DIR: DATA_DIR,
+        SCHOLARLOOP_TOOLS_DIR: TOOLS_DIR,
+        SCHOLARLOOP_VERSION: app.getVersion()
+      },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true
     });
@@ -175,6 +201,7 @@ function startServer() {
     });
     child.stderr.on("data", (chunk) => console.error("[scholarloop] server stderr:", chunk.toString()));
     child.on("error", (err) => {
+      writeStartupLog(`server spawn error: ${err.stack || err.message || String(err)}`);
       if (!settled) {
         settled = true;
         clearTimeout(timer);
@@ -182,6 +209,7 @@ function startServer() {
       }
     });
     child.on("exit", (code) => {
+      writeStartupLog(`server process exited before ready, code=${code}`);
       if (!settled) {
         settled = true;
         clearTimeout(timer);
@@ -201,11 +229,15 @@ if (!gotLock) {
 
   app.whenReady().then(async () => {
     try {
+      writeStartupLog(`app ready, packaged=${app.isPackaged}, distExists=${fs.existsSync(DIST_INDEX)}`);
       app.setAppUserModelId("com.scholarloop.desktop");
       await ensureBuild();
+      writeStartupLog("frontend ready");
       console.log("[scholarloop] build ok");
       const port = await startServer();
+      writeStartupLog(`server ready on port ${port}`);
       const healthy = await waitForHealth(port, 80);
+      writeStartupLog(`server health=${healthy}`);
       console.log(`[scholarloop] healthy=${healthy}`);
       if (!healthy) throw new Error(`本地服务启动失败 (port ${port})`);
 
@@ -725,7 +757,7 @@ if (!gotLock) {
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
           throw new Error("附件标识无效");
         }
-        const noteDir = path.join(ROOT, "data", "note-files");
+        const noteDir = path.join(DATA_DIR, "note-files");
         const metaPath = path.join(noteDir, `${id}.json`);
         const binPath = path.join(noteDir, `${id}.bin`);
         if (!fs.existsSync(metaPath) || !fs.existsSync(binPath)) throw new Error("附件不存在或已被删除");
@@ -745,6 +777,7 @@ if (!gotLock) {
         return { ok: true, mode: "default" };
       });
     } catch (err) {
+      writeStartupLog(`startup failed: ${err.stack || err.message || String(err)}`);
       stopServer();
       dialog.showErrorBox("ScholarLoop 启动失败", err.message || String(err));
       app.quit();

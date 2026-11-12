@@ -1,10 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
+import { dataPath } from "./runtimePaths.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const NOTE_FILES_DIR = path.join(__dirname, "..", "data", "note-files");
+export const NOTE_FILES_DIR = dataPath("note-files");
 const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_BYTES = 12 * 1024 * 1024;
 

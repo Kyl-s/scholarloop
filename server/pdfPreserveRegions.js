@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { toolsPath } from "./runtimePaths.js";
 import { looksLikeLatexMarkup, looksLikeReferenceLine } from "./pdfLayoutQa.js";
 import {
   collectFormulaSpanBoxes,
@@ -579,8 +580,8 @@ export function countUntranslatedClusters(lines = []) {
 }
 
 function pythonCandidates() {
-  const runtime = path.join(__dirname, "..", "tools", "pdf2zh", "runtime", "python.exe");
-  const site = path.join(__dirname, "..", "tools", "pdf2zh", "site-packages");
+  const runtime = toolsPath("pdf2zh", "runtime", "python.exe");
+  const site = toolsPath("pdf2zh", "site-packages");
   return [
     { cmd: process.env.PYTHON, env: {} },
     { cmd: process.env.PDFMATH_PYTHON, env: {} },

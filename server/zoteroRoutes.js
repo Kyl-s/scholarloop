@@ -1,7 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { fileURLToPath } from "node:url";
 import { createCredentialVault } from "./chatgptVault.js";
 import { createStateFile, createZoteroService } from "./zotero.js";
 import { readZoteroTranslation, getTranslationSignature } from "./zoteroTranslation.js";
@@ -11,8 +10,8 @@ import { downloadPdf, MAX_PDF_BYTES } from "./pdfImportShared.js";
 import { isPdfBuffer } from "./pdfResolve.js";
 import { fetchWithProxy, getProxyUrl } from "./proxy.js";
 import { isLocalChatGptRequest } from "./chatgptAuth.js";
+import { dataPath } from "./runtimePaths.js";
 
-const dataDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "data");
 export async function readZoteroPdf(paper) {
   const file = resolvePaperPdfPath(paper) || resolveLocalPdfPath(getPdfCache(paper.id)?.pdfUrl);
   if (file) {
@@ -32,7 +31,7 @@ export function installZoteroRoutes(app) {
   let service;
   const getService = () => service ||= createZoteroService({
     vault: createCredentialVault({ file: path.join(process.env.LOCALAPPDATA || os.homedir(), "ScholarLoop", "zotero", "credentials.dpapi"), fallbackFile: null }),
-    ...createStateFile(path.join(dataDir, "zotero-state.json")),
+    ...createStateFile(dataPath("zotero-state.json")),
     getLibrary: () => getData().library,
     readPdf: readZoteroPdf,
     readTranslation: readZoteroTranslation,

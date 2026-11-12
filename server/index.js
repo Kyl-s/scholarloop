@@ -79,12 +79,13 @@ import { extractModelText, modelResponseError } from "./modelResponse.js";
 import { chatGptAuth, isLocalChatGptRequest } from "./chatgptAuth.js";
 import { chatgptModelFetch, isChatGptModelUrl } from "./chatgptModel.js";
 import { handlePdfVisionTranslation } from "./pdfVisionTranslation.js";
+import { dataPath } from "./runtimePaths.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 8787;
-const APP_VERSION = process.env.SCHOLARLOOP_VERSION || "1.1.0";
-const DATA_FILE = path.join(__dirname, "..", "data", "store.json");
+const APP_VERSION = process.env.SCHOLARLOOP_VERSION || "1.2.1";
+const DATA_FILE = dataPath("store.json");
 const latestPaperSourceWrites = new Map();
 const latestPdfCacheWrites = new Map();
 const latestPdfMathPriorities = new Map();
@@ -366,7 +367,7 @@ app.get("/api/pdf", async (req, res) => {
 app.get("/api/pdf/file/:name", (req, res) => {
   const name = String(req.params.name || "");
   if (!/^[a-f0-9-]+\.pdf$/i.test(name)) return res.status(400).json({ error: "文件名不合法" });
-  const file = path.join(__dirname, "..", "data", "pdfs", name);
+  const file = dataPath("pdfs", name);
   if (!fs.existsSync(file)) return res.status(404).json({ error: "PDF 文件不存在" });
   // Do not serve stale/corrupt files as PDFs; every local source must pass the same magic check.
   let valid = false;

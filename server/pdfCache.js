@@ -1,11 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { fileURLToPath } from "node:url";
+import { DATA_DIR } from "./runtimePaths.js";
 import { randomUUID } from "node:crypto";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, "..", "data");
 const PDF_DIR = path.join(DATA_DIR, "pdfs");
 const CACHE_DIR = path.join(DATA_DIR, "pdf-cache");
 

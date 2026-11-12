@@ -1,6 +1,6 @@
 {
   "name": "scholar-loop",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "type": "module",
   "description": "ScholarLoop - research paper discovery, reading and writing loop",
@@ -11,6 +11,7 @@
     "dev:server": "node server/index.js",
     "dev:web": "vite",
     "build": "vite build",
+    "build:win": "npm run build && electron-builder --win nsis --x64",
     "test": "node --test \"src/**/*.test.js\" \"server/**/*.test.js\"",
     "smoke:learning-path": "node scripts/learning-path-toggle-smoke.mjs",
     "start": "node server/index.js",
@@ -34,7 +35,49 @@
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.0",
     "electron": "^43.3.0",
+    "electron-builder": "^26.18.0",
     "playwright": "^1.62.1",
     "vite": "^6.0.5"
+  },
+  "build": {
+    "appId": "com.scholarloop.desktop",
+    "productName": "ScholarLoop",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "server/**/*",
+      "src/**/*",
+      "shared/**/*",
+      "assets/**/*",
+      "LICENSE",
+      "package.json",
+      "!**/*.test.js",
+      "!**/*.test.cjs"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/app-v2.ico",
+      "artifactName": "ScholarLoop-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false,
+      "license": "LICENSE"
+    }
   }
 }

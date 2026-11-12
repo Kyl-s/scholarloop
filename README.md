@@ -63,7 +63,9 @@ AI 服务由你自行选择和配置。调用 AI 时，相关论文文本、问�
 
 ## 安装与运行
 
-需要安装 Node.js 和 npm。克隆仓库后，在项目目录运行：
+从源码运行需要安装 Node.js 和 npm。克隆仓库后，在项目目录运行：
+
+Windows x64 用户也可以从[最新 Release](https://github.com/Kyl-s/scholarloop/releases/latest)下载安装程序，安装后从桌面或开始菜单启动。
 
 ```bash
 npm install

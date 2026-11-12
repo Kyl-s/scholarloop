@@ -2,9 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { toolsPath } from "./runtimePaths.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.join(__dirname, "..");
 const SCRIPT = path.join(__dirname, "pdfPageRender.py");
 let cachedPython;
 
@@ -17,8 +17,8 @@ function existsFile(value) {
 }
 
 function pythonCandidates() {
-  const runtime = path.join(ROOT, "tools", "pdf2zh", "runtime", "python.exe");
-  const site = path.join(ROOT, "tools", "pdf2zh", "site-packages");
+  const runtime = toolsPath("pdf2zh", "runtime", "python.exe");
+  const site = toolsPath("pdf2zh", "site-packages");
   return [
     { cmd: process.env.PYTHON, extra: [], env: {} },
     { cmd: process.env.PDFMATH_PYTHON, extra: [], env: {} },
