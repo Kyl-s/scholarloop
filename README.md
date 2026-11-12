@@ -10,6 +10,8 @@ ScholarLoop 是一款面向学生和个人研究者的论文学习工作台。�
 
 ScholarLoop 以个人电脑为中心保存资料，也提供可选的 Zotero 同步和 iPhone 主屏幕访问方式。
 
+最新版本：[GitHub Releases](https://github.com/Kyl-s/scholarloop/releases/latest)
+
 ## 功能一览
 
 ### 从研究问题找到论文
