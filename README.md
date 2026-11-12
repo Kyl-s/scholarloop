@@ -1,118 +1,115 @@
 # ScholarLoop
 
-当前版本 **V1.1**。更新说明见 [CHANGELOG.md](CHANGELOG.md)。
+ScholarLoop 是一款面向学生和个人研究者的论文学习工作台。你可以从一个研究问题或一篇 PDF 开始，在同一个地方查找资料、读懂论文、记录想法，再把收获整理成学习计划或论文草稿。
 
-面向科研新手的本地论文学习与写作闭环：聚合检索、阅读翻译、文献管理、学习路径和论文草稿都在本机完成。
+它适合这样的研究过程：
 
-作者：[Phantom](https://github.com/Kyl-s)
+1. 搜索一个主题，比较并收藏相关论文。
+2. 打开论文，按自己的阅读节奏翻译、提问和做笔记。
+3. 回看阅读记录，继续学习路径，或把材料整理进写作草稿。
 
-仓库：[github.com/Kyl-s/scholarloop](https://github.com/Kyl-s/scholarloop)
+ScholarLoop 以个人电脑为中心保存资料，也提供可选的 Zotero 同步和 iPhone 主屏幕访问方式。
 
-个人数据只留在你的电脑上，仓库里不包含文献库、笔记、PDF 和 API Key。
+## 功能一览
 
-## 功能
+### 从研究问题找到论文
 
-- 六源聚合检索：arXiv、OpenAlex、Semantic Scholar、PubMed、Crossref、知网
-- AI 搜索与 Agent 专注学习；支持 OpenAI 兼容 API，也支持 ChatGPT 账号授权
-- 内置 PDF 阅读器：原文 / 译文 / 中英对照、OCR、AI 解读、视觉精读、手记
-- 版式翻译：调用本机 PDFMathTranslate（BabelDOC）逐页生成译文，尽量保留原排版
-  - 公式、作者/单位、参考文献按原文回贴，避免被误译或重排
-  - 译后做确定性检查和视觉复核；只有安全、可验证的修改才会写回 PDF
-  - 单页失败不会中断整本；失败页会保留在侧栏，可继续翻译
-- 视觉翻译：对扫描版或复杂版面，用支持图片输入的视觉模型按页生成覆盖式译文
-- AI 解读：快速 / 完全两种模式，支持引导式精读、追问和理解进度记录
-- 文献库、学习路径、思考记录、论文草稿
-- 桌面窗口：Electron，可最小化到托盘
+- 一次搜索多个学术来源：arXiv、OpenAlex、Semantic Scholar、PubMed、Crossref 和知网；IEEE Xplore、Web of Science 可按需启用。
+- 按年份和来源筛选结果，查看各来源的检索情况，并把感兴趣的论文加入文献库。
+- 对需要机构权限的资料，可在内置浏览器中打开学校图书馆或出版商网页；也可以导入本地 PDF、从链接导入 PDF，或补充论文信息。
+- AI 搜索助手可以根据研究主题检索论文、查看你的文献库和学习路径，并协助安排下一步学习。
 
-## 运行
+### 在一篇论文里完成阅读
+
+- 在内置 PDF 阅读器中查看原文、译文或中英对照；可用 OCR 识别扫描页面中的文字。
+- 选择一段文字进行翻译或提问，把术语和难点放回论文上下文里理解。
+- 对有文本层的 PDF，可启动版式翻译，尽可能沿用原文页面结构；遇到扫描页或复杂图文页面，可改用视觉翻译。
+- 视觉精读可按当前页或指定页码范围处理页面，并保留已完成页的结果，方便分段阅读。
+- AI 解读提供快速概览和全文解读，也可以通过引导式提问逐步理解论文的方法、结果和结论。
+- 阅读手记可以关联论文和页码，之后从笔记跳回对应页面；需要整理个人想法时，也可以创建不关联论文的手记。
+
+版式翻译需要在设置中安装 PDFMathTranslate。扫描件、特殊字体或复杂排版可能更适合视觉翻译。视觉功能需要所选 AI 服务支持图片输入。
+
+### 把阅读变成持续的学习
+
+- 根据研究领域、目标和当前基础生成分阶段学习路径，从建立领域地图逐步走到文献阅读、方法理解、实验复现和写作。
+- 每个阶段都可以调整每周投入时间、添加任务、拆分任务并记录进度。
+- Agent 专注学习可以结合当前任务、最近进展和卡点继续对话，也能协助检索论文、拆解论文或更新任务状态。
+- 学习路径、对话记录、阅读手记和思考记录集中保存，便于接着上次的进度继续。
+
+### 管理文献并开始写作
+
+- 文献库集中保存论文信息、PDF 来源、解读和阅读进度。
+- 可把文献及 PDF 附件单向同步到 Zotero，便于在 Zotero 客户端或移动设备中管理和阅读。ScholarLoop 不会把 Zotero 中的修改同步回来。
+- 在论文草稿中使用研究论文、综述或学位论文模板，按章节组织内容。
+- 可将阅读手记和独立手记插入草稿，并导出草稿，减少从阅读到写作之间的重复整理。
+
+## 适合你的 AI 服务
+
+ScholarLoop 可以连接 OpenAI 兼容的模型服务，也可以通过 ChatGPT 账号授权使用支持的模型。你可以配置多个服务并在应用中切换。普通文本问答使用文本模型即可；视觉翻译和视觉精读需要支持图片输入的模型。
+
+AI 服务由你自行选择和配置。调用 AI 时，相关论文文本、问题或页面图片会发送给所选服务处理；请按该服务的隐私政策和你的使用要求选择内容与模型。
+
+## 数据保存与隐私
+
+文献库、学习路径、草稿、手记、PDF 和阅读缓存保存在运行 ScholarLoop 的电脑上。应用不会把这些个人资料自动上传到 ScholarLoop 的服务器；使用外部模型或 Zotero 时，只有完成相应功能所需的内容会发送到你配置的服务。
+
+- 模型 API 配置保存在本机；Windows 桌面版的 ChatGPT 授权信息使用 Windows 用户凭据加密存储。
+- Zotero API 凭据由桌面版在本机加密保存。
+- 内置浏览器的登录会话保存在本机应用数据目录中。
+- 克隆仓库不会包含你的文献库、PDF、笔记或模型凭据。
+
+## 安装与运行
+
+需要安装 Node.js 和 npm。克隆仓库后，在项目目录运行：
 
 ```bash
 npm install
 npm run dev
 ```
 
-浏览器打开 http://localhost:5173 。
+开发模式启动后，打开 <http://localhost:5173>。
 
-也可以双击 `start-app.cmd`，或运行 `npm run desktop` 打开桌面窗口。
+也可以在 Windows 上运行 `start-app.cmd`，或使用桌面窗口：
 
-生产模式：
+```bash
+npm run desktop
+```
+
+构建前端并以本地服务运行：
 
 ```bash
 npm run build
 npm start
 ```
 
-打开 http://127.0.0.1:8787 。
+随后打开 <http://127.0.0.1:8787>。首次使用时，在「设置」中添加模型服务；需要版式翻译时，在「PDFMathTranslate」设置中安装翻译组件。具体功能所需的服务账号、访问权限和模型能力由对应服务提供。
 
-## 首次设置
+## iPhone 访问
 
-1. 打开「设置 → API 配置」，填写 OpenAI 兼容的 API Key、接口地址和模型；也可以使用 ChatGPT 账号授权，不必手填 Key。
-2. 如需 PDF 版式翻译：打开「设置 → PDFMathTranslate」，点「安装到本机」。安装包不会进 git。
-3. 如需视觉翻译 / 视觉精读：在 API 配置里选择一个支持图片输入的视觉模型。
-4. 外刊访问可在设置里填写网络代理；机构资源只保存入口网址，账号密码不入库；站内打开新窗口的链接会在内嵌浏览器新标签中打开，并共享本机登录会话。
+可以让电脑继续运行 ScholarLoop，再通过 Tailscale 私有网络从 iPhone Safari 打开，并添加到主屏幕。电脑和 iPhone 需要登录同一个 Tailscale 网络，电脑端服务也需要保持运行。
 
-## PDF 阅读器
-
-- 顶部切换「原文 / 译文 / 中英对照」，译文来源可选版式译文或视觉译文。
-- 右侧「翻译」页签：启动版式翻译、查看进度、重新翻译当前页；失败页会显示原因。
-- 工具栏「视觉精读」：选择当前页或页码范围，用视觉模型识别版面并生成覆盖式译文。
-- 右侧「AI 解读」页签：快速解读抓摘要与结论，完全解读覆盖全文；支持引导式精读、追问和理解进度。
-- 右侧「手记」页签：按论文和页码记录阅读笔记，可跳回原文位置。
-
-版式翻译由本机 PDFMathTranslate/BabelDOC 完成。遇到引擎级限制（例如 PDF 字体 CID 段落过多）时，该页可能无法生成译文；可以改用视觉翻译，或把相关页拆成单独 PDF 再翻。扫描版 PDF 没有文本层时，版式翻译会提示回退，视觉翻译更适合这类文档。
-
-## 测试
+电脑上启动 ScholarLoop 后，可运行：
 
 ```bash
-npm test
+tailscale serve --https=443 http://127.0.0.1:8787
 ```
 
-Windows 下如果并行测试遇到文件占用，改用串行：
+然后用 Tailscale 提供的 HTTPS 地址访问。论文、PDF 和个人记录仍保存在电脑上；这是一种连接到个人电脑的访问方式，不是独立的云端托管服务。
 
-```bash
-node --test --test-concurrency=1 "src/**/*.test.js" "server/**/*.test.js"
-```
+## 项目文档
 
-## iPhone PWA（个人使用）
+- [更新日志](CHANGELOG.md)
+- [PDF 版式翻译与视觉翻译](docs/pdf-vision-translation.md)
+- [Zotero 同步](docs/zotero-sync.md)
+- [ChatGPT 账号授权](docs/chatgpt-oauth.md)
 
-第一版 iPhone 访问方式不需要 Xcode、Cloudflare 或公网端口：电脑继续运行 ScholarLoop，iPhone 和电脑都登录同一个 Tailscale 个人网络，再由 Tailscale Serve 提供私有 HTTPS 地址。
+## 参与项目
 
-1. 在电脑和 iPhone 安装并登录 Tailscale，确认两台设备出现在同一个网络中。
-2. 运行 `scripts\start-scholarloop-tailscale.cmd`，或分别运行：
+欢迎通过 GitHub Issues 提交问题、建议或功能想法，也欢迎提交改进。开始修改前，请先查看相关文档和现有实现；提交前可运行 `npm test` 检查项目测试。
 
-   ```bash
-   npm start
-   tailscale serve --https=443 http://127.0.0.1:8787
-   ```
+## 许可
 
-3. 在 Tailscale 管理界面或命令输出中找到电脑的 `*.ts.net` HTTPS 地址。
-4. 用 iPhone Safari 打开该地址，确认 ScholarLoop 可用后选择“添加到主屏幕”。
+Copyright © 2026 ScholarLoop contributors.
 
-Tailscale Serve 只把本机 `127.0.0.1:8787` 提供给同一 Tailscale 网络内的设备，不需要开放 Windows 防火墙入站端口。使用 PWA 时 iPhone 上的 Tailscale 必须保持连接；电脑端服务关闭时，页面会显示无法连接电脑服务。个人数据、PDF 缓存和 AI 配置仍保存在电脑端。
-
-## 隐私
-
-这些只留在你自己的电脑上，不会进 git：
-
-- 文献库、笔记、学习路径、机构入口（学校名和 WebVPN 地址）写在 `data/store.json`
-- PDF 原文、缓存和版式译文在 `data/pdfs`、`data/pdf-cache`、`data/pdf-translations`
-- 内嵌浏览器登录 Cookie 在 Electron 用户目录的 `persist:scholarloop` 分区，不在项目文件夹里
-- API Key 在本机浏览器 localStorage；ChatGPT OAuth 凭据由 Windows DPAPI 加密保存在本机用户目录
-- `tools/pdf2zh`、日志、`.env`
-
-使用云端模型时，AI 解读会把正文摘录、视觉翻译会把页面图片发送到你配置的 API 服务；如果在意隐私，请使用本机或可信的模型服务。
-
-克隆下来是空数据，用自己的文献和配置即可。
-
-## 数据源
-
-聚合搜索走公开学术 API。Semantic Scholar 偶有限流，失败来源会自动跳过并重试；知网走公开检索接口；万方等暂以门户跳转 + 手动导入补全。
-
-## 技术栈
-
-- 前端：React 18 + Vite
-- 后端：Node.js + Express
-- 桌面：Electron
-- 存储：本地 JSON
-- PDF 处理：pdf.js、PDFMathTranslate/BabelDOC、PyMuPDF（按需调用）
-- 测试：node:test
+ScholarLoop 根据 [Apache License 2.0](LICENSE) 发布。第三方依赖和外部服务仍遵循各自的许可与使用条款。

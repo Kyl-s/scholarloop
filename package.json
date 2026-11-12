@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "ScholarLoop - research paper discovery, reading and writing loop",
+  "license": "Apache-2.0",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "concurrently -k -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
